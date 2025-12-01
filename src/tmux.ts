@@ -258,8 +258,21 @@ const activeCommands = new Map<string, CommandExecution>();
 const startMarkerText = 'TMUX_MCP_START';
 const endMarkerPrefix = "TMUX_MCP_DONE_";
 
+// Valid shells that can execute commands
+const VALID_SHELLS = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh'];
+
 // Execute a command in a tmux pane and track its execution
 export async function executeCommand(paneId: string, command: string, rawMode?: boolean, noEnter?: boolean): Promise<string> {
+  // Check if the pane is running a shell (only for non-raw, non-noEnter commands)
+  if (!rawMode && !noEnter) {
+    const format = "#{pane_current_command}";
+    const currentCommand = await executeTmux(`display-message -p -t '${paneId}' '${format}'`);
+
+    if (!VALID_SHELLS.includes(currentCommand.toLowerCase())) {
+      throw new Error(`Cannot execute command: pane ${paneId} is running '${currentCommand}', not a shell. Use rawMode for interactive applications.`);
+    }
+  }
+
   // Generate unique ID for this command execution
   const commandId = uuidv4();
 
