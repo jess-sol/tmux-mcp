@@ -65,6 +65,7 @@ The MCP server needs to know the shell only when executing commands, to properly
 - `find-session` - Find a tmux session by name
 - `list-windows` - List windows in a tmux session
 - `list-panes` - List panes in a tmux window
+- `list-active-panes` - List panes in the active tmux window
 - `capture-pane` - Capture content from a tmux pane
 - `create-session` - Create a new tmux session
 - `create-window` - Create a new window in a tmux session
@@ -74,4 +75,46 @@ The MCP server needs to know the shell only when executing commands, to properly
 - `kill-pane` - Kill a tmux pane by ID
 - `execute-command` - Execute a command in a tmux pane
 - `get-command-result` - Get the result of an executed command
+
+## Bash Integration (Optional)
+
+For cleaner command execution, add the following to your `.bashrc`. This keeps executed commands on their own line and out of bash history, while still allowing tmux-mcp to parse command output and exit codes.
+
+```bash
+# Exclude __mcp_start from history
+HISTIGNORE="__mcp_start:$HISTIGNORE"
+
+# --- tmux-mcp integration ---
+# __mcp_start is called by tmux-mcp before executing commands.
+# Uses PROMPT_COMMAND to output markers after commands complete.
+#
+# Flow: __mcp_start -> disables prompt generators, installs minimal PROMPT_COMMAND
+#       PROMPT_COMMAND fires after __mcp_start -> outputs START
+#       actual command runs
+#       PROMPT_COMMAND fires after command -> outputs DONE_<rc>, restores prompt
+__mcp_armed=false
+__mcp_saved_prompt_cmd=""
+__mcp_prompt_hook() {
+  local rc=$?
+  if ! $__mcp_armed; then
+    # First call after __mcp_start - output start marker
+    __mcp_armed=true
+    echo "TMUX_MCP_START"
+  else
+    # After real command - output end marker, restore and run PROMPT_COMMAND
+    __mcp_armed=false
+    PROMPT_COMMAND="$__mcp_saved_prompt_cmd"
+    echo "TMUX_MCP_DONE_$rc"
+    eval "$PROMPT_COMMAND"
+  fi
+  return $rc
+}
+
+__mcp_start() {
+  __mcp_armed=false
+  __mcp_saved_prompt_cmd="$PROMPT_COMMAND"
+  PROMPT_COMMAND="__mcp_prompt_hook"
+  PS1='$ '
+}
+```
 
