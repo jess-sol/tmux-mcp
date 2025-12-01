@@ -133,6 +133,32 @@ server.tool(
   }
 );
 
+// List panes in the active window - Tool
+server.tool(
+  "list-active-panes",
+  "List panes in the active tmux window",
+  {},
+  async () => {
+    try {
+      const panes = await tmux.listActivePanes();
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(panes, null, 2)
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error listing active panes: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
 // Capture pane content - Tool
 server.tool(
   "capture-pane",

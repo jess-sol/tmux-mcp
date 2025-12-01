@@ -23,6 +23,8 @@ export interface TmuxPane {
   id: string;
   windowId: string;
   active: boolean;
+  currentCommand: string;
+  cwd: string;
   title: string;
 }
 
@@ -132,20 +134,37 @@ export async function listWindows(sessionId: string): Promise<TmuxWindow[]> {
  * List panes in a window
  */
 export async function listPanes(windowId: string): Promise<TmuxPane[]> {
-  const format = "#{pane_id}:#{pane_title}:#{?pane_active,1,0}";
+  const format = "#{pane_id}|#{pane_title}|#{pane_current_command}|#{pane_current_path}|#{?pane_active,1,0}";
   const output = await executeTmux(`list-panes -t '${windowId}' -F '${format}'`);
 
   if (!output) return [];
 
   return output.split('\n').map(line => {
-    const [id, title, active] = line.split(':');
+    const [id, title, currentCommand, cwd, active] = line.split('|');
     return {
       id,
       windowId,
+      currentCommand,
+      cwd,
       title: title,
       active: active === '1'
     };
   });
+}
+
+/**
+ * List panes in the active window of the attached session
+ */
+export async function listActivePanes(): Promise<TmuxPane[]> {
+  const sessions = await listSessions();
+  const activeSession = sessions.find(s => s.attached);
+  if (!activeSession) return [];
+
+  const windows = await listWindows(activeSession.id);
+  const activeWindow = windows.find(w => w.active);
+  if (!activeWindow) return [];
+
+  return listPanes(activeWindow.id);
 }
 
 /**
