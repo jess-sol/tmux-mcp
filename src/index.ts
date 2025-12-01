@@ -376,7 +376,7 @@ server.tool(
   {
     paneId: z.string().describe("ID of the tmux pane"),
     command: z.string().describe("Command to execute"),
-    rawMode: z.boolean().optional().describe("Execute command without wrapper markers for REPL/interactive compatibility. Disables get-command-result status tracking. Use capture-pane after execution to verify command outcome."),
+    rawMode: z.boolean().optional().describe("ONLY for controlling interactive applications (REPLs, editors, TUIs) - NOT for running shell commands. Even long-running commands should use normal mode. Disables exit code tracking. Use capture-pane to see results."),
     noEnter: z.boolean().optional().describe("Send keystrokes without pressing Enter. For TUI navigation in apps like btop, vim, less. Supports special keys (Up, Down, Escape, Tab, etc.) and strings (sent char-by-char for proper filtering). Automatically applies rawMode. Use capture-pane after to see results.")
   },
   async ({ paneId, command, rawMode, noEnter }) => {
