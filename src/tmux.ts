@@ -263,14 +263,6 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
   // Generate unique ID for this command execution
   const commandId = uuidv4();
 
-  let fullCommand: string;
-  if (rawMode || noEnter) {
-    fullCommand = command;
-  } else {
-    const endMarkerText = getEndMarkerText();
-    fullCommand = `echo "${startMarkerText}"; ${command}; echo "${endMarkerText}"`;
-  }
-
   // Store command in tracking map
   activeCommands.set(commandId, {
     id: commandId,
@@ -289,18 +281,25 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
       'BSpace', 'Delete', 'Home', 'End', 'PageUp', 'PageDown',
       'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'];
 
-    if (specialKeys.includes(fullCommand)) {
+    if (specialKeys.includes(command)) {
       // Send special key as-is
-      await executeTmux(`send-keys -t '${paneId}' ${fullCommand}`);
+      await executeTmux(`send-keys -t '${paneId}' ${command}`);
     } else {
       // For regular text, send each character individually to ensure proper processing
       // This handles both single characters (like 'q', 'f') and strings (like 'beam')
-      for (const char of fullCommand) {
+      for (const char of command) {
         await executeTmux(`send-keys -t '${paneId}' '${char.replace(/'/g, "'\\''")}'`);
       }
     }
+  } else if (rawMode) {
+    // Raw mode: send command without markers (for REPLs, interactive apps)
+    await executeTmux(`send-keys -t '${paneId}' '${command.replace(/'/g, "'\\''")}' Enter`);
   } else {
-    await executeTmux(`send-keys -t '${paneId}' '${fullCommand.replace(/'/g, "'\\''")}' Enter`);
+    // Normal mode: use __mcp_start to set up markers via PROMPT_COMMAND
+    // __mcp_start outputs TMUX_MCP_START and installs a one-shot hook that
+    // outputs TMUX_MCP_DONE_<exit_code> after the command completes
+    const escapedCommand = command.replace(/'/g, "'\\''");
+    await executeTmux(`send-keys -t '${paneId}' '__mcp_start' Enter '${escapedCommand}' Enter`);
   }
 
   return commandId;
