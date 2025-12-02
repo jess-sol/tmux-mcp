@@ -259,7 +259,7 @@ const startMarkerText = 'TMUX_MCP_START';
 const endMarkerPrefix = "TMUX_MCP_DONE_";
 
 // Valid shells that can execute commands
-const VALID_SHELLS = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh'];
+const VALID_SHELLS = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'ssh', 'mosh'];
 
 // Execute a command in a tmux pane and track its execution
 export async function executeCommand(paneId: string, command: string, rawMode?: boolean, noEnter?: boolean): Promise<string> {
