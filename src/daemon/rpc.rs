@@ -48,7 +48,7 @@ pub async fn dispatch(
     state: &Arc<DaemonState>,
 ) -> Result<Value, RpcError> {
     match method {
-        "list_panes" => handle_list_panes(state).await,
+        "list_panes" => handle_list_panes(params, state).await,
         "command_history" => handle_command_history(params, state).await,
         "command_read" => handle_command_read(params, state).await,
         "command_run" => handle_command_run(params, state).await,
@@ -56,12 +56,47 @@ pub async fn dispatch(
     }
 }
 
+// --- Window scoping ---
+
+/// Resolve the caller's window from their origin_pane.
+/// Returns the window_id, or an error if the pane is not tracked.
+fn resolve_caller_window(registry: &PaneRegistry, params: &Value) -> Result<String, RpcError> {
+    let origin_pane = params["origin_pane"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("origin_pane is required"))?;
+
+    registry
+        .window_for_pane(origin_pane)
+        .map(|w| w.to_string())
+        .ok_or_else(|| RpcError::invalid_params(format!(
+            "Origin pane {} not tracked by daemon", origin_pane
+        )))
+}
+
+/// Validate that a target pane belongs to the caller's window.
+fn validate_pane_access(
+    registry: &PaneRegistry,
+    pane_id: &str,
+    caller_window: &str,
+) -> Result<(), RpcError> {
+    let pane_window = registry
+        .window_for_pane(pane_id)
+        .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+
+    if pane_window != caller_window {
+        return Err(RpcError::invalid_params(format!(
+            "Pane {} is in window {}, not your window {}",
+            pane_id, pane_window, caller_window
+        )));
+    }
+    Ok(())
+}
+
 // --- Handlers ---
 
 #[derive(Serialize)]
 struct PaneEntry {
     pane_id: String,
-    window_id: String,
     pid: Option<u32>,
     width: usize,
     height: usize,
@@ -72,11 +107,19 @@ struct PaneEntry {
     activity: String,
 }
 
-async fn handle_list_panes(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+async fn handle_list_panes(
+    params: &Value,
+    state: &Arc<DaemonState>,
+) -> Result<Value, RpcError> {
     let registry = state.registry.lock().await;
-    let mut entries = Vec::new();
+    let caller_window = resolve_caller_window(&registry, params)?;
 
+    let mut entries = Vec::new();
     for (_, tp) in registry.iter() {
+        if tp.window_id != caller_window {
+            continue;
+        }
+
         let (cwd, foreground) = if let Some(pid) = tp.pid {
             let info = proc::proc_info(pid);
             (
@@ -89,7 +132,6 @@ async fn handle_list_panes(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
 
         entries.push(PaneEntry {
             pane_id: tp.pane_id.clone(),
-            window_id: tp.window_id.clone(),
             pid: tp.pid,
             width: tp.processor.columns(),
             height: tp.processor.screen_lines(),
@@ -101,9 +143,7 @@ async fn handle_list_panes(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
         });
     }
 
-    // Sort by pane_id for stable output
     entries.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
-
     serde_json::to_value(&entries).map_err(|e| RpcError::internal(e.to_string()))
 }
 
@@ -117,10 +157,10 @@ async fn handle_command_history(
     let count = params["count"].as_u64().unwrap_or(10) as usize;
 
     let registry = state.registry.lock().await;
-    let tp = registry
-        .get(pane_id)
-        .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+    let caller_window = resolve_caller_window(&registry, params)?;
+    validate_pane_access(&registry, pane_id, &caller_window)?;
 
+    let tp = registry.get(pane_id).unwrap();
     let cmds = tp.processor.state().recent_commands(count);
     let entries: Vec<Value> = cmds
         .iter()
@@ -146,10 +186,10 @@ async fn handle_command_read(
     let count = params["count"].as_u64().unwrap_or(1) as usize;
 
     let registry = state.registry.lock().await;
-    let tp = registry
-        .get(pane_id)
-        .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+    let caller_window = resolve_caller_window(&registry, params)?;
+    validate_pane_access(&registry, pane_id, &caller_window)?;
 
+    let tp = registry.get(pane_id).unwrap();
     let cmds = tp.processor.state().recent_commands(count);
     let entries: Vec<Value> = cmds
         .iter()
@@ -177,12 +217,11 @@ async fn handle_command_run(
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
     let timeout_secs = params["timeout_secs"].as_u64().unwrap_or(30);
 
-    // Verify pane exists
+    // Validate window access
     {
         let registry = state.registry.lock().await;
-        if registry.get(pane_id).is_none() {
-            return Err(RpcError::invalid_params(format!("Unknown pane: {}", pane_id)));
-        }
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
     }
 
     // Get command count before sending, so we know which command is ours
@@ -211,7 +250,6 @@ async fn handle_command_run(
             if let Some(tp) = registry.get(pane_id) {
                 let cmds = &tp.processor.state().commands;
                 if cmds.len() > cmd_count_before {
-                    // New command completed — return it
                     let cmd = &cmds[0]; // newest is first
                     return Ok(json!({
                         "command": cmd.command,

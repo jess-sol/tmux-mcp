@@ -146,6 +146,11 @@ impl PaneRegistry {
         self.panes.iter()
     }
 
+    /// Get the window_id for a tracked pane.
+    pub fn window_for_pane(&self, pane_id: &str) -> Option<&str> {
+        self.panes.get(pane_id).map(|tp| tp.window_id.as_str())
+    }
+
     pub fn len(&self) -> usize {
         self.panes.len()
     }

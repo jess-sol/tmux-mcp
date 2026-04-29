@@ -15,13 +15,15 @@ use crate::client::DaemonClient;
 #[derive(Clone)]
 pub struct TmuxMcp {
     client: Arc<Mutex<DaemonClient>>,
+    origin_pane: String,
     tool_router: ToolRouter<Self>,
 }
 
 impl TmuxMcp {
-    pub fn new(client: DaemonClient) -> Self {
+    pub fn new(client: DaemonClient, origin_pane: String) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
+            origin_pane,
             tool_router: Self::tool_router(),
         }
     }
@@ -63,7 +65,7 @@ impl TmuxMcp {
     async fn list_panes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut client = self.client.lock().await;
         let result = client
-            .request("list_panes", json!({}))
+            .request("list_panes", json!({"origin_pane": self.origin_pane}))
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -82,6 +84,7 @@ impl TmuxMcp {
             .request(
                 "command_run",
                 json!({
+                    "origin_pane": self.origin_pane,
                     "pane_id": params.pane_id,
                     "command": params.command,
                     "timeout_secs": params.timeout_secs.unwrap_or(30),
@@ -90,9 +93,20 @@ impl TmuxMcp {
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let text = serde_json::to_string_pretty(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let output = result["output"].as_str().unwrap_or("");
+        let exit_code = result["exit_code"].as_i64();
+
+        let text = match exit_code {
+            Some(0) | None => output.to_string(),
+            Some(code) => format!("{}\n\nExit code: {}", output, code),
+        };
+
+        let is_error = exit_code.is_some_and(|c| c != 0);
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        if is_error {
+            result.is_error = Some(true);
+        }
+        Ok(result)
     }
 
     #[tool(description = "Read the output of recent commands in a pane")]
@@ -105,6 +119,7 @@ impl TmuxMcp {
             .request(
                 "command_read",
                 json!({
+                    "origin_pane": self.origin_pane,
                     "pane_id": params.pane_id,
                     "count": params.count.unwrap_or(1),
                 }),
@@ -112,9 +127,30 @@ impl TmuxMcp {
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let text = serde_json::to_string_pretty(&result)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        // Format each command's output as plain text
+        let mut text = String::new();
+        if let Some(cmds) = result.as_array() {
+            for cmd in cmds {
+                let command = cmd["command"].as_str().unwrap_or("");
+                let output = cmd["output"].as_str().unwrap_or("");
+                let exit_code = cmd["exit_code"].as_i64();
+
+                text.push_str(&format!("$ {}\n", command));
+                if !output.is_empty() {
+                    text.push_str(output);
+                    if !output.ends_with('\n') {
+                        text.push('\n');
+                    }
+                }
+                if let Some(code) = exit_code {
+                    if code != 0 {
+                        text.push_str(&format!("Exit code: {}\n", code));
+                    }
+                }
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(text.trim_end().to_string())]))
     }
 
     #[tool(description = "List command history for a pane, showing commands and their exit codes")]
@@ -127,6 +163,7 @@ impl TmuxMcp {
             .request(
                 "command_history",
                 json!({
+                    "origin_pane": self.origin_pane,
                     "pane_id": params.pane_id,
                     "count": params.count.unwrap_or(10),
                 }),

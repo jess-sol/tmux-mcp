@@ -63,10 +63,15 @@ async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
     let session = tmux_mcp::client::discover_session()
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    tracing::info!("Connecting to daemon for session {}", session);
+    let origin_pane = std::env::var("TMUX_PANE")
+        .map_err(|_| -> Box<dyn std::error::Error> {
+            "TMUX_PANE not set — are you inside a tmux session?".into()
+        })?;
+
+    tracing::info!("Connecting to daemon for session {}, origin pane {}", session, origin_pane);
     let client = tmux_mcp::client::DaemonClient::connect(&session).await?;
 
-    let server = tmux_mcp::mcp::TmuxMcp::new(client);
+    let server = tmux_mcp::mcp::TmuxMcp::new(client, origin_pane);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
 
