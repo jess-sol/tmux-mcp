@@ -204,6 +204,8 @@ impl PaneProcessor {
 mod tests {
     use super::*;
 
+    // --- Dependency contract: alacritty_terminal behavior we rely on ---
+
     #[test]
     fn empty_processor() {
         let p = PaneProcessor::new(24, 80);
@@ -258,6 +260,8 @@ mod tests {
         p.process_chunk(b"\x1b[31mred\x1b[0m normal");
         assert_eq!(p.screen_line_text(0), "red normal");
     }
+
+    // --- OSC boundary splitting ---
 
     #[test]
     fn osc133_events_extracted() {
@@ -318,7 +322,7 @@ mod tests {
         assert_eq!(p.screen_line_text(1), "line2");
     }
 
-    // --- OSC 133 implementation variants ---
+    // --- Command text sources and end-to-end cycles ---
 
     /// C with cmdline_url parameter — command text from URL-encoded param.
     #[test]
@@ -457,8 +461,6 @@ mod tests {
         assert!(cmds[0].output.contains("after"));
     }
 
-    // --- Existing tests ---
-
     #[test]
     fn full_command_cycle_with_state() {
         let mut p = PaneProcessor::new(24, 80);
@@ -488,21 +490,4 @@ mod tests {
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
     }
 
-    #[test]
-    fn full_command_cycle() {
-        let mut p = PaneProcessor::new(24, 80);
-
-        let e1 = p.process_chunk(
-            b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\\x1b]7;file://localhost/home/user\x1b\\$ \x1b]133;B\x1b\\"
-        );
-        assert_eq!(e1.len(), 4);
-
-        let e2 = p.process_chunk(b"echo hello\x1b]133;C\x1b\\\x1b]133;E;echo hello\x1b\\");
-        assert_eq!(e2.len(), 2);
-        assert_eq!(p.screen_line_text(0), "$ echo hello");
-
-        let e3 = p.process_chunk(b"\r\nhello\r\n\x1b]133;D;0\x1b\\");
-        assert_eq!(e3.len(), 1);
-        assert_eq!(p.screen_line_text(1), "hello");
-    }
 }

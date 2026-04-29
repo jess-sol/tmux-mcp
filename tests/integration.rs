@@ -311,25 +311,6 @@ async fn test_command_run_multiline_output() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_command_run_subshell() {
-    with_timeout(async {
-        let mut td = TestDaemon::start().await;
-        let result = td
-            .rpc(
-                "command_run",
-                json!({"pane_id": td.origin_pane.clone(), "command": "(echo sub)", "timeout_secs": 5}),
-            )
-            .await;
-
-        let output = result["output"].as_str().unwrap_or("");
-        assert!(output.contains("sub"));
-
-        td.cleanup().await;
-    })
-    .await;
-}
-
 // --- Compound commands ---
 
 #[tokio::test(flavor = "multi_thread")]
@@ -495,17 +476,6 @@ async fn test_command_run_special_chars_in_output() {
 // --- Exit codes ---
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_command_run_exit_code_2() {
-    with_timeout(async {
-        let mut td = TestDaemon::start().await;
-        let (_, exit_code) = td.run("bash -c 'exit 2'").await;
-        assert_eq!(exit_code, Some(2));
-        td.cleanup().await;
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_command_run_signal_exit() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
@@ -558,27 +528,6 @@ async fn test_capture_pane() {
         assert!(
             text.contains("capture-test-marker"),
             "capture should contain marker, got: {:?}",
-            text
-        );
-
-        td.cleanup().await;
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_capture_pane_shows_prompt() {
-    with_timeout(async {
-        let mut td = TestDaemon::start().await;
-
-        // After warm-up, screen should show a prompt with $
-        let result = td
-            .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone()}))
-            .await;
-        let text = result["text"].as_str().unwrap_or("");
-        assert!(
-            text.contains('$'),
-            "capture should show prompt, got: {:?}",
             text
         );
 

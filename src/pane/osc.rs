@@ -330,21 +330,16 @@ mod tests {
     // --- Non-intercepted OSCs pass through ---
 
     #[test]
-    fn osc_0_title_not_intercepted() {
-        let bytes = b"\x1b]0;Window Title\x07";
-        assert!(find_next_osc(bytes).is_none());
-    }
-
-    #[test]
-    fn osc_4_color_not_intercepted() {
-        let bytes = b"\x1b]4;1;rgb:ff/00/00\x07";
-        assert!(find_next_osc(bytes).is_none());
-    }
-
-    #[test]
-    fn osc_52_clipboard_not_intercepted() {
-        let bytes = b"\x1b]52;c;SGVsbG8=\x07";
-        assert!(find_next_osc(bytes).is_none());
+    fn non_intercepted_osc_types_ignored() {
+        for bytes in [
+            &b"\x1b]0;Window Title\x07"[..],       // window title
+            &b"\x1b]4;1;rgb:ff/00/00\x07"[..],     // color palette
+            &b"\x1b]52;c;SGVsbG8=\x07"[..],        // clipboard
+            &b"\x1b]10;rgb:ff/ff/ff\x07"[..],      // foreground color
+            &b"\x1b]8;;https://example.com\x07"[..], // hyperlink
+        ] {
+            assert!(find_next_osc(bytes).is_none(), "should ignore: {:?}", bytes);
+        }
     }
 
     #[test]

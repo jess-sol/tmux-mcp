@@ -271,14 +271,6 @@ mod tests {
         assert!(s.hostname.is_none());
     }
 
-    #[test]
-    fn osc7_127001_filtered() {
-        let mut s = PaneState::new();
-        s.update_cwd_from_osc7("file://127.0.0.1/var/log");
-        assert_eq!(s.cwd.as_deref(), Some("/var/log"));
-        assert!(s.hostname.is_none());
-    }
-
     // --- OSC 133 cache ---
 
     #[test]

@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_c_pre_exec_failure() {
+    fn d_without_c_bumps_completion_seq() {
         let mut p = Osc133Parser::new();
         let mut s = PaneState::new();
 
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn b_without_d_pre_exec_failure() {
+    fn a_without_d_abandons_executing_command() {
         let mut p = Osc133Parser::new();
         let mut s = PaneState::new();
 
@@ -892,23 +892,6 @@ mod tests {
         marker(&mut p, b'B', None, &mut s);
 
         assert!(s.commands.is_empty());
-        assert_eq!(p.phase, Osc133Phase::Input);
-    }
-
-    #[test]
-    fn failed_command_without_c_marker_bumps_completion_seq() {
-        let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
-
-        marker(&mut p, b'A', None, &mut s);
-        marker(&mut p, b'B', None, &mut s);
-
-        marker(&mut p, b'D', Some("1"), &mut s);
-        assert_eq!(s.completion_seq, 1);
-
-        marker(&mut p, b'A', None, &mut s);
-        marker(&mut p, b'B', None, &mut s);
-
         assert_eq!(p.phase, Osc133Phase::Input);
     }
 
