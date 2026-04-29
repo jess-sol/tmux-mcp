@@ -98,6 +98,105 @@ fn validate_pane_access(
 
 // --- Helpers ---
 
+/// Read parameters shared between command_run and command_read.
+struct ReadParams {
+    next: Option<usize>,
+    head: Option<usize>,
+    tail: Option<usize>,
+    search: Option<regex::Regex>,
+}
+
+impl ReadParams {
+    fn from_json(params: &Value) -> Result<Self, RpcError> {
+        let next = params["next"].as_u64().map(|n| n as usize);
+        let head = params["head"].as_u64().map(|n| n as usize);
+        let tail = params["tail"].as_u64().map(|n| n as usize);
+
+        let exclusive_count = next.is_some() as u8 + head.is_some() as u8 + tail.is_some() as u8;
+        if exclusive_count > 1 {
+            return Err(RpcError::invalid_params(
+                "next, head, and tail are mutually exclusive — use only one",
+            ));
+        }
+
+        let search = if let Some(pattern) = params["search"].as_str() {
+            Some(
+                regex::Regex::new(pattern)
+                    .map_err(|e| RpcError::invalid_params(format!("invalid search regex: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Self { next, head, tail, search })
+    }
+}
+
+/// Result of applying read params to command output.
+struct ReadResult {
+    lines: Vec<String>,
+    total_lines: usize,
+    skipped: usize,
+    matched: Option<usize>,  // number of search matches (if search was used)
+}
+
+/// Apply read params (next/head/tail/search) to a command record.
+/// Returns the selected lines and updates the cursor if `next` was used.
+fn apply_read_params(
+    output: &str,
+    cursor: &mut usize,
+    params: &ReadParams,
+) -> ReadResult {
+    let all_lines: Vec<&str> = if output.is_empty() {
+        Vec::new()
+    } else {
+        output.lines().collect()
+    };
+    let total_lines = all_lines.len();
+
+    // Select range
+    let (selected, skipped) = if let Some(n) = params.next {
+        let start = *cursor;
+        let end = total_lines.min(start + n);
+        let lines = all_lines.get(start..end).unwrap_or(&[]).to_vec();
+        let skipped = start;
+        *cursor = end; // advance cursor
+        (lines, skipped)
+    } else if let Some(n) = params.head {
+        let end = total_lines.min(n);
+        (all_lines[..end].to_vec(), 0)
+    } else if let Some(n) = params.tail {
+        let start = total_lines.saturating_sub(n);
+        (all_lines[start..].to_vec(), start)
+    } else {
+        // All output
+        (all_lines, 0)
+    };
+
+    // Apply search filter
+    if let Some(re) = &params.search {
+        let matched_lines: Vec<String> = selected
+            .iter()
+            .filter(|l| re.is_match(l))
+            .map(|l| l.to_string())
+            .collect();
+        let matched = matched_lines.len();
+        ReadResult {
+            lines: matched_lines,
+            total_lines,
+            skipped,
+            matched: Some(matched),
+        }
+    } else {
+        ReadResult {
+            lines: selected.into_iter().map(|s| s.to_string()).collect(),
+            total_lines,
+            skipped,
+            matched: None,
+        }
+    }
+}
+
 /// Get the leaf PID for a pane: the foreground process PID, or the shell PID if idle.
 fn get_leaf_pid(shell_pid: u32) -> u32 {
     proc::proc_info(shell_pid)
@@ -249,26 +348,102 @@ async fn handle_command_read(
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
-    let count = params["count"].as_u64().unwrap_or(1) as usize;
+    let command_id = params["command_id"].as_u64();
+    let timeout_secs = params["timeout_secs"].as_u64().unwrap_or(5);
+    let read_params = ReadParams::from_json(params)?;
 
-    let registry = state.registry.lock().await;
-    let caller_window = resolve_caller_window(&registry, params)?;
-    validate_pane_access(&registry, pane_id, &caller_window)?;
+    // Validate window access
+    {
+        let registry = state.registry.lock().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
+    }
 
-    let tp = registry.get(pane_id).unwrap();
-    let cmds = tp.processor.state().recent_commands(count);
-    let entries: Vec<Value> = cmds
-        .iter()
-        .map(|cmd| {
-            json!({
-                "command": cmd.command,
-                "exit_code": cmd.exit_code,
-                "output": cmd.output,
-            })
-        })
-        .collect();
+    // Find the target command
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
 
-    Ok(json!(entries))
+    loop {
+        {
+            let mut registry = state.registry.lock().await;
+            if let Some(tp) = registry.get_mut(pane_id) {
+                let pane_state = tp.processor.state_mut();
+                let cmd = if let Some(id) = command_id {
+                    pane_state.command_by_id_mut(id)
+                } else {
+                    // Default: most recent command
+                    pane_state.commands.front_mut()
+                };
+
+                if let Some(cmd) = cmd {
+                    // For completed commands or non-next reads, return immediately
+                    let is_next = read_params.next.is_some();
+                    if cmd.completed || !is_next {
+                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                        return Ok(json!({
+                            "command_id": cmd.id,
+                            "command": cmd.command,
+                            "status": if cmd.completed { "completed" } else { "running" },
+                            "exit_code": cmd.exit_code,
+                            "output": result.lines.join("\n"),
+                            "total_lines": result.total_lines,
+                            "lines_skipped": result.skipped,
+                            "search_matches": result.matched,
+                        }));
+                    }
+
+                    // next on active command — check if there's new output
+                    let cursor = cmd.read_cursor;
+                    let line_count = if cmd.output.is_empty() { 0 } else { cmd.output.lines().count() };
+                    if line_count > cursor {
+                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                        if !result.lines.is_empty() {
+                            return Ok(json!({
+                                "command_id": cmd.id,
+                                "command": cmd.command,
+                                "status": "running",
+                                "output": result.lines.join("\n"),
+                                "total_lines": result.total_lines,
+                            }));
+                        }
+                    }
+                } else if command_id.is_some() {
+                    return Err(RpcError::invalid_params(format!(
+                        "Command {} not found", command_id.unwrap()
+                    )));
+                } else {
+                    return Err(RpcError::invalid_params("No commands in history"));
+                }
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            // Timeout — return whatever we have
+            let mut registry = state.registry.lock().await;
+            if let Some(tp) = registry.get_mut(pane_id) {
+                let pane_state = tp.processor.state_mut();
+                let cmd = if let Some(id) = command_id {
+                    pane_state.command_by_id_mut(id)
+                } else {
+                    pane_state.commands.front_mut()
+                };
+
+                if let Some(cmd) = cmd {
+                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": if cmd.completed { "completed" } else { "running" },
+                        "exit_code": cmd.exit_code,
+                        "output": result.lines.join("\n"),
+                        "total_lines": result.total_lines,
+                    }));
+                }
+            }
+            return Err(RpcError::internal("No command found"));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn handle_command_run(
@@ -377,6 +552,9 @@ async fn handle_command_run(
         }
     }
 
+    // Parse read params
+    let read_params = ReadParams::from_json(params)?;
+
     // --- Send the command ---
     let seq_before = {
         let registry = state.registry.lock().await;
@@ -419,7 +597,6 @@ async fn handle_command_run(
     }
 
     if !marker_seen {
-        // OSC 133 stopped working — command was already sent, pane state uncertain
         tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
         let mut registry = state.registry.lock().await;
         if let Some(tp) = registry.get_mut(pane_id) {
@@ -433,7 +610,7 @@ async fn handle_command_run(
         )));
     }
 
-    // --- Poll for completion ---
+    // --- Poll for completion or timeout ---
     let deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
 
@@ -441,33 +618,48 @@ async fn handle_command_run(
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         {
-            let registry = state.registry.lock().await;
-            if let Some(tp) = registry.get(pane_id) {
-                let pane_state = tp.processor.state();
-                if pane_state.completion_seq > seq_before {
-                    if let Some(cmd) = pane_state.commands.front() {
-                        if cmd.id > 0 {
-                            return Ok(json!({
-                                "command": cmd.command,
-                                "exit_code": cmd.exit_code,
-                                "output": cmd.output,
-                            }));
-                        }
+            let mut registry = state.registry.lock().await;
+            if let Some(tp) = registry.get_mut(pane_id) {
+                let pane_state = tp.processor.state_mut();
+                if let Some(cmd) = pane_state.commands.front_mut() {
+                    if cmd.completed {
+                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                        return Ok(json!({
+                            "command_id": cmd.id,
+                            "command": cmd.command,
+                            "status": "completed",
+                            "exit_code": cmd.exit_code,
+                            "output": result.lines.join("\n"),
+                            "total_lines": result.total_lines,
+                            "lines_skipped": result.skipped,
+                            "search_matches": result.matched,
+                        }));
                     }
-                    return Ok(json!({
-                        "command": null,
-                        "exit_code": pane_state.last_exit_code,
-                        "output": "",
-                    }));
                 }
             }
         }
 
         if tokio::time::Instant::now() >= deadline {
-            return Err(RpcError::internal(format!(
-                "Command timed out after {}s",
-                timeout_secs
-            )));
+            // Timeout — return partial output, command still running
+            let mut registry = state.registry.lock().await;
+            if let Some(tp) = registry.get_mut(pane_id) {
+                let pane_state = tp.processor.state_mut();
+                if let Some(cmd) = pane_state.commands.front_mut() {
+                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "running",
+                        "output": result.lines.join("\n"),
+                        "total_lines": result.total_lines,
+                    }));
+                }
+            }
+            return Ok(json!({
+                "status": "running",
+                "output": "",
+                "total_lines": 0,
+            }));
         }
     }
 }

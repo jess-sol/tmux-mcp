@@ -39,14 +39,32 @@ pub struct CommandRunParams {
     pub command: String,
     #[schemars(description = "Timeout in seconds (default 30)")]
     pub timeout_secs: Option<u64>,
+    #[schemars(description = "Show next N lines from cursor (advances cursor). Mutually exclusive with head/tail.")]
+    pub next: Option<u64>,
+    #[schemars(description = "Show first N lines. Mutually exclusive with next/tail.")]
+    pub head: Option<u64>,
+    #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
+    pub tail: Option<u64>,
+    #[schemars(description = "Filter output to lines matching this regex pattern")]
+    pub search: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CommandReadParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
-    #[schemars(description = "Number of recent commands to read (default 1)")]
-    pub count: Option<u64>,
+    #[schemars(description = "Command ID to read (default: current/last command)")]
+    pub command_id: Option<u64>,
+    #[schemars(description = "Timeout in seconds — how long to wait for new output (default 5)")]
+    pub timeout_secs: Option<u64>,
+    #[schemars(description = "Show next N lines from cursor (advances cursor). Mutually exclusive with head/tail.")]
+    pub next: Option<u64>,
+    #[schemars(description = "Show first N lines. Mutually exclusive with next/tail.")]
+    pub head: Option<u64>,
+    #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
+    pub tail: Option<u64>,
+    #[schemars(description = "Filter output to lines matching this regex pattern")]
+    pub search: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -81,6 +99,85 @@ pub struct SendKeysParams {
     pub keys: String,
 }
 
+// --- Response formatting ---
+
+/// Format a command_run or command_read result with context hints for the LLM.
+fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
+    let status = result["status"].as_str().unwrap_or("unknown");
+    let output = result["output"].as_str().unwrap_or("");
+    let exit_code = result["exit_code"].as_i64();
+    let command_id = result["command_id"].as_u64();
+    let total_lines = result["total_lines"].as_u64().unwrap_or(0);
+    let command = result["command"].as_str().unwrap_or("");
+
+    let lines_skipped = result["lines_skipped"].as_u64().unwrap_or(0);
+    let search_matches = result["search_matches"].as_u64();
+
+    let mut text = String::new();
+
+    // Command header for command_run
+    if is_run && !command.is_empty() {
+        text.push_str(&format!("$ {}\n", command));
+    }
+
+    // Skipped lines hint
+    if lines_skipped > 0 {
+        text.push_str(&format!("<skipped {} already-read lines>\n", lines_skipped));
+    }
+
+    // Output
+    if !output.is_empty() {
+        text.push_str(output);
+        if !output.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+
+    // Status footer
+    match status {
+        "completed" => {
+            if let Some(code) = exit_code {
+                text.push_str(&format!("\nExit code: {}", code));
+            }
+            if let Some(matches) = search_matches {
+                text.push_str(&format!("\n[{} matches in {} lines.]", matches, total_lines));
+            }
+            if output.is_empty() && !is_run {
+                if let Some(id) = command_id {
+                    text.push_str(&format!(
+                        "\n[Command {} completed. No unread output. Use head, tail, or search to review full output ({} lines).]",
+                        id, total_lines
+                    ));
+                }
+            }
+        }
+        "running" => {
+            if let Some(id) = command_id {
+                if output.is_empty() {
+                    text.push_str(&format!(
+                        "\n[No new output. Command still running (id={}). Increase timeout_secs or use send_keys C-c to cancel.]",
+                        id
+                    ));
+                } else {
+                    let lines_shown = output.lines().count();
+                    let mut hint = format!(
+                        "\n[Command still running (id={}). {} lines shown, {} total.",
+                        id, lines_shown, total_lines
+                    );
+                    if let Some(matches) = search_matches {
+                        hint.push_str(&format!(" {} search matches.", matches));
+                    }
+                    hint.push_str(" Use command_read to continue, or send_keys C-c to cancel.]");
+                    text.push_str(&hint);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    text.trim_end().to_string()
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -98,83 +195,66 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Run a shell command in a pane and wait for it to complete. Returns the command output and exit code.")]
+    #[tool(description = "Run a shell command in a pane and wait for it to complete. Returns output and exit code. Use next/head/tail/search to control output. On timeout, returns partial output — use command_read to continue.")]
     async fn command_run(
         &self,
         Parameters(params): Parameters<CommandRunParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut rpc_params = json!({
+            "origin_pane": self.origin_pane,
+            "pane_id": params.pane_id,
+            "command": params.command,
+            "timeout_secs": params.timeout_secs.unwrap_or(30),
+        });
+        if let Some(n) = params.next { rpc_params["next"] = json!(n); }
+        if let Some(n) = params.head { rpc_params["head"] = json!(n); }
+        if let Some(n) = params.tail { rpc_params["tail"] = json!(n); }
+        if let Some(ref s) = params.search { rpc_params["search"] = json!(s); }
+
         let mut client = self.client.lock().await;
         let result = client
-            .request(
-                "command_run",
-                json!({
-                    "origin_pane": self.origin_pane,
-                    "pane_id": params.pane_id,
-                    "command": params.command,
-                    "timeout_secs": params.timeout_secs.unwrap_or(30),
-                }),
-            )
+            .request("command_run", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let output = result["output"].as_str().unwrap_or("");
-        let exit_code = result["exit_code"].as_i64();
-
-        let text = match exit_code {
-            Some(0) | None => output.to_string(),
-            Some(code) => format!("{}\n\nExit code: {}", output, code),
-        };
-
-        let is_error = exit_code.is_some_and(|c| c != 0);
-        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        let text = format_command_result(&result, true);
+        let is_error = result["exit_code"].as_i64().is_some_and(|c| c != 0);
+        let mut call_result = CallToolResult::success(vec![Content::text(text)]);
         if is_error {
-            result.is_error = Some(true);
+            call_result.is_error = Some(true);
         }
-        Ok(result)
+        Ok(call_result)
     }
 
-    #[tool(description = "Read the output of recent commands in a pane")]
+    #[tool(description = "Read output of a command. Defaults to current/last command. Use next to stream new output, head/tail to view ranges, search to filter by regex. For active commands, waits up to timeout_secs for new output.")]
     async fn command_read(
         &self,
         Parameters(params): Parameters<CommandReadParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut rpc_params = json!({
+            "origin_pane": self.origin_pane,
+            "pane_id": params.pane_id,
+            "timeout_secs": params.timeout_secs.unwrap_or(5),
+        });
+        if let Some(id) = params.command_id { rpc_params["command_id"] = json!(id); }
+        if let Some(n) = params.next { rpc_params["next"] = json!(n); }
+        if let Some(n) = params.head { rpc_params["head"] = json!(n); }
+        if let Some(n) = params.tail { rpc_params["tail"] = json!(n); }
+        if let Some(ref s) = params.search { rpc_params["search"] = json!(s); }
+
         let mut client = self.client.lock().await;
         let result = client
-            .request(
-                "command_read",
-                json!({
-                    "origin_pane": self.origin_pane,
-                    "pane_id": params.pane_id,
-                    "count": params.count.unwrap_or(1),
-                }),
-            )
+            .request("command_read", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        // Format each command's output as plain text
-        let mut text = String::new();
-        if let Some(cmds) = result.as_array() {
-            for cmd in cmds {
-                let command = cmd["command"].as_str().unwrap_or("");
-                let output = cmd["output"].as_str().unwrap_or("");
-                let exit_code = cmd["exit_code"].as_i64();
-
-                text.push_str(&format!("$ {}\n", command));
-                if !output.is_empty() {
-                    text.push_str(output);
-                    if !output.ends_with('\n') {
-                        text.push('\n');
-                    }
-                }
-                if let Some(code) = exit_code {
-                    if code != 0 {
-                        text.push_str(&format!("Exit code: {}\n", code));
-                    }
-                }
-            }
+        let text = format_command_result(&result, false);
+        let is_error = result["exit_code"].as_i64().is_some_and(|c| c != 0);
+        let mut call_result = CallToolResult::success(vec![Content::text(text)]);
+        if is_error {
+            call_result.is_error = Some(true);
         }
-
-        Ok(CallToolResult::success(vec![Content::text(text.trim_end().to_string())]))
+        Ok(call_result)
     }
 
     #[tool(description = "Capture visible text from a pane's screen buffer. Works regardless of what's running in the pane.")]

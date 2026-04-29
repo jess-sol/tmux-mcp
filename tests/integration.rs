@@ -278,13 +278,12 @@ async fn test_command_read() {
         let result = td
             .rpc(
                 "command_read",
-                json!({"pane_id": td.origin_pane.clone(), "count": 1}),
+                json!({"pane_id": td.origin_pane.clone()}),
             )
             .await;
-        let cmds = result.as_array().expect("command_read should return array");
-        assert!(!cmds.is_empty());
-        let output = cmds[0]["output"].as_str().unwrap_or("");
+        let output = result["output"].as_str().unwrap_or("");
         assert!(output.contains("readtest"), "output should contain 'readtest', got: {:?}", output);
+        assert_eq!(result["status"].as_str(), Some("completed"));
 
         td.cleanup().await;
     })
