@@ -1,8 +1,7 @@
 //! Low-level tmux control mode connection.
 //!
-//! Spawns `tmux -C attach-session`, provides async `execute()` for sending
-//! commands and receiving responses, and exposes a notification channel for
-//! %output and other tmux events.
+//! Spawns `tmux -C attach-session`, provides async command execution and
+//! notification receiving as two independent types to prevent deadlocks.
 
 use std::process::Stdio;
 
@@ -33,61 +32,73 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-// --- RawTmuxConnection ---
+// --- Split connection types ---
 
-pub struct RawTmuxConnection {
+/// Command-sending half of the tmux connection.
+/// Send commands, keys, enable/disable output. Goes behind `Arc<Mutex<>>`.
+pub struct TmuxCommands {
     stdin: ChildStdin,
     cmd_tx: mpsc::Sender<reader::CommandRegistration>,
-    notification_rx: mpsc::Receiver<Notification>,
     _child: Child,
     _reader_handle: tokio::task::JoinHandle<()>,
     session: String,
 }
 
-impl RawTmuxConnection {
-    /// Attach to a tmux session in control mode.
-    ///
-    /// `session` is the session target (name or ID, e.g. "main" or "$0").
-    /// Spawns `tmux -C attach-session -t <session>` and starts the reader
-    /// task for response/notification separation.
-    pub async fn connect(session: &str) -> Result<Self> {
-        tracing::info!("Connecting to tmux session {}", session);
+/// Notification-receiving half of the tmux connection.
+/// Used directly by the event loop — never behind a mutex.
+pub struct TmuxNotifications {
+    rx: mpsc::Receiver<Notification>,
+}
 
-        let mut cmd = Command::new("tmux");
-        cmd.args(["-C", "attach-session", "-t", session]);
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::inherit());
-        cmd.kill_on_drop(true);
+/// Connect to a tmux session in control mode.
+///
+/// Returns split halves: `TmuxCommands` for sending commands (goes behind mutex)
+/// and `TmuxNotifications` for receiving events (used directly by event loop).
+/// This split makes deadlock structurally impossible.
+pub async fn connect(session: &str) -> Result<(TmuxCommands, TmuxNotifications)> {
+    tracing::info!("Connecting to tmux session {}", session);
 
-        let mut child = cmd.spawn().context(SpawnSnafu)?;
+    let mut cmd = Command::new("tmux");
+    cmd.args(["-C", "attach-session", "-t", session]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::inherit());
+    cmd.kill_on_drop(true);
 
-        let stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
+    let mut child = cmd.spawn().context(SpawnSnafu)?;
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<reader::CommandRegistration>(32);
-        let (notification_tx, notification_rx) = mpsc::channel::<Notification>(4096);
+    let stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
 
-        let reader_handle = reader::spawn_reader(stdout, cmd_rx, notification_tx);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<reader::CommandRegistration>(32);
+    let (notification_tx, notification_rx) = mpsc::channel::<Notification>(4096);
 
-        let mut conn = Self {
-            stdin,
-            cmd_tx,
-            notification_rx,
-            _child: child,
-            _reader_handle: reader_handle,
-            session: session.to_string(),
-        };
+    let reader_handle = reader::spawn_reader(stdout, cmd_rx, notification_tx);
 
-        // Consume initial attach response. tmux -C implicitly runs attach,
-        // which sends a response block we need to drain.
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let init = conn.execute("display-message").await;
-        tracing::debug!("Initial display-message result: {:?}", init);
+    let mut commands = TmuxCommands {
+        stdin,
+        cmd_tx,
+        _child: child,
+        _reader_handle: reader_handle,
+        session: session.to_string(),
+    };
 
-        Ok(conn)
-    }
+    let notifications = TmuxNotifications {
+        rx: notification_rx,
+    };
 
+    // Consume initial attach response. tmux -C implicitly runs attach,
+    // which sends a response block we need to drain.
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    let init = commands.execute("display-message").await;
+    tracing::debug!("Initial display-message result: {:?}", init);
+
+    Ok((commands, notifications))
+}
+
+// --- TmuxCommands ---
+
+impl TmuxCommands {
     pub fn session(&self) -> &str {
         &self.session
     }
@@ -101,8 +112,6 @@ impl RawTmuxConnection {
         let (response_tx, response_rx) = oneshot::channel();
 
         // Register the command with the reader BEFORE writing to stdin.
-        // This prevents a race where tmux responds before the reader
-        // knows to expect it.
         self.cmd_tx
             .send((command.to_string(), response_tx))
             .await
@@ -128,16 +137,7 @@ impl RawTmuxConnection {
         }
     }
 
-    /// Receive the next notification from tmux.
-    pub async fn recv_notification(&mut self) -> Option<Notification> {
-        self.notification_rx.recv().await
-    }
-
     /// Send keys to a pane without waiting for completion.
-    ///
-    /// Handles multiline input by splitting on newlines and sending
-    /// C-j between parts (tmux control mode uses newlines as command
-    /// separators, so we can't send literal newlines).
     pub async fn send_keys(&mut self, target: &str, keys: &str) -> Result<()> {
         let lines: Vec<&str> = keys.split('\n').collect();
         for (i, line) in lines.iter().enumerate() {
@@ -200,5 +200,15 @@ impl RawTmuxConnection {
         output.trim().parse::<u32>().map_err(|_| Error::CommandFailed {
             message: format!("invalid pane_pid: {}", output.trim()),
         })
+    }
+}
+
+// --- TmuxNotifications ---
+
+impl TmuxNotifications {
+    /// Receive the next notification from tmux.
+    /// Returns `None` when the connection closes.
+    pub async fn recv(&mut self) -> Option<Notification> {
+        self.rx.recv().await
     }
 }

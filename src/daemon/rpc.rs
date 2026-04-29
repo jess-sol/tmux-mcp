@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::pane::registry::PaneRegistry;
 use crate::proc;
-use crate::tmux::connection::RawTmuxConnection;
+use crate::tmux::connection::TmuxCommands;
 
 /// RPC error with JSON-RPC error code.
 #[derive(Debug)]
@@ -37,7 +37,7 @@ impl RpcError {
 
 /// Shared daemon state accessible to RPC handlers.
 pub struct DaemonState {
-    pub conn: Mutex<RawTmuxConnection>,
+    pub conn: Mutex<TmuxCommands>,
     pub registry: Mutex<PaneRegistry>,
 }
 
