@@ -17,7 +17,7 @@
 /// it (new cycle). This captures output even when C is absent (subshells,
 /// shells without preexec support).
 
-use crate::pane::state::{Activity, PaneState};
+use crate::pane::state::{Activity, TerminalState};
 
 // --- State Machine ---
 
@@ -85,7 +85,7 @@ impl Osc133Parser {
         &mut self,
         marker: u8,
         param: Option<&str>,
-        state: &mut PaneState,
+        state: &mut TerminalState,
         screen_input: Option<&str>,
     ) {
         state.last_osc133_marker = Some(std::time::Instant::now());
@@ -101,13 +101,13 @@ impl Osc133Parser {
 
     /// Append raw output text (bytes fed to terminal between OSC events).
     /// Accumulates into capture buffer AND the active command record's output.
-    pub fn append_output(&mut self, text: &str, state: &mut PaneState) {
+    pub fn append_output(&mut self, text: &str, state: &mut TerminalState) {
         self.capture.push_str(text);
         state.append_active_output(text);
     }
 
     /// Force reset to Idle (for mode switches or external reset).
-    pub fn reset(&mut self, state: &mut PaneState) {
+    pub fn reset(&mut self, state: &mut TerminalState) {
         self.abandon_in_flight(state);
         self.phase = Osc133Phase::Idle;
         self.pending_command_text = None;
@@ -121,7 +121,7 @@ impl Osc133Parser {
     /// If Executing without D, the command is abandoned and recorded.
     /// Pending D state is preserved — D→A→B is the normal flow and B
     /// needs to see the pending state to finalize the command.
-    fn handle_a(&mut self, state: &mut PaneState) {
+    fn handle_a(&mut self, state: &mut TerminalState) {
         // If Executing without D, mark active command as abandoned.
         if matches!(self.phase, Osc133Phase::Executing { .. }) {
             if let Some(cmd) = state.active_command_mut() {
@@ -139,7 +139,7 @@ impl Osc133Parser {
     /// B (Input Ready / THE LATCH): shell is ready for input.
     /// From any state: transition to Input.
     /// If there's a pending command from D, finalize it now.
-    fn handle_b(&mut self, state: &mut PaneState) {
+    fn handle_b(&mut self, state: &mut TerminalState) {
         // B marks the active command as completed.
         if let Some(cmd) = state.active_command_mut() {
             // If we're in Executing and got B without D (pre-exec failure),
@@ -165,7 +165,7 @@ impl Osc133Parser {
     /// `screen_input` is the command text read from the terminal grid by
     /// PaneProcessor — it handles all editing (backspace, cursor movement,
     /// etc.) correctly because it reads from the real terminal emulator.
-    fn handle_c(&mut self, param: Option<&str>, state: &mut PaneState, screen_input: Option<&str>) {
+    fn handle_c(&mut self, param: Option<&str>, state: &mut TerminalState, screen_input: Option<&str>) {
         if matches!(self.phase, Osc133Phase::Executing { .. }) {
             tracing::debug!("Duplicate OSC 133;C — ignoring");
             return;
@@ -190,7 +190,7 @@ impl Osc133Parser {
     /// D (Command Done): command finished with optional exit code.
     /// Sets exit_code on the active record. Completion is finalized by B.
     /// Always increments completion_seq so command_run can detect completion.
-    fn handle_d(&mut self, param: Option<&str>, state: &mut PaneState) {
+    fn handle_d(&mut self, param: Option<&str>, state: &mut TerminalState) {
         let exit_code = param.and_then(|p| p.parse::<i32>().ok());
         state.completion_seq += 1;
         state.last_exit_code = exit_code;
@@ -244,7 +244,7 @@ impl Osc133Parser {
     }
 
     /// E (Explicit Command Text): authoritative command text from the shell.
-    fn handle_e(&mut self, param: Option<&str>, state: &mut PaneState) {
+    fn handle_e(&mut self, param: Option<&str>, state: &mut TerminalState) {
         let Some(text) = param else { return };
 
         match &mut self.phase {
@@ -267,7 +267,7 @@ impl Osc133Parser {
 
     /// Abandon any in-flight command from Executing state.
     /// Called on unexpected A marker (hard reset).
-    fn abandon_in_flight(&mut self, state: &mut PaneState) {
+    fn abandon_in_flight(&mut self, state: &mut TerminalState) {
         // Mark active command as completed (abandoned)
         if let Some(cmd) = state.active_command_mut() {
             tracing::debug!("Abandoning in-flight command on reset: {:?}", cmd.command);
@@ -316,12 +316,12 @@ mod tests {
     use super::*;
 
     /// Shorthand: call handle_marker with no screen input.
-    fn marker(parser: &mut Osc133Parser, m: u8, param: Option<&str>, state: &mut PaneState) {
+    fn marker(parser: &mut Osc133Parser, m: u8, param: Option<&str>, state: &mut TerminalState) {
         parser.handle_marker(m, param, state, None);
     }
 
     /// Shorthand for C marker with screen_input (simulating terminal grid read).
-    fn marker_c(parser: &mut Osc133Parser, param: Option<&str>, state: &mut PaneState, screen_input: &str) {
+    fn marker_c(parser: &mut Osc133Parser, param: Option<&str>, state: &mut TerminalState, screen_input: &str) {
         parser.handle_marker(b'C', param, state, Some(screen_input));
     }
 
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn full_cycle_with_e_marker() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         assert_eq!(p.phase, Osc133Phase::Prompt);
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn full_cycle_without_e_uses_screen_input_fallback() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn c_without_e_or_screen_input_defaults_to_empty() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn c_cmdline_url_param() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn e_overrides_c_cmdline_url() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn e_before_c() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn e_overrides_during_executing() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn no_output_command_bd_pattern() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn output_captured_without_c_marker() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn partial_capture_on_mid_join() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         // Start monitoring mid-command — some output arrives before D
         p.append_output("partial output\n", &mut s);
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn missing_d_abandoned_on_a() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn d_without_c_bumps_completion_seq() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn a_without_d_abandons_executing_command() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn duplicate_c_ignored() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn duplicate_a_resets_cleanly() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'A', None, &mut s);
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn duplicate_b_resets_to_input() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn d_from_idle_recovers() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         p.append_output("some output", &mut s);
         marker(&mut p, b'D', Some("0"), &mut s);
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn c_from_idle_creates_executing() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         p.append_output("$ surprise", &mut s);
         marker_c(&mut p, None, &mut s, "surprise");
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn reset_clears_everything() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn activity_transitions() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         assert_eq!(s.activity, Activity::Unknown);
 
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn rapid_back_to_back_commands() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         // Command 1
         marker(&mut p, b'A', None, &mut s);
@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn empty_command_just_enter() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn nonzero_exit_code() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -785,7 +785,7 @@ mod tests {
     #[test]
     fn signal_exit_code() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn output_accumulates_between_c_and_d() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn d_without_exit_code_param_stops_output_accumulation() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -848,7 +848,7 @@ mod tests {
     #[test]
     fn capture_cleared_by_b() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         p.append_output("stray output", &mut s);
         marker(&mut p, b'A', None, &mut s);
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn capture_cleared_by_c() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn recover_from_missed_start_then_next_command_works() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'D', Some("0"), &mut s);
         marker(&mut p, b'A', None, &mut s);
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn command_without_c_marker_bumps_completion_seq() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn d_a_b_flow_pending_survives_through_a() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -950,7 +950,7 @@ mod tests {
     #[test]
     fn multiple_commands_without_c_bump_completion_seq() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn state_is_input_after_recovery() {
         let mut p = Osc133Parser::new();
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
 
         marker(&mut p, b'D', Some("0"), &mut s);
         marker(&mut p, b'A', None, &mut s);

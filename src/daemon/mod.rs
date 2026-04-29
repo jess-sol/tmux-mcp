@@ -9,7 +9,7 @@ pub mod server;
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::pane::registry::{PaneRegistry, SyncAction};
@@ -44,21 +44,21 @@ pub async fn run(session: &str, server: Option<&str>) -> Result<(), Box<dyn std:
     // Seed registry from layouts
     for win in &windows {
         let layout_panes = parse_layout(&win.layout);
-        let actions = registry.apply_layout(&win.window_id, &layout_panes);
+        let actions = registry.apply_layout(&win.window_id, &layout_panes).await;
         execute_actions(&mut commands, &mut registry, &actions).await;
     }
 
     // Set PIDs from the same query
     for bp in &panes {
-        registry.set_pid(&bp.pane_id, bp.pid);
+        registry.set_pid(&bp.pane_id, bp.pid).await;
     }
 
     tracing::info!("Monitoring {} panes", registry.len());
 
-    // Shared state for RPC handlers (commands + registry behind mutexes)
+    // Shared state for RPC handlers
     let state = Arc::new(DaemonState {
         conn: Mutex::new(commands),
-        registry: Mutex::new(registry),
+        registry: RwLock::new(registry),
         started_at: std::time::Instant::now(),
     });
 
@@ -107,26 +107,28 @@ async fn event_loop(
             Notification::LayoutChange { window_id, layout } => {
                 let layout_panes = parse_layout(&layout);
                 let mut conn = state.conn.lock().await;
-                let mut registry = state.registry.lock().await;
-                let actions = registry.apply_layout(&window_id, &layout_panes);
+                let mut registry = state.registry.write().await;
+                let actions = registry.apply_layout(&window_id, &layout_panes).await;
                 execute_actions(&mut conn, &mut registry, &actions).await;
             }
 
             Notification::WindowClose { window_id } => {
                 tracing::info!("Window {} closed", window_id);
                 let mut conn = state.conn.lock().await;
-                let mut registry = state.registry.lock().await;
+                let mut registry = state.registry.write().await;
                 let actions = registry.remove_window(&window_id);
                 execute_actions(&mut conn, &mut registry, &actions).await;
             }
 
             Notification::Output { pane_id, data } => {
-                let mut registry = state.registry.lock().await;
-                let Some(proc) = registry.get_processor_mut(&pane_id) else {
-                    continue;
+                let handle = {
+                    let registry = state.registry.read().await;
+                    registry.get_handle(&pane_id)
                 };
+                let Some(handle) = handle else { continue; };
+                let mut tp = handle.lock().await;
                 let bytes = unescape_tmux_output(&data);
-                proc.process_chunk(&bytes);
+                tp.processor.process_chunk(&bytes);
             }
 
             Notification::Exit { .. } | Notification::SessionClose { .. } => {
@@ -158,7 +160,7 @@ async fn execute_actions(
                 match conn.query_pane_pid(pane_id).await {
                     Ok(pid) => {
                         tracing::debug!("Pane {} pid={}", pane_id, pid);
-                        registry.set_pid(pane_id, pid);
+                        registry.set_pid(pane_id, pid).await;
                     }
                     Err(e) => {
                         tracing::warn!("Failed to query pid for {}: {}", pane_id, e);

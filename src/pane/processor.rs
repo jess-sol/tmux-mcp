@@ -11,7 +11,7 @@ use vte::ansi::Processor;
 
 use crate::pane::osc::{OscEvent, OscMatch, find_next_osc_from};
 use crate::pane::osc133::{Osc133Parser, Osc133Phase};
-use crate::pane::state::PaneState;
+use crate::pane::state::TerminalState;
 
 // --- Terminal dimensions ---
 
@@ -40,7 +40,7 @@ pub struct PaneProcessor {
     term: Term<VoidListener>,
     processor: Processor,
     osc133: Osc133Parser,
-    state: PaneState,
+    state: TerminalState,
 }
 
 impl PaneProcessor {
@@ -54,7 +54,7 @@ impl PaneProcessor {
             term,
             processor,
             osc133: Osc133Parser::new(),
-            state: PaneState::new(),
+            state: TerminalState::new(),
         }
     }
 
@@ -108,12 +108,12 @@ impl PaneProcessor {
     }
 
     /// Access the structured pane state (command history, activity, cwd).
-    pub fn state(&self) -> &PaneState {
+    pub fn state(&self) -> &TerminalState {
         &self.state
     }
 
     /// Mutable access to pane state (for OSC 133 cache updates).
-    pub fn state_mut(&mut self) -> &mut PaneState {
+    pub fn state_mut(&mut self) -> &mut TerminalState {
         &mut self.state
     }
 

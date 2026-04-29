@@ -42,7 +42,7 @@ pub enum Activity {
 
 /// Structured state for a pane, maintained by the mode parser.
 #[derive(Debug)]
-pub struct PaneState {
+pub struct TerminalState {
     /// Completed commands, most recent first.
     pub commands: VecDeque<CommandRecord>,
     /// Current activity.
@@ -77,7 +77,7 @@ pub struct PaneState {
 
 const MAX_OSC133_CACHE: usize = 5;
 
-impl PaneState {
+impl TerminalState {
     pub fn new() -> Self {
         Self {
             commands: VecDeque::new(),
@@ -209,7 +209,7 @@ impl PaneState {
     }
 }
 
-impl Default for PaneState {
+impl Default for TerminalState {
     fn default() -> Self {
         Self::new()
     }
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn new_state_is_empty() {
-        let s = PaneState::new();
+        let s = TerminalState::new();
         assert!(s.commands.is_empty());
         assert_eq!(s.activity, Activity::Unknown);
         assert!(s.cwd.is_none());
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn push_and_retrieve_commands() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         let id1 = s.push_command_start("ls".into());
         let cmd = s.command_by_id_mut(id1).unwrap();
         cmd.output = "file1\nfile2".into();
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn command_history_capped() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         for i in 0..150 {
             let id = s.push_command_start(format!("cmd{}", i));
             let cmd = s.command_by_id_mut(id).unwrap();
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn osc7_full() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@myhost/home/alice");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert_eq!(s.hostname.as_deref(), Some("myhost"));
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn osc7_user_localhost() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@localhost/tmp");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert!(s.hostname.is_none());
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn osc7_user_127001() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@127.0.0.1/tmp");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert!(s.hostname.is_none());
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn osc7_user_ipv6_loopback() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@::1/tmp");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert!(s.hostname.is_none());
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn osc7_user_empty_host() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@/tmp");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert!(s.hostname.is_none());
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn osc7_host_no_user() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://myhost/home/user");
         assert!(s.user.is_none());
         assert_eq!(s.hostname.as_deref(), Some("myhost"));
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn osc7_localhost_no_user() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://localhost/tmp");
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn osc7_empty_authority() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file:///home/user");
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn osc7_no_path() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@myhost");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert_eq!(s.hostname.as_deref(), Some("myhost"));
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn osc7_only_user_no_path() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert!(s.hostname.is_none());
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn osc7_empty_user_at_host() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://@myhost/tmp");
         assert!(s.user.is_none());
         assert_eq!(s.hostname.as_deref(), Some("myhost"));
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn osc7_at_sign_in_user() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://a@b@myhost/tmp");
         assert_eq!(s.user.as_deref(), Some("a@b"));
         assert_eq!(s.hostname.as_deref(), Some("myhost"));
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn osc7_bare_file() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://");
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn osc7_not_file_scheme() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("https://example.com/path");
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn osc7_empty_string() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("");
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn osc7_overwrites_previous() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@host1/a");
         s.update_cwd_from_osc7("file://bob@host2/b");
         assert_eq!(s.user.as_deref(), Some("bob"));
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn osc7_clears_user_when_absent() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.update_cwd_from_osc7("file://alice@myhost/tmp");
         assert_eq!(s.user.as_deref(), Some("alice"));
         // Next OSC 7 without user should clear it
@@ -424,13 +424,13 @@ mod tests {
 
     #[test]
     fn osc133_cache_lookup_empty() {
-        let s = PaneState::new();
+        let s = TerminalState::new();
         assert_eq!(s.osc133_lookup(100), None);
     }
 
     #[test]
     fn osc133_cache_confirm_and_lookup() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.osc133_confirm(100);
         assert_eq!(s.osc133_lookup(100), Some(true));
         assert_eq!(s.osc133_lookup(200), None);
@@ -438,14 +438,14 @@ mod tests {
 
     #[test]
     fn osc133_cache_fail_and_lookup() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.osc133_fail(100);
         assert_eq!(s.osc133_lookup(100), Some(false));
     }
 
     #[test]
     fn osc133_cache_confirm_overrides_fail() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.osc133_fail(100);
         assert_eq!(s.osc133_lookup(100), Some(false));
         s.osc133_confirm(100);
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn osc133_cache_fail_overrides_confirm() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.osc133_confirm(100);
         s.osc133_fail(100);
         assert_eq!(s.osc133_lookup(100), Some(false));
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn osc133_cache_separate_pids() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         s.osc133_confirm(100);
         s.osc133_fail(200);
         assert_eq!(s.osc133_lookup(100), Some(true));
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn osc133_cache_bounded_at_5() {
-        let mut s = PaneState::new();
+        let mut s = TerminalState::new();
         for pid in 1..=6 {
             s.osc133_confirm(pid);
         }

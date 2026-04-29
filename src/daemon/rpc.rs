@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::pane::osc133::Osc133Phase;
-use crate::pane::registry::PaneRegistry;
+use crate::pane::registry::{PaneHandle, PaneRegistry};
 use crate::pane::state::Activity;
 use crate::proc;
 use crate::tmux::connection::TmuxCommands;
@@ -40,7 +40,7 @@ impl RpcError {
 /// Shared daemon state accessible to RPC handlers.
 pub struct DaemonState {
     pub conn: Mutex<TmuxCommands>,
-    pub registry: Mutex<PaneRegistry>,
+    pub registry: RwLock<PaneRegistry>,
     pub started_at: std::time::Instant,
 }
 
@@ -206,10 +206,9 @@ fn get_leaf_pid(shell_pid: u32) -> u32 {
         .unwrap_or(shell_pid)
 }
 
-/// Capture the last N lines of visible screen text from a pane's processor.
-fn capture_screen(registry: &PaneRegistry, pane_id: &str, lines: usize) -> String {
-    let Some(tp) = registry.get(pane_id) else { return String::new() };
-    let all_lines = tp.processor.screen_text();
+/// Capture the last N lines of visible screen text from locked pane state.
+fn capture_screen(ps: &crate::pane::registry::PaneState, lines: usize) -> String {
+    let all_lines = ps.processor.screen_text();
     let total = all_lines.len();
     let start = total.saturating_sub(lines);
     let selected: Vec<&str> = all_lines[start..].iter().map(|s| s.as_str()).collect();
@@ -221,12 +220,13 @@ fn capture_screen(registry: &PaneRegistry, pane_id: &str, lines: usize) -> Strin
 /// Returns true if a bump was observed within the deadline.
 async fn probe_osc133(
     pane_id: &str,
+    pane_handle: &PaneHandle,
     state: &Arc<DaemonState>,
     deadline_ms: u64,
 ) -> Result<bool, RpcError> {
     let seq_before = {
-        let registry = state.registry.lock().await;
-        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
+        let tp = pane_handle.lock().await;
+        tp.processor.state().completion_seq
     };
 
     {
@@ -240,11 +240,9 @@ async fn probe_osc133(
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         {
-            let registry = state.registry.lock().await;
-            if let Some(tp) = registry.get(pane_id) {
-                if tp.processor.state().completion_seq > seq_before {
-                    return Ok(true);
-                }
+            let tp = pane_handle.lock().await;
+            if tp.processor.state().completion_seq > seq_before {
+                return Ok(true);
             }
         }
         if tokio::time::Instant::now() >= deadline {
@@ -285,8 +283,17 @@ async fn handle_list_panes(
     params: &Value,
     state: &Arc<DaemonState>,
 ) -> Result<Value, RpcError> {
-    let registry = state.registry.lock().await;
-    let caller_window = resolve_caller_window(&registry, params)?;
+    let handles = {
+        let registry = state.registry.read().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        let all_handles = registry.snapshot_handles();
+        // Filter by window — window_id is on TrackedPane (outside mutex)
+        let filtered: Vec<PaneHandle> = all_handles
+            .into_iter()
+            .filter(|h| h.window_id == caller_window)
+            .collect();
+        filtered
+    };
 
     // Get local hostname to filter it from osc_hostname
     let local_hostname = hostname::get()
@@ -295,12 +302,10 @@ async fn handle_list_panes(
         .unwrap_or_default();
 
     let mut entries = Vec::new();
-    for (_, tp) in registry.iter() {
-        if tp.window_id != caller_window {
-            continue;
-        }
+    for handle in &handles {
+        let ps = handle.lock().await;
 
-        let (process_cwd, foreground) = if let Some(pid) = tp.pid {
+        let (process_cwd, foreground) = if let Some(pid) = ps.pid {
             let info = proc::proc_info(pid);
             (
                 info.as_ref().and_then(|i| i.cwd.as_ref().map(|p| p.display().to_string())),
@@ -310,36 +315,36 @@ async fn handle_list_panes(
             (None, None)
         };
 
-        let pane_state = tp.processor.state();
-        let osc133_last_marker_secs = pane_state
+        let term_state = ps.processor.state();
+        let osc133_last_marker_secs = term_state
             .last_osc133_marker
-            .map(|t| t.elapsed().as_secs_f64());
-        let last_data_secs = pane_state
+            .map(|t: std::time::Instant| t.elapsed().as_secs_f64());
+        let last_data_secs = term_state
             .last_data
-            .map(|t| t.elapsed().as_secs_f64());
+            .map(|t: std::time::Instant| t.elapsed().as_secs_f64());
 
-        let leaf_pid = tp.pid.map(get_leaf_pid).unwrap_or(0);
-        let osc133_status = match pane_state.osc133_lookup(leaf_pid) {
+        let leaf_pid = ps.pid.map(get_leaf_pid).unwrap_or(0);
+        let osc133_status = match term_state.osc133_lookup(leaf_pid) {
             Some(true) => "confirmed",
             Some(false) => "failed",
             None => "unknown",
         };
 
         entries.push(PaneEntry {
-            pane_id: tp.pane_id.clone(),
-            pid: tp.pid,
-            width: tp.processor.columns(),
-            height: tp.processor.screen_lines(),
-            x: tp.x,
-            y: tp.y,
+            pane_id: handle.pane_id.clone(),
+            pid: ps.pid,
+            width: ps.processor.columns(),
+            height: ps.processor.screen_lines(),
+            x: ps.x,
+            y: ps.y,
             process_cwd,
-            osc_cwd: pane_state.cwd.clone(),
-            osc_user: pane_state.user.clone(),
-            osc_hostname: pane_state.hostname.as_ref().and_then(|h| {
+            osc_cwd: term_state.cwd.clone(),
+            osc_user: term_state.user.clone(),
+            osc_hostname: term_state.hostname.as_ref().and_then(|h: &String| {
                 if h == &local_hostname { None } else { Some(h.clone()) }
             }),
             foreground,
-            activity: format!("{:?}", pane_state.activity),
+            activity: format!("{:?}", term_state.activity),
             osc133_last_marker_secs,
             last_data_secs,
             osc133_status: osc133_status.to_string(),
@@ -362,11 +367,15 @@ async fn handle_command_history(
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
     let count = params["count"].as_u64().unwrap_or(10) as usize;
 
-    let registry = state.registry.lock().await;
-    let caller_window = resolve_caller_window(&registry, params)?;
-    validate_pane_access(&registry, pane_id, &caller_window)?;
+    let pane_handle = {
+        let registry = state.registry.read().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
+        registry.get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
+    };
 
-    let tp = registry.get(pane_id).unwrap();
+    let tp = pane_handle.lock().await;
     let cmds = tp.processor.state().recent_commands(count);
     let entries: Vec<Value> = cmds
         .iter()
@@ -393,82 +402,33 @@ async fn handle_command_read(
     let timeout_secs = params["timeout_secs"].as_u64().unwrap_or(5);
     let read_params = ReadParams::from_json(params)?;
 
-    // Validate window access
-    {
-        let registry = state.registry.lock().await;
+    // Validate window access and get pane handle
+    let pane_handle = {
+        let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-    }
+        registry.get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
+    };
 
     // Find the target command
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
 
     loop {
         {
-            let mut registry = state.registry.lock().await;
-            if let Some(tp) = registry.get_mut(pane_id) {
-                let pane_state = tp.processor.state_mut();
-                let cmd = if let Some(id) = command_id {
-                    pane_state.command_by_id_mut(id)
-                } else {
-                    // Default: most recent command
-                    pane_state.commands.front_mut()
-                };
+            let mut tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state_mut();
+            let cmd = if let Some(id) = command_id {
+                pane_state.command_by_id_mut(id)
+            } else {
+                // Default: most recent command
+                pane_state.commands.front_mut()
+            };
 
-                if let Some(cmd) = cmd {
-                    // For completed commands or non-next reads, return immediately
-                    let is_next = read_params.next.is_some();
-                    if cmd.completed || !is_next {
-                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                        return Ok(json!({
-                            "command_id": cmd.id,
-                            "command": cmd.command,
-                            "status": if cmd.completed { "completed" } else { "running" },
-                            "exit_code": cmd.exit_code,
-                            "output": result.lines.join("\n"),
-                            "total_lines": result.total_lines,
-                            "lines_skipped": result.skipped,
-                            "search_matches": result.matched,
-                        }));
-                    }
-
-                    // next on active command — check if there's new output
-                    let cursor = cmd.read_cursor;
-                    let line_count = if cmd.output.is_empty() { 0 } else { cmd.output.lines().count() };
-                    if line_count > cursor {
-                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                        if !result.lines.is_empty() {
-                            return Ok(json!({
-                                "command_id": cmd.id,
-                                "command": cmd.command,
-                                "status": "running",
-                                "output": result.lines.join("\n"),
-                                "total_lines": result.total_lines,
-                            }));
-                        }
-                    }
-                } else if command_id.is_some() {
-                    return Err(RpcError::invalid_params(format!(
-                        "Command {} not found", command_id.unwrap()
-                    )));
-                } else {
-                    return Err(RpcError::invalid_params("No commands in history"));
-                }
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            // Timeout — return whatever we have
-            let mut registry = state.registry.lock().await;
-            if let Some(tp) = registry.get_mut(pane_id) {
-                let pane_state = tp.processor.state_mut();
-                let cmd = if let Some(id) = command_id {
-                    pane_state.command_by_id_mut(id)
-                } else {
-                    pane_state.commands.front_mut()
-                };
-
-                if let Some(cmd) = cmd {
+            if let Some(cmd) = cmd {
+                // For completed commands or non-next reads, return immediately
+                let is_next = read_params.next.is_some();
+                if cmd.completed || !is_next {
                     let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
                     return Ok(json!({
                         "command_id": cmd.id,
@@ -477,8 +437,55 @@ async fn handle_command_read(
                         "exit_code": cmd.exit_code,
                         "output": result.lines.join("\n"),
                         "total_lines": result.total_lines,
+                        "lines_skipped": result.skipped,
+                        "search_matches": result.matched,
                     }));
                 }
+
+                // next on active command — check if there's new output
+                let cursor = cmd.read_cursor;
+                let line_count = if cmd.output.is_empty() { 0 } else { cmd.output.lines().count() };
+                if line_count > cursor {
+                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                    if !result.lines.is_empty() {
+                        return Ok(json!({
+                            "command_id": cmd.id,
+                            "command": cmd.command,
+                            "status": "running",
+                            "output": result.lines.join("\n"),
+                            "total_lines": result.total_lines,
+                        }));
+                    }
+                }
+            } else if command_id.is_some() {
+                return Err(RpcError::invalid_params(format!(
+                    "Command {} not found", command_id.unwrap()
+                )));
+            } else {
+                return Err(RpcError::invalid_params("No commands in history"));
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            // Timeout — return whatever we have
+            let mut tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state_mut();
+            let cmd = if let Some(id) = command_id {
+                pane_state.command_by_id_mut(id)
+            } else {
+                pane_state.commands.front_mut()
+            };
+
+            if let Some(cmd) = cmd {
+                let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                return Ok(json!({
+                    "command_id": cmd.id,
+                    "command": cmd.command,
+                    "status": if cmd.completed { "completed" } else { "running" },
+                    "exit_code": cmd.exit_code,
+                    "output": result.lines.join("\n"),
+                    "total_lines": result.total_lines,
+                }));
             }
             return Err(RpcError::internal("No command found"));
         }
@@ -504,15 +511,18 @@ async fn handle_command_run(
         return Err(RpcError::invalid_params(err.to_string()));
     }
 
-    // Validate window access and get shell PID
-    let shell_pid = {
-        let registry = state.registry.lock().await;
+    // Validate window access, get pane handle and shell PID
+    let (pane_handle, shell_pid) = {
+        let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        registry
-            .get(pane_id)
-            .and_then(|tp| tp.pid)
-            .ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+        let handle = registry.get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+        let pid = {
+            let tp = handle.lock().await;
+            tp.pid.ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+        };
+        (handle, pid)
     };
 
     let leaf_pid = get_leaf_pid(shell_pid);
@@ -521,55 +531,52 @@ async fn handle_command_run(
     // Check for conditions that would cause the OSC 133 probe to timeout
     // with a misleading error. Catch them early with specific messages.
     {
-        let registry = state.registry.lock().await;
-        if let Some(tp) = registry.get(pane_id) {
-            // Guard 1: Command already running
-            if tp.processor.state().active_command().is_some()
-                || tp.processor.state().activity == Activity::Busy
-                || matches!(tp.processor.osc133_phase(), Osc133Phase::Executing { .. })
-            {
-                let cmd_text = tp
-                    .processor
-                    .osc133_phase()
-                    .executing_command()
-                    .or_else(|| {
-                        tp.processor
-                            .state()
-                            .active_command()
-                            .map(|c| c.command.as_str())
-                    })
-                    .unwrap_or("(unknown command)");
-                let screen = capture_screen(&registry, pane_id, 20);
-                return Err(RpcError::internal(format!(
-                    "Pane {} is busy running '{}'. Use command_read to check status or wait.\n\nScreen:\n{}",
-                    pane_id, cmd_text, screen
-                )));
-            }
-            // Guard 2: User is typing
-            if tp.processor.has_input_content() {
-                let screen = capture_screen(&registry, pane_id, 20);
-                return Err(RpcError::internal(format!(
-                    "User is typing in pane {}. Wait for them to finish or use a different pane.\n\nScreen:\n{}",
-                    pane_id, screen
-                )));
-            }
+        let tp = pane_handle.lock().await;
+
+        // Guard 1: Command already running
+        if tp.processor.state().active_command().is_some()
+            || tp.processor.state().activity == Activity::Busy
+            || matches!(tp.processor.osc133_phase(), Osc133Phase::Executing { .. })
+        {
+            let cmd_text = tp
+                .processor
+                .osc133_phase()
+                .executing_command()
+                .or_else(|| {
+                    tp.processor
+                        .state()
+                        .active_command()
+                        .map(|c| c.command.as_str())
+                })
+                .unwrap_or("(unknown command)");
+            let screen = capture_screen(&tp, 20);
+            return Err(RpcError::internal(format!(
+                "Pane {} is busy running '{}'. Use command_read to check status or wait.\n\nScreen:\n{}",
+                pane_id, cmd_text, screen
+            )));
+        }
+        // Guard 2: User is typing
+        if tp.processor.has_input_content() {
+            let screen = capture_screen(&tp, 20);
+            return Err(RpcError::internal(format!(
+                "User is typing in pane {}. Wait for them to finish or use a different pane.\n\nScreen:\n{}",
+                pane_id, screen
+            )));
         }
     }
 
     // --- OSC 133 gating ---
     let cache_status = {
-        let registry = state.registry.lock().await;
-        registry.get(pane_id).and_then(|tp| tp.processor.state().osc133_lookup(leaf_pid))
+        let tp = pane_handle.lock().await;
+        tp.processor.state().osc133_lookup(leaf_pid)
     };
 
     match cache_status {
         Some(false) => {
             // Known failed — instant reject
-            let registry = state.registry.lock().await;
-            let screen = capture_screen(&registry, pane_id, 20);
-            let marker_secs = registry
-                .get(pane_id)
-                .and_then(|tp| tp.processor.state().last_osc133_marker)
+            let tp = pane_handle.lock().await;
+            let screen = capture_screen(&tp, 20);
+            let marker_secs = tp.processor.state().last_osc133_marker
                 .map(|t| t.elapsed().as_secs_f64());
             return Err(RpcError::internal(format!(
                 "OSC 133 not active for this pane. Use inject_osc133 to enable shell integration.\n\nosc133_last_marker_secs: {:?}\n\nScreen:\n{}",
@@ -578,19 +585,15 @@ async fn handle_command_run(
         }
         None => {
             // Unknown — probe with ` :`
-            let probed_ok = probe_osc133(pane_id, state, 500).await?;
+            let probed_ok = probe_osc133(pane_id, &pane_handle, state, 500).await?;
 
             {
-                let mut registry = state.registry.lock().await;
+                let mut tp = pane_handle.lock().await;
                 if probed_ok {
-                    if let Some(tp) = registry.get_mut(pane_id) {
-                        tp.processor.state_mut().osc133_confirm(leaf_pid);
-                    }
+                    tp.processor.state_mut().osc133_confirm(leaf_pid);
                 } else {
-                    if let Some(tp) = registry.get_mut(pane_id) {
-                        tp.processor.state_mut().osc133_fail(leaf_pid);
-                    }
-                    let screen = capture_screen(&registry, pane_id, 20);
+                    tp.processor.state_mut().osc133_fail(leaf_pid);
+                    let screen = capture_screen(&tp, 20);
                     return Err(RpcError::internal(format!(
                         "OSC 133 probe failed — no markers detected. Use inject_osc133 to enable shell integration.\n\nScreen:\n{}",
                         screen
@@ -609,10 +612,8 @@ async fn handle_command_run(
     // --- Send the command ---
     // Snapshot the front command ID so we can wait for a *new* record
     let id_before = {
-        let registry = state.registry.lock().await;
-        registry.get(pane_id)
-            .and_then(|tp| tp.processor.state().commands.front().map(|c| c.id))
-            .unwrap_or(0)
+        let tp = pane_handle.lock().await;
+        tp.processor.state().commands.front().map(|c| c.id).unwrap_or(0)
     };
 
     {
@@ -635,25 +636,23 @@ async fn handle_command_run(
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         {
-            let mut registry = state.registry.lock().await;
-            if let Some(tp) = registry.get_mut(pane_id) {
-                let pane_state = tp.processor.state_mut();
-                if let Some(cmd) = pane_state.commands.front_mut() {
-                    if cmd.id > id_before {
-                        command_seen = true;
-                        if cmd.completed {
-                            let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                            return Ok(json!({
-                                "command_id": cmd.id,
-                                "command": cmd.command,
-                                "status": "completed",
-                                "exit_code": cmd.exit_code,
-                                "output": result.lines.join("\n"),
-                                "total_lines": result.total_lines,
-                                "lines_skipped": result.skipped,
-                                "search_matches": result.matched,
-                            }));
-                        }
+            let mut tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state_mut();
+            if let Some(cmd) = pane_state.commands.front_mut() {
+                if cmd.id > id_before {
+                    command_seen = true;
+                    if cmd.completed {
+                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                        return Ok(json!({
+                            "command_id": cmd.id,
+                            "command": cmd.command,
+                            "status": "completed",
+                            "exit_code": cmd.exit_code,
+                            "output": result.lines.join("\n"),
+                            "total_lines": result.total_lines,
+                            "lines_skipped": result.skipped,
+                            "search_matches": result.matched,
+                        }));
                     }
                 }
             }
@@ -664,11 +663,9 @@ async fn handle_command_run(
         // Phase 1 timeout: no new command record appeared
         if !command_seen && now >= marker_deadline {
             tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
-            let mut registry = state.registry.lock().await;
-            if let Some(tp) = registry.get_mut(pane_id) {
-                tp.processor.state_mut().osc133_fail(leaf_pid);
-            }
-            let screen = capture_screen(&registry, pane_id, 20);
+            let mut tp = pane_handle.lock().await;
+            tp.processor.state_mut().osc133_fail(leaf_pid);
+            let screen = capture_screen(&tp, 20);
             return Err(RpcError::internal(format!(
                 "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
                  Use debug_pane to inspect pane state.\n\nScreen:\n{}",
@@ -678,20 +675,18 @@ async fn handle_command_run(
 
         // Phase 2 timeout: command seen but not completed
         if now >= completion_deadline {
-            let mut registry = state.registry.lock().await;
-            if let Some(tp) = registry.get_mut(pane_id) {
-                let pane_state = tp.processor.state_mut();
-                if let Some(cmd) = pane_state.commands.front_mut() {
-                    if cmd.id > id_before {
-                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                        return Ok(json!({
-                            "command_id": cmd.id,
-                            "command": cmd.command,
-                            "status": "running",
-                            "output": result.lines.join("\n"),
-                            "total_lines": result.total_lines,
-                        }));
-                    }
+            let mut tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state_mut();
+            if let Some(cmd) = pane_state.commands.front_mut() {
+                if cmd.id > id_before {
+                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "running",
+                        "output": result.lines.join("\n"),
+                        "total_lines": result.total_lines,
+                    }));
                 }
             }
             return Ok(json!({
@@ -712,24 +707,26 @@ async fn handle_capture_pane(
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
     let lines = params["lines"].as_u64().unwrap_or(50).min(1000) as usize;
 
-    // Validate window access
-    {
-        let registry = state.registry.lock().await;
+    // Validate window access and get pane handle
+    let pane_handle = {
+        let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-    }
+        registry.get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
+    };
 
     // Read from alacritty screen model
-    let registry = state.registry.lock().await;
-    let text = capture_screen(&registry, pane_id, lines);
+    let tp = pane_handle.lock().await;
+    let text = capture_screen(&tp, lines);
 
     // Include active command metadata so MCP layer can steer LLMs toward command_read
-    let active_cmd = registry.get(pane_id).and_then(|tp| tp.processor.state().active_command().map(|cmd| {
+    let active_cmd = tp.processor.state().active_command().map(|cmd| {
         json!({
             "command_id": cmd.id,
             "command": cmd.command,
         })
-    }));
+    });
 
     Ok(json!({
         "text": text,
@@ -753,27 +750,28 @@ async fn handle_inject_osc133(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
 
-    // Validate window access and get shell PID
-    let shell_pid = {
-        let registry = state.registry.lock().await;
+    // Validate window access and get pane handle + shell PID
+    let (pane_handle, shell_pid) = {
+        let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        registry
-            .get(pane_id)
-            .and_then(|tp| tp.pid)
-            .ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+        let handle = registry.get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+        let pid = {
+            let tp = handle.lock().await;
+            tp.pid.ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+        };
+        (handle, pid)
     };
 
     let leaf_pid = get_leaf_pid(shell_pid);
 
     // --- Probe first: maybe markers already work ---
-    let already_active = probe_osc133(pane_id, state, 500).await?;
+    let already_active = probe_osc133(pane_id, &pane_handle, state, 500).await?;
 
     if already_active {
-        let mut registry = state.registry.lock().await;
-        if let Some(tp) = registry.get_mut(pane_id) {
-            tp.processor.state_mut().osc133_confirm(leaf_pid);
-        }
+        let mut tp = pane_handle.lock().await;
+        tp.processor.state_mut().osc133_confirm(leaf_pid);
         return Ok(json!({ "status": "already_active" }));
     }
 
@@ -789,19 +787,15 @@ async fn handle_inject_osc133(
     }
 
     // --- Post-inject probe ---
-    let inject_ok = probe_osc133(pane_id, state, 500).await?;
+    let inject_ok = probe_osc133(pane_id, &pane_handle, state, 500).await?;
 
-    let mut registry = state.registry.lock().await;
+    let mut tp = pane_handle.lock().await;
     if inject_ok {
-        if let Some(tp) = registry.get_mut(pane_id) {
-            tp.processor.state_mut().osc133_confirm(leaf_pid);
-        }
+        tp.processor.state_mut().osc133_confirm(leaf_pid);
         Ok(json!({ "status": "active" }))
     } else {
-        if let Some(tp) = registry.get_mut(pane_id) {
-            tp.processor.state_mut().osc133_fail(leaf_pid);
-        }
-        let screen = capture_screen(&registry, pane_id, 20);
+        tp.processor.state_mut().osc133_fail(leaf_pid);
+        let screen = capture_screen(&tp, 20);
         Ok(json!({
             "status": "failed",
             "message": "Injection sent but no markers detected. Shell may not be bash.",
@@ -827,12 +821,14 @@ async fn handle_send_keys(
         ));
     }
 
-    // Validate window access
-    {
-        let registry = state.registry.lock().await;
+    // Validate window access and get pane handle
+    let pane_handle = {
+        let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-    }
+        registry.get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
+    };
 
     // Send keys
     {
@@ -845,7 +841,7 @@ async fn handle_send_keys(
     // Brief pause for terminal to process, then return screen
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let registry = state.registry.lock().await;
-    let screen = capture_screen(&registry, pane_id, 20);
+    let tp = pane_handle.lock().await;
+    let screen = capture_screen(&tp, 20);
     Ok(json!({ "screen": screen }))
 }
