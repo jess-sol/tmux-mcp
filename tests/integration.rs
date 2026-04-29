@@ -299,7 +299,6 @@ async fn test_command_run_multiline_output() {
     .await;
 }
 
-#[ignore = "subshell output not captured — C marker interaction with subshell needs investigation"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_command_run_subshell() {
     with_timeout(async {

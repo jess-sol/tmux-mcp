@@ -175,21 +175,13 @@ impl PaneProcessor {
     fn handle_osc_event(&mut self, event: &OscEvent) {
         match event {
             OscEvent::Osc133 { marker, param } => {
-                let param_ref = param.as_deref();
-                // Capture cursor line text for screen query (used by C marker)
-                let cursor_text = self.cursor_line_text();
                 self.osc133.handle_marker(
                     *marker,
-                    param_ref,
+                    param.as_deref(),
                     &mut self.state,
-                    || cursor_text,
                 );
-                // Update activity based on phase
-                match self.osc133.phase() {
-                    Osc133Phase::Executing { .. } => {
-                        self.state.activity = crate::pane::state::Activity::Busy;
-                    }
-                    _ => {}
+                if matches!(self.osc133.phase(), Osc133Phase::Executing { .. }) {
+                    self.state.activity = crate::pane::state::Activity::Busy;
                 }
             }
             OscEvent::Osc7 { uri } => {
