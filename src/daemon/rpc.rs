@@ -283,6 +283,11 @@ async fn handle_command_run(
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
     let timeout_secs = params["timeout_secs"].as_u64().unwrap_or(30);
 
+    // Lint the command for anti-patterns
+    if let Err(err) = crate::lint::lint_command_run(command) {
+        return Err(RpcError::invalid_params(err.to_string()));
+    }
+
     // Validate window access and get shell PID
     let shell_pid = {
         let registry = state.registry.lock().await;
