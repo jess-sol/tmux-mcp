@@ -52,6 +52,8 @@ pub async fn dispatch(
         "command_history" => handle_command_history(params, state).await,
         "command_read" => handle_command_read(params, state).await,
         "command_run" => handle_command_run(params, state).await,
+        "capture_pane" => handle_capture_pane(params, state).await,
+        "inject_osc133" => handle_inject_osc133(params, state).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }
@@ -102,9 +104,18 @@ struct PaneEntry {
     height: usize,
     x: usize,
     y: usize,
-    cwd: Option<String>,
+    /// CWD from /proc (local process).
+    process_cwd: Option<String>,
+    /// CWD from OSC 7 (works across SSH).
+    osc_cwd: Option<String>,
+    /// Hostname from OSC 7 (null for localhost or if never received).
+    osc_hostname: Option<String>,
     foreground: Option<String>,
     activity: String,
+    /// Seconds since last OSC 133 marker, or null if never seen.
+    osc133_last_marker_secs: Option<f64>,
+    /// Seconds since last terminal data received, or null if never seen.
+    last_data_secs: Option<f64>,
 }
 
 async fn handle_list_panes(
@@ -114,13 +125,19 @@ async fn handle_list_panes(
     let registry = state.registry.lock().await;
     let caller_window = resolve_caller_window(&registry, params)?;
 
+    // Get local hostname to filter it from osc_hostname
+    let local_hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_default();
+
     let mut entries = Vec::new();
     for (_, tp) in registry.iter() {
         if tp.window_id != caller_window {
             continue;
         }
 
-        let (cwd, foreground) = if let Some(pid) = tp.pid {
+        let (process_cwd, foreground) = if let Some(pid) = tp.pid {
             let info = proc::proc_info(pid);
             (
                 info.as_ref().and_then(|i| i.cwd.as_ref().map(|p| p.display().to_string())),
@@ -130,6 +147,14 @@ async fn handle_list_panes(
             (None, None)
         };
 
+        let pane_state = tp.processor.state();
+        let osc133_last_marker_secs = pane_state
+            .last_osc133_marker
+            .map(|t| t.elapsed().as_secs_f64());
+        let last_data_secs = pane_state
+            .last_data
+            .map(|t| t.elapsed().as_secs_f64());
+
         entries.push(PaneEntry {
             pane_id: tp.pane_id.clone(),
             pid: tp.pid,
@@ -137,9 +162,15 @@ async fn handle_list_panes(
             height: tp.processor.screen_lines(),
             x: tp.x,
             y: tp.y,
-            cwd,
+            process_cwd,
+            osc_cwd: pane_state.cwd.clone(),
+            osc_hostname: pane_state.hostname.as_ref().and_then(|h| {
+                if h == &local_hostname { None } else { Some(h.clone()) }
+            }),
             foreground,
-            activity: format!("{:?}", tp.processor.state().activity),
+            activity: format!("{:?}", pane_state.activity),
+            osc133_last_marker_secs,
+            last_data_secs,
         });
     }
 
@@ -277,6 +308,119 @@ async fn handle_command_run(
                 "Command timed out after {}s",
                 timeout_secs
             )));
+        }
+    }
+}
+
+async fn handle_capture_pane(
+    params: &Value,
+    state: &Arc<DaemonState>,
+) -> Result<Value, RpcError> {
+    let pane_id = params["pane_id"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
+    let lines = params["lines"].as_u64().unwrap_or(50).min(1000) as usize;
+
+    // Validate window access
+    {
+        let registry = state.registry.lock().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
+    }
+
+    // Read from alacritty screen model
+    let registry = state.registry.lock().await;
+    let tp = registry
+        .get(pane_id)
+        .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+
+    let all_lines = tp.processor.screen_text();
+    // Take the last N lines, trim trailing empty lines
+    let total = all_lines.len();
+    let start = total.saturating_sub(lines);
+    let selected: Vec<&str> = all_lines[start..]
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    // Trim trailing empty lines
+    let end = selected
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    let text = selected[..end].join("\n");
+    Ok(json!({ "text": text }))
+}
+
+/// OSC 133 + OSC 7 injection script for bash.
+/// Each line has leading space for history suppression.
+const OSC133_INJECT_LINES: &[&str] = &[
+    " __osc133_exec_ready=true; __osc7_cwd() { printf '\\e]7;file://%s%s\\e\\\\' \"$(hostname)\" \"$PWD\"; }; __osc133_precmd() { local ret=$?; __osc133_exec_ready=true; printf '\\e]133;D;%d\\e\\\\\\e]133;A\\e\\\\' \"$ret\"; __osc7_cwd; return \"$ret\"; }; PROMPT_COMMAND=\"__osc133_precmd;${PROMPT_COMMAND:-}\"",
+    " __osc133_debug() { if $__osc133_exec_ready; then __osc133_exec_ready=false; local cmd; cmd=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]* *//'); [[ -n \"$cmd\" ]] && printf '\\e]133;E;%s\\e\\\\' \"$cmd\"; fi; }; trap '__osc133_debug \"$_\"' DEBUG",
+    " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\[\\e]133;C\\e\\\\\\]'",
+];
+
+async fn handle_inject_osc133(
+    params: &Value,
+    state: &Arc<DaemonState>,
+) -> Result<Value, RpcError> {
+    let pane_id = params["pane_id"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
+
+    // Validate window access
+    {
+        let registry = state.registry.lock().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
+    }
+
+    // Send each line of the injection script
+    {
+        let mut conn = state.conn.lock().await;
+        for line in OSC133_INJECT_LINES {
+            conn.send_command(pane_id, line)
+                .await
+                .map_err(|e| RpcError::internal(format!("Failed to send injection: {}", e)))?;
+            // Small delay between lines to let the shell process each
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    // Probe: send ` :` and wait for completion_seq bump
+    let seq_before = {
+        let registry = state.registry.lock().await;
+        registry
+            .get(pane_id)
+            .map(|tp| tp.processor.state().completion_seq)
+            .unwrap_or(0)
+    };
+
+    {
+        let mut conn = state.conn.lock().await;
+        conn.send_command(pane_id, " :")
+            .await
+            .map_err(|e| RpcError::internal(format!("Failed to send probe: {}", e)))?;
+    }
+
+    // Wait up to 3s for completion_seq to bump (markers working)
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        {
+            let registry = state.registry.lock().await;
+            if let Some(tp) = registry.get(pane_id) {
+                if tp.processor.state().completion_seq > seq_before {
+                    return Ok(json!({ "status": "active" }));
+                }
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(json!({ "status": "inactive", "message": "Injection sent but no markers detected. Shell may not be bash." }));
         }
     }
 }

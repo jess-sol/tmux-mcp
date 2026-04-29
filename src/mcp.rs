@@ -57,6 +57,20 @@ pub struct CommandHistoryParams {
     pub count: Option<u64>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CapturePaneParams {
+    #[schemars(description = "Target pane ID (e.g. \"%0\")")]
+    pub pane_id: String,
+    #[schemars(description = "Number of lines from bottom of screen (default 50, max 1000)")]
+    pub lines: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct InjectOsc133Params {
+    #[schemars(description = "Target pane ID (e.g. \"%0\")")]
+    pub pane_id: String,
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -151,6 +165,61 @@ impl TmuxMcp {
         }
 
         Ok(CallToolResult::success(vec![Content::text(text.trim_end().to_string())]))
+    }
+
+    #[tool(description = "Capture visible text from a pane's screen buffer. Works regardless of what's running in the pane.")]
+    async fn capture_pane(
+        &self,
+        Parameters(params): Parameters<CapturePaneParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut client = self.client.lock().await;
+        let result = client
+            .request(
+                "capture_pane",
+                json!({
+                    "origin_pane": self.origin_pane,
+                    "pane_id": params.pane_id,
+                    "lines": params.lines.unwrap_or(50),
+                }),
+            )
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let text = result["text"].as_str().unwrap_or("").to_string();
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Inject OSC 133 shell integration into a bash pane. Use after SSH or when markers aren't present. Only works with bash.")]
+    async fn inject_osc133(
+        &self,
+        Parameters(params): Parameters<InjectOsc133Params>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut client = self.client.lock().await;
+        let result = client
+            .request(
+                "inject_osc133",
+                json!({
+                    "origin_pane": self.origin_pane,
+                    "pane_id": params.pane_id,
+                }),
+            )
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let status = result["status"].as_str().unwrap_or("unknown");
+        let text = if status == "active" {
+            "OSC 133 injection successful — shell integration active.".to_string()
+        } else {
+            let msg = result["message"].as_str().unwrap_or("Injection may have failed");
+            format!("OSC 133 injection status: {} — {}", status, msg)
+        };
+
+        let is_error = status != "active";
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        if is_error {
+            result.is_error = Some(true);
+        }
+        Ok(result)
     }
 
     #[tool(description = "List command history for a pane, showing commands and their exit codes")]

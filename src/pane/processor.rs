@@ -67,6 +67,7 @@ impl PaneProcessor {
     ///
     /// Returns the OSC events found in this chunk, in order.
     pub fn process_chunk(&mut self, bytes: &[u8]) -> Vec<OscMatch> {
+        self.state.last_data = Some(std::time::Instant::now());
         let mut events = Vec::new();
         let mut pos = 0;
 

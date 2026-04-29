@@ -52,6 +52,11 @@ pub struct PaneState {
     pub completion_seq: u64,
     /// Exit code from the most recent D marker.
     pub last_exit_code: Option<i32>,
+    /// When the most recent OSC 133 marker was received.
+    /// Used to determine if shell integration is active.
+    pub last_osc133_marker: Option<Instant>,
+    /// When the most recent terminal data (%output) was received.
+    pub last_data: Option<Instant>,
 }
 
 impl PaneState {
@@ -64,6 +69,8 @@ impl PaneState {
             seq_counter: 0,
             completion_seq: 0,
             last_exit_code: None,
+            last_osc133_marker: None,
+            last_data: None,
         }
     }
 

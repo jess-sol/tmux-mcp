@@ -85,6 +85,7 @@ impl Osc133Parser {
         param: Option<&str>,
         state: &mut PaneState,
     ) {
+        state.last_osc133_marker = Some(std::time::Instant::now());
         match marker {
             b'A' => self.handle_a(state),
             b'B' => self.handle_b(state),

@@ -541,3 +541,77 @@ async fn test_command_run_rapid_sequential() {
     })
     .await;
 }
+
+// --- capture_pane ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_pane() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Run a command so there's something on screen
+        td.run("echo capture-test-marker").await;
+
+        let result = td
+            .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone(), "lines": 50}))
+            .await;
+        let text = result["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("capture-test-marker"),
+            "capture should contain marker, got: {:?}",
+            text
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_capture_pane_shows_prompt() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // After warm-up, screen should show a prompt with $
+        let result = td
+            .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone()}))
+            .await;
+        let text = result["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains('$'),
+            "capture should show prompt, got: {:?}",
+            text
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- list_panes osc133 field ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_panes_osc133_marker() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // After warm-up, markers should have been seen
+        let result = td.rpc("list_panes", json!({})).await;
+        let panes = result.as_array().expect("should be array");
+        let our_pane = panes
+            .iter()
+            .find(|p| p["pane_id"].as_str() == Some(&td.origin_pane))
+            .expect("origin pane should be in list");
+
+        let secs = our_pane["osc133_last_marker_secs"].as_f64();
+        assert!(secs.is_some(), "osc133_last_marker_secs should be set after warm-up");
+        assert!(
+            secs.unwrap() < 10.0,
+            "marker should be recent, got: {:?}s",
+            secs
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}
