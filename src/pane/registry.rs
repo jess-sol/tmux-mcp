@@ -31,14 +31,12 @@ pub enum SyncAction {
 /// Manages all tracked panes across the session.
 pub struct PaneRegistry {
     panes: HashMap<String, TrackedPane>,
-    origin_pane: String,
 }
 
 impl PaneRegistry {
-    pub fn new(origin_pane: String) -> Self {
+    pub fn new() -> Self {
         Self {
             panes: HashMap::new(),
-            origin_pane,
         }
     }
 
@@ -74,10 +72,6 @@ impl PaneRegistry {
 
         // Add new panes, update existing
         for (pane_id, lp) in &layout_ids {
-            if *pane_id == self.origin_pane {
-                continue;
-            }
-
             match self.panes.get_mut(pane_id) {
                 Some(tracked) => {
                     // Update position
@@ -175,22 +169,20 @@ mod tests {
 
     #[test]
     fn adds_new_panes() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         let actions = reg.apply_layout("@1", &[
             lp(0, 80, 24, 0, 0),
             lp(1, 80, 24, 0, 25),
         ]);
-        // %0 is origin, only %1 should be added
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.len(), 2);
+        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%0".into() }));
         assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%1".into() }));
-        assert_eq!(reg.len(), 1);
-        assert!(reg.get("%1").is_some());
-        assert!(reg.get("%0").is_none());
+        assert_eq!(reg.len(), 2);
     }
 
     #[test]
     fn removes_dead_panes() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)]);
         assert_eq!(reg.len(), 2);
 
@@ -202,7 +194,7 @@ mod tests {
 
     #[test]
     fn detects_resize() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
 
         let actions = reg.apply_layout("@1", &[lp(1, 120, 40, 0, 0)]);
@@ -217,7 +209,7 @@ mod tests {
 
     #[test]
     fn no_op_unchanged() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
 
         let actions = reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
@@ -226,7 +218,7 @@ mod tests {
 
     #[test]
     fn updates_position() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
         assert_eq!(reg.get("%1").unwrap().x, 0);
 
@@ -239,7 +231,7 @@ mod tests {
 
     #[test]
     fn preserves_other_windows() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
         reg.apply_layout("@2", &[lp(2, 80, 24, 0, 0)]);
         assert_eq!(reg.len(), 2);
@@ -253,7 +245,7 @@ mod tests {
 
     #[test]
     fn remove_window_clears_all() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)]);
         reg.apply_layout("@2", &[lp(3, 80, 24, 0, 0)]);
         assert_eq!(reg.len(), 3);
@@ -266,7 +258,7 @@ mod tests {
 
     #[test]
     fn set_pid_stores_value() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
 
         assert!(reg.get("%1").unwrap().pid.is_none());
@@ -276,13 +268,13 @@ mod tests {
 
     #[test]
     fn set_pid_unknown_pane_is_noop() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.set_pid("%99", 12345); // should not panic
     }
 
     #[test]
     fn processor_state_survives_layout_update() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]);
 
         // Feed data to the processor
@@ -297,13 +289,13 @@ mod tests {
 
     #[test]
     fn get_processor_mut_unknown() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
         assert!(reg.get_processor_mut("%99").is_none());
     }
 
     #[test]
     fn multi_window_lifecycle() {
-        let mut reg = PaneRegistry::new("%0".into());
+        let mut reg = PaneRegistry::new();
 
         // Window @1 with two panes
         reg.apply_layout("@1", &[lp(1, 100, 50, 0, 0), lp(2, 99, 50, 101, 0)]);

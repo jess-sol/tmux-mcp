@@ -41,30 +41,20 @@ pub struct RawTmuxConnection {
     notification_rx: mpsc::Receiver<Notification>,
     _child: Child,
     _reader_handle: tokio::task::JoinHandle<()>,
-    origin_pane: String,
-    session_id: String,
-    session_name: String,
+    session: String,
 }
 
 impl RawTmuxConnection {
-    /// Attach to the current tmux session in control mode.
+    /// Attach to a tmux session in control mode.
     ///
-    /// Discovers the origin pane and session, spawns `tmux -C attach-session`,
-    /// and starts the reader task for response/notification separation.
-    pub async fn connect() -> Result<Self> {
-        let origin_pane = query_tmux(&["display-message", "-p", "#{pane_id}"]).await?;
-        let session_id = discover_session_id().await?;
-        let session_name = query_tmux(&["display-message", "-p", "#{session_name}"]).await?;
-
-        tracing::info!(
-            "Connecting to tmux session {} ({}) from pane {}",
-            session_id,
-            session_name,
-            origin_pane,
-        );
+    /// `session` is the session target (name or ID, e.g. "main" or "$0").
+    /// Spawns `tmux -C attach-session -t <session>` and starts the reader
+    /// task for response/notification separation.
+    pub async fn connect(session: &str) -> Result<Self> {
+        tracing::info!("Connecting to tmux session {}", session);
 
         let mut cmd = Command::new("tmux");
-        cmd.args(["-C", "attach-session", "-t", &origin_pane]);
+        cmd.args(["-C", "attach-session", "-t", session]);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
@@ -86,9 +76,7 @@ impl RawTmuxConnection {
             notification_rx,
             _child: child,
             _reader_handle: reader_handle,
-            origin_pane,
-            session_id,
-            session_name,
+            session: session.to_string(),
         };
 
         // Consume initial attach response. tmux -C implicitly runs attach,
@@ -100,16 +88,8 @@ impl RawTmuxConnection {
         Ok(conn)
     }
 
-    pub fn origin_pane(&self) -> &str {
-        &self.origin_pane
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn session_name(&self) -> &str {
-        &self.session_name
+    pub fn session(&self) -> &str {
+        &self.session
     }
 
     pub fn child_pid(&self) -> Option<u32> {
@@ -211,30 +191,14 @@ impl RawTmuxConnection {
             .await
             .map(|_| ())
     }
-}
 
-// --- Helper Functions ---
-
-/// Run a one-shot tmux command (outside control mode) and return trimmed output.
-async fn query_tmux(args: &[&str]) -> Result<String> {
-    let output = Command::new("tmux")
-        .args(args)
-        .output()
-        .await
-        .context(SpawnSnafu)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Discover the session ID from the TMUX env var or by querying tmux.
-async fn discover_session_id() -> Result<String> {
-    // TMUX env var format: /tmp/tmux-1000/default,12345,$0
-    if let Ok(tmux_env) = std::env::var("TMUX") {
-        if let Some(session_id) = tmux_env.rsplit(',').next() {
-            if session_id.starts_with('$') {
-                return Ok(session_id.to_string());
-            }
-        }
+    /// Query the shell PID of a pane.
+    pub async fn query_pane_pid(&mut self, pane_id: &str) -> Result<u32> {
+        let output = self
+            .execute(&format!("display-message -t {} -p '#{{pane_pid}}'", pane_id))
+            .await?;
+        output.trim().parse::<u32>().map_err(|_| Error::CommandFailed {
+            message: format!("invalid pane_pid: {}", output.trim()),
+        })
     }
-    let id = query_tmux(&["display-message", "-p", "#{session_id}"]).await?;
-    if id.starts_with('$') { Ok(id) } else { Ok(format!("${}", id)) }
 }
