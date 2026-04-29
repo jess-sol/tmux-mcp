@@ -137,7 +137,9 @@ impl PaneProcessor {
         for line_idx in start_line..self.screen_lines() {
             let line_text = self.screen_line_text(line_idx);
             if line_idx == start_line {
-                // First line: skip prompt (everything before start_col)
+                // First line: skip prompt (everything before start_col).
+                // chars().skip() works here because screen_line_text() returns one char
+                // per terminal column (wide char spacer cells become ' ').
                 let input: String = line_text.chars().skip(start_col).collect();
                 text.push_str(&input);
             } else {

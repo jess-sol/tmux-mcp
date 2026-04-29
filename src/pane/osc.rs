@@ -78,13 +78,20 @@ pub fn find_next_osc(bytes: &[u8]) -> Option<OscMatch> {
         };
 
         let data = &bytes[data_start..data_end];
-        let event = parse_osc_event(osc_number, data)?;
-
-        return Some(OscMatch {
-            start: seq_start,
-            end: term_end,
-            event,
-        });
+        match parse_osc_event(osc_number, data) {
+            Some(event) => {
+                return Some(OscMatch {
+                    start: seq_start,
+                    end: term_end,
+                    event,
+                });
+            }
+            None => {
+                // Complete but unparseable — skip it and keep scanning
+                pos = term_end;
+                continue;
+            }
+        }
     }
 
     None
@@ -431,5 +438,29 @@ mod tests {
         let m = find_next_osc(bytes).unwrap();
         // Should skip the OSC 0 and find the OSC 133
         assert_eq!(m.event, osc133(b'B', None));
+    }
+
+    // --- Unparseable sequences must not block subsequent events ---
+
+    #[test]
+    fn unparseable_osc133_does_not_block_subsequent_events() {
+        // Empty marker (no letter after semicolon) followed by valid A
+        let bytes = b"\x1b]133;\x07\x1b]133;A\x07";
+        let m = find_next_osc(bytes).unwrap();
+        assert_eq!(m.event, osc133(b'A', None));
+    }
+
+    #[test]
+    fn non_utf8_osc7_does_not_block_subsequent_events() {
+        let bytes = b"\x1b]7;\xff\xff\x07\x1b]133;B\x07".to_vec();
+        let m = find_next_osc(&bytes).unwrap();
+        assert_eq!(m.event, osc133(b'B', None));
+    }
+
+    #[test]
+    fn lowercase_osc133_skipped_finds_next() {
+        let bytes = b"\x1b]133;a\x07\x1b]133;A\x07";
+        let m = find_next_osc(bytes).unwrap();
+        assert_eq!(m.event, osc133(b'A', None));
     }
 }

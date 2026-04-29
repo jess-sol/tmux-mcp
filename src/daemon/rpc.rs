@@ -597,13 +597,12 @@ async fn handle_command_run(
     let read_params = ReadParams::from_json(params)?;
 
     // --- Send the command ---
-    let seq_before = {
+    // Snapshot the front command ID so we can wait for a *new* record
+    let id_before = {
         let registry = state.registry.lock().await;
-        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
-    };
-    let marker_before = {
-        let registry = state.registry.lock().await;
-        registry.get(pane_id).and_then(|tp| tp.processor.state().last_osc133_marker)
+        registry.get(pane_id)
+            .and_then(|tp| tp.processor.state().commands.front().map(|c| c.id))
+            .unwrap_or(0)
     };
 
     {
@@ -613,87 +612,76 @@ async fn handle_command_run(
             .map_err(|e| RpcError::internal(format!("Failed to send command: {}", e)))?;
     }
 
-    // Wait up to 500ms for any marker (C or completion_seq bump) to verify OSC 133 is alive
-    let verify_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-    let mut marker_seen = false;
+    // --- Unified poll: wait for new command record, then for completion ---
+    // Phase 1 (first 500ms): wait for C marker to push a new record (id > id_before).
+    //   If no new record appears, OSC 133 is broken — error out.
+    // Phase 2 (remaining timeout): wait for that record to complete.
+    let marker_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+    let completion_deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+    let mut command_seen = false;
+
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        {
-            let registry = state.registry.lock().await;
-            if let Some(tp) = registry.get(pane_id) {
-                let ps = tp.processor.state();
-                if ps.completion_seq > seq_before {
-                    marker_seen = true;
-                    break;
-                }
-                if ps.last_osc133_marker != marker_before {
-                    marker_seen = true;
-                    break;
-                }
-            }
-        }
-        if tokio::time::Instant::now() >= verify_deadline {
-            break;
-        }
-    }
-
-    if !marker_seen {
-        tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
-        let mut registry = state.registry.lock().await;
-        if let Some(tp) = registry.get_mut(pane_id) {
-            tp.processor.state_mut().osc133_fail(leaf_pid);
-        }
-        let screen = capture_screen(&registry, pane_id, 20);
-        return Err(RpcError::internal(format!(
-            "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
-             Use debug_pane to inspect pane state.\n\nScreen:\n{}",
-            screen
-        )));
-    }
-
-    // --- Poll for completion or timeout ---
-    let deadline =
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
-
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         {
             let mut registry = state.registry.lock().await;
             if let Some(tp) = registry.get_mut(pane_id) {
                 let pane_state = tp.processor.state_mut();
                 if let Some(cmd) = pane_state.commands.front_mut() {
-                    if cmd.completed {
-                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                        return Ok(json!({
-                            "command_id": cmd.id,
-                            "command": cmd.command,
-                            "status": "completed",
-                            "exit_code": cmd.exit_code,
-                            "output": result.lines.join("\n"),
-                            "total_lines": result.total_lines,
-                            "lines_skipped": result.skipped,
-                            "search_matches": result.matched,
-                        }));
+                    if cmd.id > id_before {
+                        command_seen = true;
+                        if cmd.completed {
+                            let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                            return Ok(json!({
+                                "command_id": cmd.id,
+                                "command": cmd.command,
+                                "status": "completed",
+                                "exit_code": cmd.exit_code,
+                                "output": result.lines.join("\n"),
+                                "total_lines": result.total_lines,
+                                "lines_skipped": result.skipped,
+                                "search_matches": result.matched,
+                            }));
+                        }
                     }
                 }
             }
         }
 
-        if tokio::time::Instant::now() >= deadline {
-            // Timeout — return partial output, command still running
+        let now = tokio::time::Instant::now();
+
+        // Phase 1 timeout: no new command record appeared
+        if !command_seen && now >= marker_deadline {
+            tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
+            let mut registry = state.registry.lock().await;
+            if let Some(tp) = registry.get_mut(pane_id) {
+                tp.processor.state_mut().osc133_fail(leaf_pid);
+            }
+            let screen = capture_screen(&registry, pane_id, 20);
+            return Err(RpcError::internal(format!(
+                "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
+                 Use debug_pane to inspect pane state.\n\nScreen:\n{}",
+                screen
+            )));
+        }
+
+        // Phase 2 timeout: command seen but not completed
+        if now >= completion_deadline {
             let mut registry = state.registry.lock().await;
             if let Some(tp) = registry.get_mut(pane_id) {
                 let pane_state = tp.processor.state_mut();
                 if let Some(cmd) = pane_state.commands.front_mut() {
-                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "running",
-                        "output": result.lines.join("\n"),
-                        "total_lines": result.total_lines,
-                    }));
+                    if cmd.id > id_before {
+                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
+                        return Ok(json!({
+                            "command_id": cmd.id,
+                            "command": cmd.command,
+                            "status": "running",
+                            "output": result.lines.join("\n"),
+                            "total_lines": result.total_lines,
+                        }));
+                    }
                 }
             }
             return Ok(json!({
@@ -828,14 +816,14 @@ async fn handle_inject_osc133(
     }
 
     // --- Inject the script ---
-    {
-        let mut conn = state.conn.lock().await;
-        for line in OSC133_INJECT_LINES {
+    for line in OSC133_INJECT_LINES {
+        {
+            let mut conn = state.conn.lock().await;
             conn.send_command(pane_id, line)
                 .await
                 .map_err(|e| RpcError::internal(format!("Failed to send injection: {}", e)))?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
     // --- Post-inject probe ---

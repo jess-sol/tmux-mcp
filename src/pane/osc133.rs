@@ -218,6 +218,7 @@ impl Osc133Parser {
                 // Set exit_code, wait for B to mark completed.
                 if let Some(cmd) = state.active_command_mut() {
                     cmd.exit_code = exit_code;
+                    cmd.output_done = true;
                 }
                 self.phase = Osc133Phase::Idle;
                 state.activity = Activity::Idle;
@@ -232,6 +233,7 @@ impl Osc133Parser {
                     if let Some(cmd) = state.active_command_mut() {
                         cmd.output = output;
                         cmd.exit_code = exit_code;
+                        cmd.output_done = true;
                     }
                 }
                 self.phase = Osc133Phase::Idle;
@@ -249,6 +251,7 @@ impl Osc133Parser {
                     if let Some(cmd) = state.active_command_mut() {
                         cmd.output = output;
                         cmd.exit_code = exit_code;
+                        cmd.output_done = true;
                     }
                 }
                 self.phase = Osc133Phase::Idle;
@@ -836,6 +839,30 @@ mod tests {
         marker(&mut p, b'B', None, &mut s);
 
         assert_eq!(s.commands[0].output, "file1\nfile2\nfile3\n");
+    }
+
+    #[test]
+    fn d_without_exit_code_param_stops_output_accumulation() {
+        let mut p = Osc133Parser::new();
+        let mut s = PaneState::new();
+
+        marker(&mut p, b'A', None, &mut s);
+        marker(&mut p, b'B', None, &mut s);
+        marker(&mut p, b'C', None, &mut s);
+        p.append_output("hello\n", &mut s);
+        // D without exit code parameter — output is done
+        marker(&mut p, b'D', None, &mut s);
+
+        // Prompt text between D and B should NOT leak into command output
+        p.append_output("user@host $ ", &mut s);
+
+        marker(&mut p, b'A', None, &mut s);
+        marker(&mut p, b'B', None, &mut s);
+
+        assert_eq!(s.commands.len(), 1);
+        assert_eq!(s.commands[0].output, "hello\n");
+        assert!(s.commands[0].exit_code.is_none());
+        assert!(s.commands[0].completed);
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub struct CommandRunParams {
     pub head: Option<u64>,
     #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
     pub tail: Option<u64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern")]
+    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
     pub search: Option<String>,
 }
 
@@ -63,7 +63,7 @@ pub struct CommandReadParams {
     pub head: Option<u64>,
     #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
     pub tail: Option<u64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern")]
+    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
     pub search: Option<String>,
 }
 

@@ -17,6 +17,9 @@ pub struct CommandRecord {
     pub output: String,
     /// Exit code from D marker. None if still running or unknown.
     pub exit_code: Option<i32>,
+    /// Whether the D marker has been received (output is done).
+    /// Distinct from exit_code because D can arrive without an exit code parameter.
+    pub output_done: bool,
     /// Whether the command has completed (B marker finalized).
     pub completed: bool,
     /// Read cursor — line offset into output. Only `next` advances this.
@@ -122,6 +125,7 @@ impl PaneState {
             command,
             output: String::new(),
             exit_code: None,
+            output_done: false,
             completed: false,
             read_cursor: 0,
             timestamp: Instant::now(),
@@ -140,6 +144,7 @@ impl PaneState {
             command,
             output,
             exit_code,
+            output_done: true,
             completed: true,
             read_cursor: 0,
             timestamp: Instant::now(),
@@ -160,11 +165,11 @@ impl PaneState {
     }
 
     /// Append output to the active (incomplete) command.
-    /// Stops accumulating after D marker sets exit_code (command output is done,
-    /// remaining text before B is prompt content).
+    /// Stops accumulating after D marker (output_done), remaining text before B
+    /// is prompt content.
     pub fn append_active_output(&mut self, text: &str) {
         if let Some(cmd) = self.commands.front_mut() {
-            if !cmd.completed && cmd.exit_code.is_none() {
+            if !cmd.completed && !cmd.output_done {
                 cmd.output.push_str(text);
             }
         }
