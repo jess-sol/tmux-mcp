@@ -1,6 +1,16 @@
 /// Daemon: connects to a tmux session, discovers all panes, and continuously
 /// processes notifications — dispatching output to per-pane VTE processors
 /// and reacting to topology changes via layout-change events.
+///
+/// Also runs a Unix socket server for RPC clients (MCP servers).
+
+pub mod rpc;
+pub mod server;
+
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::pane::registry::{PaneRegistry, SyncAction};
 use crate::parse::escape::unescape_tmux_output;
@@ -8,97 +18,132 @@ use crate::parse::layout::parse_layout;
 use crate::tmux::connection::RawTmuxConnection;
 use crate::tmux::notification::Notification;
 
-/// The tmux-mcp daemon. Owns the tmux connection and pane registry.
-pub struct Daemon {
-    conn: RawTmuxConnection,
-    registry: PaneRegistry,
-}
+use rpc::DaemonState;
 
-impl Daemon {
-    /// Connect to a tmux session, bootstrap pane state, and run the event loop.
-    /// Returns when the session closes or the connection drops.
-    pub async fn run(session: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = RawTmuxConnection::connect(session).await?;
-        let mut registry = PaneRegistry::new();
+/// Connect to a tmux session, bootstrap pane state, start the socket server,
+/// and run the event loop. Returns when the session closes or the daemon is
+/// cancelled (idle timeout).
+pub async fn run(session: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = RawTmuxConnection::connect(session).await?;
+    let mut registry = PaneRegistry::new();
 
-        // Bootstrap: discover all existing panes in one query
-        let output = conn
-            .execute(
-                "list-panes -s -F '#{window_id}\t#{pane_id}\t#{pane_pid}\t#{window_layout}'",
-            )
-            .await?;
-        let (windows, panes) = parse_bootstrap(&output);
+    // Bootstrap: discover all existing panes in one query
+    let output = conn
+        .execute(
+            "list-panes -s -F '#{window_id}\t#{pane_id}\t#{pane_pid}\t#{window_layout}'",
+        )
+        .await?;
+    let (windows, panes) = parse_bootstrap(&output);
 
-        tracing::info!(
-            "Bootstrap: {} windows, {} panes",
-            windows.len(),
-            panes.len(),
-        );
+    tracing::info!(
+        "Bootstrap: {} windows, {} panes",
+        windows.len(),
+        panes.len(),
+    );
 
-        // Seed registry from layouts
-        for win in &windows {
-            let layout_panes = parse_layout(&win.layout);
-            let actions = registry.apply_layout(&win.window_id, &layout_panes);
-            execute_actions(&mut conn, &mut registry, &actions).await;
-        }
-
-        // Set PIDs from the same query
-        for bp in &panes {
-            registry.set_pid(&bp.pane_id, bp.pid);
-        }
-
-        tracing::info!("Monitoring {} panes", registry.len());
-
-        // Event loop — process notifications continuously
-        let mut daemon = Daemon { conn, registry };
-        daemon.event_loop().await
+    // Seed registry from layouts
+    for win in &windows {
+        let layout_panes = parse_layout(&win.layout);
+        let actions = registry.apply_layout(&win.window_id, &layout_panes);
+        execute_actions(&mut conn, &mut registry, &actions).await;
     }
 
-    async fn event_loop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            let Some(notification) = self.conn.recv_notification().await else {
-                tracing::error!("Tmux connection closed");
-                break;
-            };
+    // Set PIDs from the same query
+    for bp in &panes {
+        registry.set_pid(&bp.pane_id, bp.pid);
+    }
 
-            match notification {
-                Notification::LayoutChange { window_id, layout } => {
-                    let layout_panes = parse_layout(&layout);
-                    let actions =
-                        self.registry.apply_layout(&window_id, &layout_panes);
-                    execute_actions(&mut self.conn, &mut self.registry, &actions).await;
-                }
+    tracing::info!("Monitoring {} panes", registry.len());
 
-                Notification::WindowClose { window_id } => {
-                    tracing::info!("Window {} closed", window_id);
-                    let actions = self.registry.remove_window(&window_id);
-                    execute_actions(&mut self.conn, &mut self.registry, &actions).await;
-                }
+    // Wrap in shared state for concurrent access
+    let state = Arc::new(DaemonState {
+        conn: Mutex::new(conn),
+        registry: Mutex::new(registry),
+    });
 
-                Notification::Output { pane_id, data } => {
-                    let Some(proc) = self.registry.get_processor_mut(&pane_id) else {
-                        tracing::trace!("Output for unknown pane {}", pane_id);
-                        continue;
-                    };
-                    let bytes = unescape_tmux_output(&data);
-                    proc.process_chunk(&bytes);
-                }
+    let cancel = CancellationToken::new();
 
-                Notification::Exit { .. } | Notification::SessionClose { .. } => {
-                    tracing::info!("Session ended");
+    // Spawn socket server
+    let server_state = state.clone();
+    let server_cancel = cancel.clone();
+    let session_owned = session.to_string();
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = server::serve(&session_owned, server_state, server_cancel).await {
+            tracing::error!("Server error: {}", e);
+        }
+    });
+
+    // Event loop — process notifications continuously
+    let event_result = event_loop(state.clone(), cancel.clone()).await;
+
+    // If event loop exited, cancel the server too
+    cancel.cancel();
+    let _ = server_handle.await;
+
+    event_result
+}
+
+async fn event_loop(
+    state: Arc<DaemonState>,
+    cancel: CancellationToken,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        let notification = {
+            let mut conn = state.conn.lock().await;
+            tokio::select! {
+                notif = conn.recv_notification() => notif,
+                _ = cancel.cancelled() => {
+                    tracing::info!("Daemon cancelled");
                     break;
                 }
-
-                _ => {}
             }
-        }
+        };
 
-        Ok(())
+        let Some(notification) = notification else {
+            tracing::error!("Tmux connection closed");
+            break;
+        };
+
+        match notification {
+            Notification::LayoutChange { window_id, layout } => {
+                let layout_panes = parse_layout(&layout);
+                let mut conn = state.conn.lock().await;
+                let mut registry = state.registry.lock().await;
+                let actions = registry.apply_layout(&window_id, &layout_panes);
+                execute_actions_locked(&mut conn, &mut registry, &actions).await;
+            }
+
+            Notification::WindowClose { window_id } => {
+                tracing::info!("Window {} closed", window_id);
+                let mut conn = state.conn.lock().await;
+                let mut registry = state.registry.lock().await;
+                let actions = registry.remove_window(&window_id);
+                execute_actions_locked(&mut conn, &mut registry, &actions).await;
+            }
+
+            Notification::Output { pane_id, data } => {
+                let mut registry = state.registry.lock().await;
+                let Some(proc) = registry.get_processor_mut(&pane_id) else {
+                    continue;
+                };
+                let bytes = unescape_tmux_output(&data);
+                proc.process_chunk(&bytes);
+            }
+
+            Notification::Exit { .. } | Notification::SessionClose { .. } => {
+                tracing::info!("Session ended");
+                break;
+            }
+
+            _ => {}
+        }
     }
+
+    Ok(())
 }
 
-/// Execute sync actions against the tmux connection.
-async fn execute_actions(
+/// Execute sync actions while holding both locks.
+async fn execute_actions_locked(
     conn: &mut RawTmuxConnection,
     registry: &mut PaneRegistry,
     actions: &[SyncAction],
@@ -136,6 +181,15 @@ async fn execute_actions(
             }
         }
     }
+}
+
+/// Execute sync actions with direct ownership (used during bootstrap).
+async fn execute_actions(
+    conn: &mut RawTmuxConnection,
+    registry: &mut PaneRegistry,
+    actions: &[SyncAction],
+) {
+    execute_actions_locked(conn, registry, actions).await;
 }
 
 // --- Bootstrap parsing ---
@@ -221,7 +275,6 @@ mod tests {
 
     #[test]
     fn parse_bootstrap_deduplicates_windows() {
-        // Two panes in same window — layout appears twice
         let output = "@0\t%0\t100\taaaa,200x50,0,0{100x50,0,0,0,99x50,101,0,1}\n\
                        @0\t%1\t200\taaaa,200x50,0,0{100x50,0,0,0,99x50,101,0,1}";
         let (windows, panes) = parse_bootstrap(output);
@@ -248,7 +301,7 @@ mod tests {
     fn parse_bootstrap_invalid_pid() {
         let output = "@0\t%0\tnotanumber\taaaa,80x24,0,0,0";
         let (windows, panes) = parse_bootstrap(output);
-        assert_eq!(windows.len(), 1); // window still parsed
-        assert!(panes.is_empty()); // pid failed to parse
+        assert_eq!(windows.len(), 1);
+        assert!(panes.is_empty());
     }
 }
