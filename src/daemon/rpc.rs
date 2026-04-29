@@ -54,6 +54,7 @@ pub async fn dispatch(
         "command_run" => handle_command_run(params, state).await,
         "capture_pane" => handle_capture_pane(params, state).await,
         "inject_osc133" => handle_inject_osc133(params, state).await,
+        "send_keys" => handle_send_keys(params, state).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }
@@ -418,7 +419,7 @@ async fn handle_command_run(
         let screen = capture_screen(&registry, pane_id, 20);
         return Err(RpcError::internal(format!(
             "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
-             Use capture_pane to inspect and inject_osc133 to recover.\n\nScreen:\n{}",
+             Use capture_pane to inspect pane state.\n\nScreen:\n{}",
             screen
         )));
     }
@@ -631,4 +632,44 @@ async fn handle_inject_osc133(
             "screen": screen,
         }))
     }
+}
+
+async fn handle_send_keys(
+    params: &Value,
+    state: &Arc<DaemonState>,
+) -> Result<Value, RpcError> {
+    let pane_id = params["pane_id"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
+    let keys = params["keys"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("keys is required"))?;
+
+    if keys.len() > 64 {
+        return Err(RpcError::invalid_params(
+            format!("keys too long: {} chars (max 64)", keys.len()),
+        ));
+    }
+
+    // Validate window access
+    {
+        let registry = state.registry.lock().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
+    }
+
+    // Send keys
+    {
+        let mut conn = state.conn.lock().await;
+        conn.send_raw_keys(pane_id, keys)
+            .await
+            .map_err(|e| RpcError::internal(format!("Failed to send keys: {}", e)))?;
+    }
+
+    // Brief pause for terminal to process, then return screen
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let registry = state.registry.lock().await;
+    let screen = capture_screen(&registry, pane_id, 20);
+    Ok(json!({ "screen": screen }))
 }

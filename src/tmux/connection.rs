@@ -169,6 +169,13 @@ impl TmuxCommands {
         Ok(())
     }
 
+    /// Send raw keys to a pane, passing the keys string directly to tmux
+    /// for key name interpretation (C-c, Enter, Escape, etc).
+    pub async fn send_raw_keys(&mut self, target: &str, keys: &str) -> Result<()> {
+        self.execute(&format!("send-keys -t {} {}", target, keys)).await?;
+        Ok(())
+    }
+
     /// List panes in a window or session, returning raw tmux output.
     pub async fn list_panes(&mut self, target: &str, session_wide: bool) -> Result<String> {
         let flag = if session_wide { "-s" } else { "" };

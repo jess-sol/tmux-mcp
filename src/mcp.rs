@@ -71,6 +71,16 @@ pub struct InjectOsc133Params {
     pub pane_id: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendKeysParams {
+    #[schemars(description = "Target pane ID (e.g. \"%0\")")]
+    pub pane_id: String,
+    #[schemars(
+        description = "Keys to send. Use tmux key names: Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace. For literal text, just pass the string. Max 64 chars."
+    )]
+    pub keys: String,
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -220,6 +230,28 @@ impl TmuxMcp {
             result.is_error = Some(true);
         }
         Ok(result)
+    }
+
+    #[tool(description = "Send keystrokes to a pane. VERY SLOW — each call has ~1 second round-trip. Only use when structured tools (command_run, inject_osc133) cannot work. Examples: Ctrl+C to cancel a stuck process, Ctrl+D to close a shell, Enter to dismiss a prompt. Returns screen capture showing the effect.")]
+    async fn send_keys(
+        &self,
+        Parameters(params): Parameters<SendKeysParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut client = self.client.lock().await;
+        let result = client
+            .request(
+                "send_keys",
+                json!({
+                    "origin_pane": self.origin_pane,
+                    "pane_id": params.pane_id,
+                    "keys": params.keys,
+                }),
+            )
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+
+        let screen = result["screen"].as_str().unwrap_or("").to_string();
+        Ok(CallToolResult::success(vec![Content::text(screen)]))
     }
 
     #[tool(description = "List command history for a pane, showing commands and their exit codes")]

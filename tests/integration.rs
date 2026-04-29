@@ -667,3 +667,56 @@ async fn test_inject_skips_if_already_active() {
     })
     .await;
 }
+
+// --- send_keys ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_keys_ctrl_c() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Start a long-running command — expect it to timeout/fail
+        let _ = td.client.as_mut().unwrap().request(
+            "command_run",
+            json!({
+                "origin_pane": td.origin_pane,
+                "pane_id": td.origin_pane.clone(),
+                "command": "sleep 100",
+                "timeout_secs": 1,
+            }),
+        ).await;
+
+        // Send Ctrl+C to cancel it
+        let result = td
+            .rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-c"}))
+            .await;
+
+        let screen = result["screen"].as_str().unwrap_or("");
+        assert!(
+            screen.contains('$'),
+            "screen should show prompt after Ctrl+C: {:?}",
+            screen
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_keys_returns_screen() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Send Enter to get a fresh prompt
+        let result = td
+            .rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "Enter"}))
+            .await;
+
+        let screen = result["screen"].as_str().unwrap_or("");
+        assert!(!screen.is_empty(), "send_keys should return screen capture");
+
+        td.cleanup().await;
+    })
+    .await;
+}
