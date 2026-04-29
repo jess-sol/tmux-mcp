@@ -122,6 +122,41 @@ impl PaneProcessor {
         self.osc133.phase()
     }
 
+    /// Read user input from the terminal grid, starting from the cursor
+    /// position snapshotted at the last B marker (input_start).
+    ///
+    /// Reads from input_start forward to end of content (last non-space cell),
+    /// across wrapped lines. Returns empty string if no input_start is set or
+    /// no content has been typed.
+    pub fn read_input(&self) -> String {
+        let Some((start_line, start_col)) = self.state.input_start else {
+            return String::new();
+        };
+
+        let mut text = String::new();
+        for line_idx in start_line..self.screen_lines() {
+            let line_text = self.screen_line_text(line_idx);
+            if line_idx == start_line {
+                // First line: skip prompt (everything before start_col)
+                let input: String = line_text.chars().skip(start_col).collect();
+                text.push_str(&input);
+            } else {
+                if line_text.is_empty() {
+                    break;
+                }
+                text.push_str(&line_text);
+            }
+        }
+        text.trim().to_string()
+    }
+
+    /// Check whether the user appears to be typing at the prompt.
+    /// Returns true when input_start is set (B marker seen) and
+    /// the terminal grid has non-empty content after the prompt.
+    pub fn has_input_content(&self) -> bool {
+        self.state.input_start.is_some() && !self.read_input().is_empty()
+    }
+
     /// Resize the headless terminal to new dimensions.
     /// Called when tmux reports changed pane dimensions via `%layout-change`.
     pub fn resize(&mut self, lines: usize, columns: usize) {
@@ -181,11 +216,34 @@ impl PaneProcessor {
     fn handle_osc_event(&mut self, event: &OscEvent) {
         match event {
             OscEvent::Osc133 { marker, param } => {
+                // For C marker, read command text from the terminal grid
+                // before the parser clears state. This replaces strip_escapes.
+                let screen_input = if *marker == b'C' {
+                    let input = self.read_input();
+                    if input.is_empty() { None } else { Some(input) }
+                } else {
+                    None
+                };
+
                 self.osc133.handle_marker(
                     *marker,
                     param.as_deref(),
                     &mut self.state,
+                    screen_input.as_deref(),
                 );
+
+                // Snapshot cursor position at B marker — marks the start of
+                // user input (right after the prompt).
+                if *marker == b'B' {
+                    self.state.input_start = Some(self.cursor_position());
+                }
+
+                // Clear input_start when leaving Input phase (command started
+                // or prompt reset).
+                if *marker == b'C' || *marker == b'A' {
+                    self.state.input_start = None;
+                }
+
                 if matches!(self.osc133.phase(), Osc133Phase::Executing { .. }) {
                     self.state.activity = crate::pane::state::Activity::Busy;
                 }
@@ -382,9 +440,10 @@ mod tests {
         assert_eq!(cmds[0].exit_code, Some(0));
     }
 
-    /// C with no param, no E — capture fallback strips escapes from B-to-C content.
+    /// C with no param, no E — screen read provides command text, ANSI escapes
+    /// are naturally absent because the terminal renders them as attributes.
     #[test]
-    fn capture_fallback_strips_ansi_escapes() {
+    fn screen_read_fallback_has_no_escapes() {
         let mut p = PaneProcessor::new(24, 80);
 
         p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
@@ -393,7 +452,6 @@ mod tests {
         p.process_chunk(b"\x1b[1mecho hello\x1b[0m\x1b]133;C\x1b\\");
 
         if let Osc133Phase::Executing { command } = p.osc133_phase() {
-            // Bold escape stripped, just "echo hello" with prompt prefix
             assert!(command.contains("echo hello"), "command: {:?}", command);
             assert!(!command.contains("\x1b"), "should not contain raw escapes: {:?}", command);
         } else {
@@ -488,6 +546,292 @@ mod tests {
         assert_eq!(cmds[0].command, "echo hello");
         assert_eq!(cmds[0].exit_code, Some(0));
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
+    }
+
+    // --- read_input / has_input_content ---
+
+    #[test]
+    fn read_input_empty_before_b_marker() {
+        let p = PaneProcessor::new(24, 80);
+        assert_eq!(p.read_input(), "");
+        assert!(!p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_empty_at_prompt_with_no_typing() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        assert_eq!(p.read_input(), "");
+        assert!(!p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_detects_typed_text() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"ls -la");
+        assert_eq!(p.read_input(), "ls -la");
+        assert!(p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_handles_backspace() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        // Type "lss", backspace (BS+space+BS erases 's'), then " -la"
+        p.process_chunk(b"lss\x08 \x08 -la");
+        assert_eq!(p.read_input(), "ls -la");
+        assert!(p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_empty_after_full_backspace() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        // Type "hi", then backspace twice (BS+space+BS × 2)
+        p.process_chunk(b"hi\x08 \x08\x08 \x08");
+        assert_eq!(p.read_input(), "");
+        assert!(!p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_cleared_after_c_marker() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo hello");
+        assert!(p.has_input_content());
+
+        // C marker — command starts executing, input_start is cleared
+        p.process_chunk(b"\x1b]133;C\x1b\\");
+        assert!(!p.has_input_content());
+        assert!(p.state().input_start.is_none());
+    }
+
+    #[test]
+    fn read_input_cleared_after_a_marker() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"some text");
+        assert!(p.has_input_content());
+
+        // A marker — prompt reset
+        p.process_chunk(b"\x1b]133;A\x1b\\");
+        assert!(!p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_provides_command_text_at_c() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        // Full cycle: prompt → type → execute
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo hello\x1b]133;C\x1b\\");
+
+        // Command text should come from screen read
+        if let Osc133Phase::Executing { command } = p.osc133_phase() {
+            assert_eq!(command, "echo hello");
+        } else {
+            panic!("Expected Executing");
+        }
+    }
+
+    #[test]
+    fn input_start_set_at_b_marker() {
+        let mut p = PaneProcessor::new(24, 80);
+        assert!(p.state().input_start.is_none());
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        // Cursor should be at (0, 2) — after "$ "
+        assert_eq!(p.state().input_start, Some((0, 2)));
+    }
+
+    // --- read_input edge cases: cursor movement ---
+
+    #[test]
+    fn read_input_after_cursor_home() {
+        // Ctrl+A / Home: cursor moves to start of input, text still on screen
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo hello");
+        // Move cursor to column 2 (start of input, after prompt "$ ")
+        // CSI <col>G = cursor horizontal absolute (1-indexed)
+        p.process_chunk(b"\x1b[3G");
+        assert_eq!(p.cursor_position(), (0, 2));
+        // Text is still on screen — read_input reads content, not cursor position
+        assert_eq!(p.read_input(), "echo hello");
+        assert!(p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_after_cursor_mid_command() {
+        // Arrow left into middle of command
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo hello");
+        // Move cursor back 5 positions (into "hello")
+        p.process_chunk(b"\x1b[5D");
+        assert_eq!(p.cursor_position(), (0, 7));
+        assert_eq!(p.read_input(), "echo hello");
+    }
+
+    #[test]
+    fn read_input_after_insert_in_middle() {
+        // Type "hllo", move back 3, type "e" + redraw rest
+        // Simulates readline insert: overwrite from cursor, reposition
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"hllo");
+        // Move cursor back 3 (to between 'h' and first 'l')
+        p.process_chunk(b"\x1b[3D");
+        // Readline redraws: "ello" from cursor position, then moves back 3
+        p.process_chunk(b"ello\x1b[3D");
+        assert_eq!(p.read_input(), "hello");
+    }
+
+    // --- read_input edge cases: line editing ---
+
+    #[test]
+    fn read_input_after_ctrl_u_kill_line() {
+        // Ctrl+U: move to start, erase to end of line, redraw prompt
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"hello world");
+        // Simulate Ctrl+U: cursor to start of input, erase to end
+        p.process_chunk(b"\x1b[3G\x1b[K");
+        assert_eq!(p.read_input(), "");
+        assert!(!p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_after_ctrl_k_kill_to_end() {
+        // Ctrl+K: erase from cursor to end of line
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo hello world");
+        // Move cursor back to after "echo " (5 chars), then erase to end
+        p.process_chunk(b"\x1b[11D\x1b[K");
+        assert_eq!(p.read_input(), "echo");
+    }
+
+    // --- read_input edge cases: wrapping ---
+
+    #[test]
+    fn read_input_wrapped_command() {
+        // Narrow terminal: 20 cols. Prompt "$ " = 2 chars, 18 chars per line.
+        let mut p = PaneProcessor::new(24, 20);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        assert_eq!(p.state().input_start, Some((0, 2)));
+
+        // Type a command that wraps: 25 chars total
+        p.process_chunk(b"echo this-is-a-long-cmd-x");
+        // First line: "$ echo this-is-a-lo" (2 prompt + 18 chars)
+        // Second line: "ng-cmd-x" (remaining 7 chars)
+        let input = p.read_input();
+        assert!(
+            input.contains("echo this-is-a-long-cmd-x"),
+            "wrapped command should be fully readable: {:?}",
+            input
+        );
+        assert!(p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_wrapped_then_erased() {
+        // Narrow terminal, type long command, then erase all input.
+        // Simulates what readline does for Ctrl+U on a wrapped line:
+        // redraw prompt on current cursor line, erase from prompt to end,
+        // erase the wrapped continuation line.
+        let mut p = PaneProcessor::new(24, 20);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo this-is-a-long-cmd-x");
+
+        // Move cursor to line 0, col 2 (after prompt), erase to end of line,
+        // then move to line 1, erase entire line, then back to line 0 col 2.
+        p.process_chunk(b"\x1b[1;3H\x1b[K\x1b[2;1H\x1b[2K\x1b[1;3H");
+        assert_eq!(p.read_input(), "");
+        assert!(!p.has_input_content());
+    }
+
+    // --- read_input edge cases: multiline prompt ---
+
+    #[test]
+    fn read_input_with_multiline_prompt() {
+        // Two-line prompt: "user@host\n$ "
+        let mut p = PaneProcessor::new(24, 80);
+        // Line 0: prompt part 1 + A marker
+        p.process_chunk(b"\x1b]133;A\x1b\\user@host\r\n$ \x1b]133;B\x1b\\");
+        // input_start should be on line 1, column 2
+        assert_eq!(p.state().input_start, Some((1, 2)));
+
+        p.process_chunk(b"ls -la");
+        assert_eq!(p.read_input(), "ls -la");
+        assert!(p.has_input_content());
+    }
+
+    #[test]
+    fn read_input_multiline_prompt_no_typing() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\user@host\r\n$ \x1b]133;B\x1b\\");
+        assert_eq!(p.read_input(), "");
+        assert!(!p.has_input_content());
+    }
+
+    // --- read_input: command text at C marker ---
+
+    #[test]
+    fn screen_read_command_text_with_editing() {
+        // Type with backspace editing, verify C marker gets correct command
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        // Type "ecoh", backspace twice (BS+space+BS), type "ho"
+        p.process_chunk(b"ecoh\x08 \x08\x08 \x08ho");
+        assert_eq!(p.read_input(), "echo");
+
+        // C marker — command text should come from screen read
+        p.process_chunk(b"\x1b]133;C\x1b\\");
+        if let Osc133Phase::Executing { command } = p.osc133_phase() {
+            assert_eq!(command, "echo");
+        } else {
+            panic!("Expected Executing");
+        }
+    }
+
+    #[test]
+    fn screen_read_command_text_with_cursor_home_then_enter() {
+        // Type "echo hello", Ctrl+A (cursor home), then Enter
+        // Cursor is at start of input when C fires, but text is still on screen
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo hello");
+        // Ctrl+A: cursor to column 2 (after prompt)
+        p.process_chunk(b"\x1b[3G");
+        assert_eq!(p.cursor_position(), (0, 2));
+        // Enter triggers C marker — command text should still be "echo hello"
+        p.process_chunk(b"\x1b]133;C\x1b\\");
+        if let Osc133Phase::Executing { command } = p.osc133_phase() {
+            assert_eq!(command, "echo hello");
+        } else {
+            panic!("Expected Executing");
+        }
+    }
+
+    #[test]
+    fn screen_read_wrapped_command_at_c_marker() {
+        // Narrow terminal, long command, verify C gets full text
+        let mut p = PaneProcessor::new(24, 20);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"echo long-command-here");
+        // C marker
+        p.process_chunk(b"\x1b]133;C\x1b\\");
+        if let Osc133Phase::Executing { command } = p.osc133_phase() {
+            assert!(
+                command.contains("echo long-command-here"),
+                "wrapped command text: {:?}",
+                command
+            );
+        } else {
+            panic!("Expected Executing");
+        }
     }
 
 }

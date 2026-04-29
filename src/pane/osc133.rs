@@ -37,6 +37,16 @@ pub enum Osc133Phase {
     },
 }
 
+impl Osc133Phase {
+    /// If the phase is Executing, return the command text.
+    pub fn executing_command(&self) -> Option<&str> {
+        match self {
+            Osc133Phase::Executing { command } => Some(command.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// The OSC 133 parser — a state machine that produces CommandRecords.
 #[derive(Debug)]
 pub struct Osc133Parser {
@@ -79,17 +89,21 @@ impl Osc133Parser {
     /// `marker` is the uppercase letter (A-E).
     /// `param` is the optional parameter (exit code for D, command text for E,
     /// cmdline_url for C).
+    /// `screen_input` is the command text read from the terminal grid (for C
+    /// marker fallback). Provided by PaneProcessor which has access to the
+    /// terminal.
     pub fn handle_marker(
         &mut self,
         marker: u8,
         param: Option<&str>,
         state: &mut PaneState,
+        screen_input: Option<&str>,
     ) {
         state.last_osc133_marker = Some(std::time::Instant::now());
         match marker {
             b'A' => self.handle_a(state),
             b'B' => self.handle_b(state),
-            b'C' => self.handle_c(param, state),
+            b'C' => self.handle_c(param, state, screen_input),
             b'D' => self.handle_d(param, state),
             b'E' => self.handle_e(param, state),
             _ => tracing::debug!("Unknown OSC 133 marker: {}", marker as char),
@@ -164,21 +178,22 @@ impl Osc133Parser {
     /// From any state except Executing: create new Executing state.
     /// If already Executing: ignore (duplicate C).
     ///
-    /// Command text priority: E (pending_command_text) > C cmdline_url > capture fallback.
-    /// The capture buffer (B-to-C content) is the echoed command text; we strip
-    /// escape sequences to extract it, then clear the buffer (output starts here).
-    fn handle_c(&mut self, param: Option<&str>, state: &mut PaneState) {
+    /// Command text priority: E (pending_command_text) > C cmdline_url > screen_input.
+    /// `screen_input` is the command text read from the terminal grid by
+    /// PaneProcessor — it handles all editing (backspace, cursor movement,
+    /// etc.) correctly because it reads from the real terminal emulator.
+    fn handle_c(&mut self, param: Option<&str>, state: &mut PaneState, screen_input: Option<&str>) {
         if matches!(self.phase, Osc133Phase::Executing { .. }) {
             tracing::debug!("Duplicate OSC 133;C — ignoring");
             return;
         }
 
-        // Command text: E > C cmdline_url > B-to-C capture (escape-stripped)
+        // Command text: E > C cmdline_url > screen input from terminal grid
         let command = self
             .pending_command_text
             .take()
             .or_else(|| param.and_then(parse_cmdline_url))
-            .unwrap_or_else(|| strip_escapes(&self.capture));
+            .unwrap_or_else(|| screen_input.unwrap_or_default().to_string());
 
         // C is the delimiter — everything after is command output.
         self.capture.clear();
@@ -312,28 +327,19 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&result).into_owned()
 }
 
-/// Strip ANSI escape sequences from raw terminal text, returning only visible characters.
-/// Uses vte's parser with a minimal Perform impl that collects only printable chars.
-fn strip_escapes(raw: &str) -> String {
-    struct TextCollector(String);
-    impl vte::Perform for TextCollector {
-        fn print(&mut self, c: char) {
-            self.0.push(c);
-        }
-    }
-    let mut parser = vte::Parser::new();
-    let mut collector = TextCollector(String::with_capacity(raw.len()));
-    parser.advance(&mut collector, raw.as_bytes());
-    collector.0
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Shorthand: call handle_marker without the old screen_command_text closure.
+    /// Shorthand: call handle_marker with no screen input.
     fn marker(parser: &mut Osc133Parser, m: u8, param: Option<&str>, state: &mut PaneState) {
-        parser.handle_marker(m, param, state);
+        parser.handle_marker(m, param, state, None);
+    }
+
+    /// Shorthand for C marker with screen_input (simulating terminal grid read).
+    fn marker_c(parser: &mut Osc133Parser, param: Option<&str>, state: &mut PaneState, screen_input: &str) {
+        parser.handle_marker(b'C', param, state, Some(screen_input));
     }
 
     // --- Normal flows ---
@@ -376,19 +382,18 @@ mod tests {
     }
 
     #[test]
-    fn full_cycle_without_e_uses_capture_fallback() {
+    fn full_cycle_without_e_uses_screen_input_fallback() {
         let mut p = Osc133Parser::new();
         let mut s = PaneState::new();
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
 
-        // Simulate echoed command text in capture (B-to-C content)
         p.append_output("$ echo hello", &mut s);
-        // C marker — no E, so capture is escape-stripped for command text
-        marker(&mut p, b'C', None, &mut s);
+        // C marker with screen_input — no E, so screen input is used for command text
+        p.handle_marker(b'C', None, &mut s, Some("echo hello"));
         if let Osc133Phase::Executing { command } = &p.phase {
-            assert_eq!(command, "$ echo hello");
+            assert_eq!(command, "echo hello");
         } else {
             panic!("Expected Executing");
         }
@@ -399,8 +404,24 @@ mod tests {
         marker(&mut p, b'B', None, &mut s);
 
         assert_eq!(s.commands.len(), 1);
-        assert_eq!(s.commands[0].command, "$ echo hello");
+        assert_eq!(s.commands[0].command, "echo hello");
         assert_eq!(s.commands[0].output, "hello\n");
+    }
+
+    #[test]
+    fn c_without_e_or_screen_input_defaults_to_empty() {
+        let mut p = Osc133Parser::new();
+        let mut s = PaneState::new();
+
+        marker(&mut p, b'A', None, &mut s);
+        marker(&mut p, b'B', None, &mut s);
+        // C with no E, no cmdline_url, no screen_input
+        marker(&mut p, b'C', None, &mut s);
+        if let Osc133Phase::Executing { command } = &p.phase {
+            assert_eq!(command, "");
+        } else {
+            panic!("Expected Executing");
+        }
     }
 
     #[test]
@@ -543,7 +564,7 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         p.append_output("$ long-cmd", &mut s);
-        marker(&mut p, b'C', None, &mut s);
+        marker_c(&mut p, None, &mut s, "long-cmd");
         p.append_output("partial output", &mut s);
 
         // No D marker — A arrives (Ctrl+C, reset, etc.)
@@ -551,7 +572,7 @@ mod tests {
 
         // The abandoned command is recorded with no exit code
         assert_eq!(s.commands.len(), 1);
-        assert_eq!(s.commands[0].command, "$ long-cmd");
+        assert_eq!(s.commands[0].command, "long-cmd");
         assert_eq!(s.commands[0].output, "partial output");
         assert_eq!(s.commands[0].exit_code, None);
     }
@@ -582,11 +603,11 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         p.append_output("$ bad-syntax", &mut s);
-        marker(&mut p, b'C', None, &mut s);
+        marker_c(&mut p, None, &mut s, "bad-syntax");
         // A arrives without D — command abandoned
         marker(&mut p, b'A', None, &mut s);
         assert_eq!(s.commands.len(), 1);
-        assert_eq!(s.commands[0].command, "$ bad-syntax");
+        assert_eq!(s.commands[0].command, "bad-syntax");
         assert_eq!(s.commands[0].exit_code, None);
 
         marker(&mut p, b'B', None, &mut s);
@@ -603,14 +624,14 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         p.append_output("$ cmd", &mut s);
-        marker(&mut p, b'C', None, &mut s);
+        marker_c(&mut p, None, &mut s, "cmd");
         p.append_output("out1", &mut s);
         // Duplicate C — should be ignored, output continues
         marker(&mut p, b'C', None, &mut s);
         p.append_output("out2", &mut s);
 
         if let Osc133Phase::Executing { command } = &p.phase {
-            assert_eq!(command, "$ cmd");
+            assert_eq!(command, "cmd");
         } else {
             panic!("Expected Executing");
         }
@@ -657,9 +678,9 @@ mod tests {
         let mut s = PaneState::new();
 
         p.append_output("$ surprise", &mut s);
-        marker(&mut p, b'C', None, &mut s);
+        marker_c(&mut p, None, &mut s, "surprise");
         if let Osc133Phase::Executing { command } = &p.phase {
-            assert_eq!(command, "$ surprise");
+            assert_eq!(command, "surprise");
         } else {
             panic!("Expected Executing");
         }
@@ -863,14 +884,14 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         p.append_output("$ echo hello", &mut s);
-        marker(&mut p, b'C', None, &mut s);
+        marker_c(&mut p, None, &mut s, "echo hello");
         p.append_output("hello\n", &mut s);
         marker(&mut p, b'D', Some("0"), &mut s);
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
 
         assert!(
-            s.commands.iter().any(|c| c.command == "$ echo hello"),
+            s.commands.iter().any(|c| c.command == "echo hello"),
             "expected 'echo hello' in history, got: {:?}",
             s.commands,
         );
@@ -971,22 +992,20 @@ mod tests {
     }
 
     #[test]
-    fn strip_escapes_plain() {
-        assert_eq!(strip_escapes("hello world"), "hello world");
-    }
-
-    #[test]
-    fn strip_escapes_ansi_colors() {
-        assert_eq!(strip_escapes("\x1b[32mgreen\x1b[0m text"), "green text");
-    }
-
-    #[test]
-    fn strip_escapes_prompt() {
-        assert_eq!(strip_escapes("$ \x1b[1mecho hello\x1b[0m"), "$ echo hello");
-    }
-
-    #[test]
     fn percent_decode_plus_as_space() {
         assert_eq!(percent_decode("hello+world"), "hello world");
+    }
+
+    // --- Osc133Phase ---
+
+    #[test]
+    fn executing_command_returns_text() {
+        assert_eq!(Osc133Phase::Idle.executing_command(), None);
+        assert_eq!(Osc133Phase::Prompt.executing_command(), None);
+        assert_eq!(Osc133Phase::Input.executing_command(), None);
+        assert_eq!(
+            Osc133Phase::Executing { command: "ls".into() }.executing_command(),
+            Some("ls"),
+        );
     }
 }

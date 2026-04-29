@@ -112,6 +112,18 @@ impl TestDaemon {
             .unwrap_or_else(|e| panic!("RPC {} failed: {}", method, e))
     }
 
+    /// Send an RPC request, returning the error message on failure.
+    async fn rpc_err(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let mut p = params.as_object().cloned().unwrap_or_default();
+        p.insert("origin_pane".to_string(), json!(self.origin_pane));
+        self.client
+            .as_mut()
+            .unwrap()
+            .request(method, Value::Object(p))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// Run a command and return (output, exit_code).
     async fn run(&mut self, command: &str) -> (String, Option<i64>) {
         let result = self
@@ -123,6 +135,15 @@ impl TestDaemon {
         let output = result["output"].as_str().unwrap_or("").to_string();
         let exit_code = result["exit_code"].as_i64();
         (output, exit_code)
+    }
+
+    /// Type literal text into the pane (via tmux send-keys -l).
+    fn type_text(&self, text: &str) {
+        let status = StdCommand::new("tmux")
+            .args(["-L", &self.name, "send-keys", "-l", "-t", &self.origin_pane, text])
+            .status()
+            .expect("failed to send literal keys");
+        assert!(status.success(), "tmux send-keys -l failed");
     }
 
     /// Graceful cleanup: abort daemon, kill tmux server.
@@ -663,6 +684,95 @@ async fn test_send_keys_returns_screen() {
 
         let screen = result["screen"].as_str().unwrap_or("");
         assert!(!screen.is_empty(), "send_keys should return screen capture");
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Pre-execution guards ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_rejects_when_busy() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Start a long-running command with a short timeout so we get control back
+        let _ = td.rpc_err(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "sleep 30", "timeout_secs": 1}),
+        ).await;
+
+        // Now try to run another command — should be rejected as busy
+        let result = td.rpc_err(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo should-fail", "timeout_secs": 5}),
+        ).await;
+
+        assert!(result.is_err(), "should reject when busy, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("busy"), "error should mention busy: {:?}", err);
+        assert!(err.contains("sleep"), "error should mention the running command: {:?}", err);
+
+        // Clean up: cancel the sleep
+        td.rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-c"})).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_rejects_when_typing() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Type some text without pressing Enter
+        td.type_text("partial command");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Try to run a command — should be rejected because user is typing
+        let result = td.rpc_err(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo should-fail", "timeout_secs": 5}),
+        ).await;
+
+        assert!(result.is_err(), "should reject when user is typing, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("typing"), "error should mention typing: {:?}", err);
+
+        // Clean up: clear the typed text
+        td.rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-c"})).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_succeeds_after_backspace_clears_input() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Type some text
+        td.type_text("hi");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Clear the line with Ctrl+U
+        td.rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-u"})).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Now command_run should succeed — no visible input
+        let result = td.rpc_err(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo cleared-ok", "timeout_secs": 5}),
+        ).await;
+
+        assert!(result.is_ok(), "should succeed after input cleared: {:?}", result);
+        let val = result.unwrap();
+        assert!(val["output"].as_str().unwrap_or("").contains("cleared-ok"));
 
         td.cleanup().await;
     })

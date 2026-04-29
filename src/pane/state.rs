@@ -64,6 +64,10 @@ pub struct PaneState {
     /// LRU cache of leaf PIDs → OSC 133 confirmed (true) or failed (false).
     /// Bounded to 5 entries. Used by command_run to gate on marker availability.
     pub osc133_cache: VecDeque<(u32, bool)>,
+    /// Cursor position (line, col) at B marker time — the start of user input,
+    /// right after the prompt. Used by PaneProcessor to read typed input from
+    /// the terminal grid.
+    pub input_start: Option<(usize, usize)>,
 }
 
 const MAX_OSC133_CACHE: usize = 5;
@@ -81,6 +85,7 @@ impl PaneState {
             last_osc133_marker: None,
             last_data: None,
             osc133_cache: VecDeque::new(),
+            input_start: None,
         }
     }
 

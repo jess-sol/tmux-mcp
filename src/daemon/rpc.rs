@@ -6,7 +6,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::pane::osc133::Osc133Phase;
 use crate::pane::registry::PaneRegistry;
+use crate::pane::state::Activity;
 use crate::proc;
 use crate::tmux::connection::TmuxCommands;
 
@@ -475,6 +477,45 @@ async fn handle_command_run(
     };
 
     let leaf_pid = get_leaf_pid(shell_pid);
+
+    // --- Pre-execution guards ---
+    // Check for conditions that would cause the OSC 133 probe to timeout
+    // with a misleading error. Catch them early with specific messages.
+    {
+        let registry = state.registry.lock().await;
+        if let Some(tp) = registry.get(pane_id) {
+            // Guard 1: Command already running
+            if tp.processor.state().active_command().is_some()
+                || tp.processor.state().activity == Activity::Busy
+                || matches!(tp.processor.osc133_phase(), Osc133Phase::Executing { .. })
+            {
+                let cmd_text = tp
+                    .processor
+                    .osc133_phase()
+                    .executing_command()
+                    .or_else(|| {
+                        tp.processor
+                            .state()
+                            .active_command()
+                            .map(|c| c.command.as_str())
+                    })
+                    .unwrap_or("(unknown command)");
+                let screen = capture_screen(&registry, pane_id, 20);
+                return Err(RpcError::internal(format!(
+                    "Pane {} is busy running '{}'. Use command_read to check status or wait.\n\nScreen:\n{}",
+                    pane_id, cmd_text, screen
+                )));
+            }
+            // Guard 2: User is typing
+            if tp.processor.has_input_content() {
+                let screen = capture_screen(&registry, pane_id, 20);
+                return Err(RpcError::internal(format!(
+                    "User is typing in pane {}. Wait for them to finish or use a different pane.\n\nScreen:\n{}",
+                    pane_id, screen
+                )));
+            }
+        }
+    }
 
     // --- OSC 133 gating ---
     let cache_status = {
