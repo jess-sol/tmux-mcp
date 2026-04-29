@@ -49,6 +49,8 @@ pub struct PaneState {
     pub activity: Activity,
     /// Current working directory (from OSC 7).
     pub cwd: Option<String>,
+    /// Username (from OSC 7 userinfo, e.g. file://user@host/path).
+    pub user: Option<String>,
     /// Hostname (from OSC 7, None if localhost).
     pub hostname: Option<String>,
     /// Next sequence number.
@@ -81,6 +83,7 @@ impl PaneState {
             commands: VecDeque::new(),
             activity: Activity::Unknown,
             cwd: None,
+            user: None,
             hostname: None,
             seq_counter: 0,
             completion_seq: 0,
@@ -172,28 +175,37 @@ impl PaneState {
         self.commands.iter().take(n).collect()
     }
 
-    /// Update cwd and hostname from an OSC 7 URI.
-    /// Format: file://hostname/path
+    /// Update user, hostname, and cwd from an OSC 7 URI.
+    /// Format: file://[user@]hostname/path
     pub fn update_cwd_from_osc7(&mut self, uri: &str) {
-        if let Some(rest) = uri.strip_prefix("file://") {
-            let (hostname, path) = match rest.find('/') {
-                Some(idx) => (&rest[..idx], &rest[idx..]),
-                None => ("", rest),
-            };
+        let Some(rest) = uri.strip_prefix("file://") else {
+            return;
+        };
 
-            self.cwd = Some(path.to_string());
+        let (authority, path) = match rest.find('/') {
+            Some(idx) => (&rest[..idx], Some(&rest[idx..])),
+            None => (rest, None),
+        };
 
-            // Filter localhost variants
-            self.hostname = if hostname.is_empty()
-                || hostname == "localhost"
-                || hostname == "127.0.0.1"
-                || hostname == "::1"
-            {
-                None
-            } else {
-                Some(hostname.to_string())
-            };
-        }
+        // Split authority on last '@' — userinfo can contain '@', hostname cannot
+        let (user, hostname) = match authority.rfind('@') {
+            Some(idx) => (Some(&authority[..idx]), &authority[idx + 1..]),
+            None => (None, authority),
+        };
+
+        self.user = user.filter(|u| !u.is_empty()).map(|u| u.to_string());
+        self.cwd = path.map(|p| p.to_string());
+
+        // Filter localhost variants
+        self.hostname = if hostname.is_empty()
+            || hostname == "localhost"
+            || hostname == "127.0.0.1"
+            || hostname == "::1"
+        {
+            None
+        } else {
+            Some(hostname.to_string())
+        };
     }
 }
 
@@ -213,6 +225,7 @@ mod tests {
         assert!(s.commands.is_empty());
         assert_eq!(s.activity, Activity::Unknown);
         assert!(s.cwd.is_none());
+        assert!(s.user.is_none());
         assert!(s.hostname.is_none());
     }
 
@@ -250,28 +263,161 @@ mod tests {
         assert_eq!(s.commands.front().unwrap().command, "cmd149");
     }
 
+    // --- OSC 7 parsing: all combinations of user/host/path ---
+
     #[test]
-    fn osc7_with_hostname() {
+    fn osc7_full() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@myhost/home/alice");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert_eq!(s.hostname.as_deref(), Some("myhost"));
+        assert_eq!(s.cwd.as_deref(), Some("/home/alice"));
+    }
+
+    #[test]
+    fn osc7_user_localhost() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@localhost/tmp");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert!(s.hostname.is_none());
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_user_127001() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@127.0.0.1/tmp");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert!(s.hostname.is_none());
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_user_ipv6_loopback() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@::1/tmp");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert!(s.hostname.is_none());
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_user_empty_host() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@/tmp");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert!(s.hostname.is_none());
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_host_no_user() {
         let mut s = PaneState::new();
         s.update_cwd_from_osc7("file://myhost/home/user");
-        assert_eq!(s.cwd.as_deref(), Some("/home/user"));
+        assert!(s.user.is_none());
         assert_eq!(s.hostname.as_deref(), Some("myhost"));
+        assert_eq!(s.cwd.as_deref(), Some("/home/user"));
     }
 
     #[test]
-    fn osc7_localhost_filtered() {
+    fn osc7_localhost_no_user() {
         let mut s = PaneState::new();
         s.update_cwd_from_osc7("file://localhost/tmp");
-        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+        assert!(s.user.is_none());
         assert!(s.hostname.is_none());
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
     }
 
     #[test]
-    fn osc7_no_hostname() {
+    fn osc7_empty_authority() {
         let mut s = PaneState::new();
         s.update_cwd_from_osc7("file:///home/user");
-        assert_eq!(s.cwd.as_deref(), Some("/home/user"));
+        assert!(s.user.is_none());
         assert!(s.hostname.is_none());
+        assert_eq!(s.cwd.as_deref(), Some("/home/user"));
+    }
+
+    #[test]
+    fn osc7_no_path() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@myhost");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert_eq!(s.hostname.as_deref(), Some("myhost"));
+        assert!(s.cwd.is_none());
+    }
+
+    #[test]
+    fn osc7_only_user_no_path() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert!(s.hostname.is_none());
+        assert!(s.cwd.is_none());
+    }
+
+    #[test]
+    fn osc7_empty_user_at_host() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://@myhost/tmp");
+        assert!(s.user.is_none());
+        assert_eq!(s.hostname.as_deref(), Some("myhost"));
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_at_sign_in_user() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://a@b@myhost/tmp");
+        assert_eq!(s.user.as_deref(), Some("a@b"));
+        assert_eq!(s.hostname.as_deref(), Some("myhost"));
+        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_bare_file() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://");
+        assert!(s.user.is_none());
+        assert!(s.hostname.is_none());
+        assert!(s.cwd.is_none());
+    }
+
+    #[test]
+    fn osc7_not_file_scheme() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("https://example.com/path");
+        assert!(s.user.is_none());
+        assert!(s.hostname.is_none());
+        assert!(s.cwd.is_none());
+    }
+
+    #[test]
+    fn osc7_empty_string() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("");
+        assert!(s.user.is_none());
+        assert!(s.hostname.is_none());
+        assert!(s.cwd.is_none());
+    }
+
+    #[test]
+    fn osc7_overwrites_previous() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@host1/a");
+        s.update_cwd_from_osc7("file://bob@host2/b");
+        assert_eq!(s.user.as_deref(), Some("bob"));
+        assert_eq!(s.hostname.as_deref(), Some("host2"));
+        assert_eq!(s.cwd.as_deref(), Some("/b"));
+    }
+
+    #[test]
+    fn osc7_clears_user_when_absent() {
+        let mut s = PaneState::new();
+        s.update_cwd_from_osc7("file://alice@myhost/tmp");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        // Next OSC 7 without user should clear it
+        s.update_cwd_from_osc7("file://myhost/tmp");
+        assert!(s.user.is_none());
     }
 
     // --- OSC 133 cache ---

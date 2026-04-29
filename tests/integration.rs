@@ -852,6 +852,38 @@ async fn test_capture_pane() {
     .await;
 }
 
+// --- list_panes OSC 7 fields ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_panes_osc_user() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // After warmup, the shell's precmd has emitted OSC 7 with user@host/path
+        let result = td.rpc("list_panes", json!({})).await;
+        let pane = result["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["pane_id"].as_str() == Some(&td.origin_pane))
+            .expect("origin pane should be in list");
+
+        let osc_user = pane["osc_user"].as_str();
+        assert!(
+            osc_user.is_some(),
+            "osc_user should be set after warmup, got: {:?}",
+            pane
+        );
+        assert!(
+            !osc_user.unwrap().is_empty(),
+            "osc_user should not be empty"
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
 // --- list_panes osc133 field ---
 
 #[tokio::test(flavor = "multi_thread")]

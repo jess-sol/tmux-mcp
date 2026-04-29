@@ -362,7 +362,18 @@ mod tests {
         );
         // State should be updated
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
+        assert!(p.state().user.is_none());
         assert_eq!(p.state().hostname.as_deref(), Some("myhost"));
+    }
+
+    #[test]
+    fn osc7_with_user_extracted() {
+        let mut p = PaneProcessor::new(24, 80);
+        let events = p.process_chunk(b"\x1b]7;file://alice@myhost/home/alice\x07");
+        assert_eq!(events.len(), 1);
+        assert_eq!(p.state().user.as_deref(), Some("alice"));
+        assert_eq!(p.state().hostname.as_deref(), Some("myhost"));
+        assert_eq!(p.state().cwd.as_deref(), Some("/home/alice"));
     }
 
     #[test]

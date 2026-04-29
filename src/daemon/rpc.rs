@@ -267,6 +267,8 @@ struct PaneEntry {
     process_cwd: Option<String>,
     /// CWD from OSC 7 (works across SSH).
     osc_cwd: Option<String>,
+    /// Username from OSC 7 userinfo (null if never received).
+    osc_user: Option<String>,
     /// Hostname from OSC 7 (null for localhost or if never received).
     osc_hostname: Option<String>,
     foreground: Option<String>,
@@ -332,6 +334,7 @@ async fn handle_list_panes(
             y: tp.y,
             process_cwd,
             osc_cwd: pane_state.cwd.clone(),
+            osc_user: pane_state.user.clone(),
             osc_hostname: pane_state.hostname.as_ref().and_then(|h| {
                 if h == &local_hostname { None } else { Some(h.clone()) }
             }),
@@ -737,7 +740,7 @@ async fn handle_capture_pane(
 /// OSC 133 + OSC 7 injection script for bash.
 /// Each line has leading space for history suppression.
 const OSC133_INJECT_LINES: &[&str] = &[
-    " __osc133_exec_ready=true; __osc7_cwd() { printf '\\e]7;file://%s%s\\e\\\\' \"$(hostname)\" \"$PWD\"; }; __osc133_precmd() { local ret=$?; __osc133_exec_ready=true; printf '\\e]133;D;%d\\e\\\\\\e]133;A\\e\\\\' \"$ret\"; __osc7_cwd; return \"$ret\"; }; PROMPT_COMMAND=\"__osc133_precmd;${PROMPT_COMMAND:-}\"",
+    " __osc133_exec_ready=true; __osc7_cwd() { printf '\\e]7;file://%s@%s%s\\e\\\\' \"$USER\" \"$(hostname)\" \"$PWD\"; }; __osc133_precmd() { local ret=$?; __osc133_exec_ready=true; printf '\\e]133;D;%d\\e\\\\\\e]133;A\\e\\\\' \"$ret\"; __osc7_cwd; return \"$ret\"; }; PROMPT_COMMAND=\"__osc133_precmd;${PROMPT_COMMAND:-}\"",
     " __osc133_debug() { if $__osc133_exec_ready; then __osc133_exec_ready=false; local cmd; cmd=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]* *//'); [[ -n \"$cmd\" ]] && printf '\\e]133;E;%s\\e\\\\' \"$cmd\"; fi; }; trap '__osc133_debug \"$_\"' DEBUG",
     " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\[\\e]133;C\\e\\\\\\]'",
 ];
