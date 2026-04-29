@@ -112,11 +112,19 @@ impl Osc133Parser {
     // --- Marker Handlers ---
 
     /// A (Prompt Start): hard reset from any state.
-    /// Shell has returned to prompt — any in-flight command is abandoned.
+    /// If Executing without D, the command is abandoned and recorded.
+    /// Pending D state is preserved — D→A→B is the normal flow and B
+    /// needs to see the pending state to finalize the command.
     fn handle_a(&mut self, state: &mut PaneState) {
-        // If we were Executing without a D marker, the command is lost.
-        // This happens when: Ctrl+C during output, reset, etc.
-        self.abandon_in_flight(state);
+        // If we were Executing without a D marker, record as abandoned.
+        if let Osc133Phase::Executing { command, output } = &self.phase {
+            if !command.is_empty() || !output.is_empty() {
+                tracing::debug!("Abandoning in-flight command on A: {:?}", command);
+                state.push_command(command.clone(), output.clone(), None);
+            }
+        }
+        // NOTE: pending_command/output/exit_code from D are NOT cleared here.
+        // D→A→B is the normal completion flow — B finalizes.
         self.phase = Osc133Phase::Prompt;
         self.pending_command_text = None;
         state.activity = Activity::Idle;
@@ -173,8 +181,11 @@ impl Osc133Parser {
 
     /// D (Command Done): command finished with optional exit code.
     /// Moves command data to pending state — not finalized until B arrives.
+    /// Always increments completion_seq so command_run can detect completion.
     fn handle_d(&mut self, param: Option<&str>, state: &mut PaneState) {
         let exit_code = param.and_then(|p| p.parse::<i32>().ok());
+        state.completion_seq += 1;
+        state.last_exit_code = exit_code;
 
         match &self.phase {
             Osc133Phase::Executing { command, output } => {
@@ -423,17 +434,18 @@ mod tests {
         parser.handle_marker(b'A', None, &mut state, noop_screen);
         parser.handle_marker(b'B', None, &mut state, noop_screen);
         // D without C — syntax error, history expansion failure, etc.
-        // D creates a pending command (B-Latch holds it)
+        // No E marker either, so command text is unknown.
         parser.handle_marker(b'D', Some("1"), &mut state, noop_screen);
         assert!(state.commands.is_empty()); // not finalized yet
+        assert_eq!(state.completion_seq, 1); // but D bumped the counter
 
-        // A flushes the pending command (abandon_in_flight)
+        // D→A→B: state machine recovers
         parser.handle_marker(b'A', None, &mut state, noop_screen);
-        assert_eq!(state.commands.len(), 1);
-        assert_eq!(state.commands[0].exit_code, Some(1));
-
         parser.handle_marker(b'B', None, &mut state, noop_screen);
-        assert_eq!(state.commands.len(), 1); // no new command
+
+        // No command recorded (empty command text), but state is healthy
+        assert!(state.commands.is_empty());
+        assert_eq!(parser.phase, Osc133Phase::Input);
     }
 
     #[test]
@@ -684,5 +696,171 @@ mod tests {
         parser.handle_marker(b'A', None, &mut state, noop_screen);
         parser.append_output("prompt text");
         // No crash, no corruption
+    }
+
+    // ================================================================
+    // Recovery from arbitrary start position
+    //
+    // The daemon can start monitoring a pane at ANY point in the OSC 133
+    // cycle. These tests verify the state machine recovers cleanly and
+    // doesn't hang or lose subsequent commands.
+    // ================================================================
+
+    /// Simulate: daemon starts monitoring, catches the tail end of a
+    /// command that was already running (D→A→B), then a NEW command
+    /// runs with the full cycle. The new command must be recorded.
+    #[test]
+    fn recover_from_missed_start_then_next_command_works() {
+        let mut parser = Osc133Parser::new();
+        let mut state = PaneState::new();
+
+        // We missed everything before D — daemon just started listening.
+        // Shell sends: D (command done), A (prompt), B (ready).
+        parser.handle_marker(b'D', Some("0"), &mut state, noop_screen);
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        // State machine should be in Input, ready for the next command.
+        assert_eq!(parser.phase, Osc133Phase::Input);
+
+        // Now a full command cycle runs: A→B→C→output→D→A→B
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+        parser.handle_marker(b'C', None, &mut state, screen("$ echo hello"));
+        parser.append_output("hello\n");
+        parser.handle_marker(b'D', Some("0"), &mut state, noop_screen);
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        // The second command must be recorded.
+        assert!(
+            state.commands.iter().any(|c| c.command == "$ echo hello"),
+            "expected 'echo hello' in history, got: {:?}",
+            state.commands,
+        );
+    }
+
+    /// Simulate: shell has NO C marker (no preexec/DEBUG trap).
+    /// Commands produce only D→A→B, never C.
+    /// Without C, we can't capture command text, so the command isn't
+    /// recorded in history. But completion_seq MUST increment so
+    /// command_run can detect that the command finished.
+    #[test]
+    fn command_without_c_marker_bumps_completion_seq() {
+        let mut parser = Osc133Parser::new();
+        let mut state = PaneState::new();
+
+        // Initial prompt: A→B puts us in Input
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+        assert_eq!(state.completion_seq, 0);
+
+        // User runs a command. Shell emits D→A→B but NO C.
+        parser.handle_marker(b'D', Some("0"), &mut state, noop_screen);
+        assert_eq!(state.completion_seq, 1, "D must bump completion_seq");
+
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        // No command recorded (no C means no command text).
+        assert!(state.commands.is_empty());
+        // But state machine is healthy and ready for next command.
+        assert_eq!(parser.phase, Osc133Phase::Input);
+    }
+
+    /// Failed command without C — exit code 1 still bumps completion_seq.
+    #[test]
+    fn failed_command_without_c_marker_bumps_completion_seq() {
+        let mut parser = Osc133Parser::new();
+        let mut state = PaneState::new();
+
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        parser.handle_marker(b'D', Some("1"), &mut state, noop_screen);
+        assert_eq!(state.completion_seq, 1);
+
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        // State machine recovers, ready for next command
+        assert_eq!(parser.phase, Osc133Phase::Input);
+    }
+
+    /// The normal D→A→B flow: D sets pending, A arrives (prompt start),
+    /// B arrives (input ready, finalizes). A must NOT clear D's pending
+    /// state — that would prevent B from ever finalizing the command.
+    #[test]
+    fn d_a_b_flow_pending_survives_through_a() {
+        let mut parser = Osc133Parser::new();
+        let mut state = PaneState::new();
+
+        // Full cycle with C marker
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+        parser.handle_marker(b'E', Some("ls"), &mut state, noop_screen);
+        parser.handle_marker(b'C', None, &mut state, noop_screen);
+        parser.append_output("file1\n");
+
+        // D sets pending state
+        parser.handle_marker(b'D', Some("0"), &mut state, noop_screen);
+        assert!(state.commands.is_empty(), "D should not finalize yet");
+
+        // A arrives — this is normal (prompt start after command).
+        // It must NOT clear the pending state from D.
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        assert!(
+            state.commands.is_empty(),
+            "A should not finalize (that's B's job)"
+        );
+
+        // B finalizes
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+        assert_eq!(state.commands.len(), 1, "B should finalize the command");
+        assert_eq!(state.commands[0].command, "ls");
+        assert_eq!(state.commands[0].exit_code, Some(0));
+    }
+
+    /// Multiple commands without C markers in sequence.
+    /// State machine must not get stuck — completion_seq tracks each.
+    #[test]
+    fn multiple_commands_without_c_bump_completion_seq() {
+        let mut parser = Osc133Parser::new();
+        let mut state = PaneState::new();
+
+        // Initial prompt
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        // Three commands, none with C marker
+        for (i, exit_code) in ["0", "1", "0"].iter().enumerate() {
+            parser.handle_marker(b'D', Some(exit_code), &mut state, noop_screen);
+            assert_eq!(state.completion_seq, (i + 1) as u64);
+            parser.handle_marker(b'A', None, &mut state, noop_screen);
+            parser.handle_marker(b'B', None, &mut state, noop_screen);
+        }
+
+        // State machine ends in Input, ready for more
+        assert_eq!(parser.phase, Osc133Phase::Input);
+        assert_eq!(state.completion_seq, 3);
+    }
+
+    /// After recovering from a bad start, the state machine should be
+    /// in Input and ready for normal operation.
+    #[test]
+    fn state_is_input_after_recovery() {
+        let mut parser = Osc133Parser::new();
+        let mut state = PaneState::new();
+
+        // Start in the middle: just D→A→B
+        parser.handle_marker(b'D', Some("0"), &mut state, noop_screen);
+        parser.handle_marker(b'A', None, &mut state, noop_screen);
+        parser.handle_marker(b'B', None, &mut state, noop_screen);
+
+        assert_eq!(
+            parser.phase,
+            Osc133Phase::Input,
+            "should be in Input after D→A→B recovery",
+        );
     }
 }

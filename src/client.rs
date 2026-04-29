@@ -139,6 +139,14 @@ impl DaemonClient {
         }
     }
 
+    /// Connect directly to a daemon socket (no spawning).
+    pub async fn connect_to_socket(
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let stream = UnixStream::connect(path).await?;
+        Ok(Self::from_stream(stream))
+    }
+
     fn from_stream(stream: UnixStream) -> Self {
         let (read, write) = stream.into_split();
         Self {

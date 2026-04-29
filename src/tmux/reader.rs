@@ -86,10 +86,7 @@ async fn reader_loop(
                                     }
                                 }
                                 ReaderMessage::Notification(notif) => {
-                                    // try_send to avoid deadlock: if the notification channel
-                                    // is full (consumer blocked), drop the notification rather
-                                    // than blocking the reader (which would prevent responses
-                                    // from flowing).
+                                    tracing::trace!("Reader: notification: {:?}", notif);
                                     if notification_tx.try_send(notif).is_err() {
                                         tracing::warn!("Notification channel full, dropping");
                                     }

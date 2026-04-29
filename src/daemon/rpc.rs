@@ -224,10 +224,11 @@ async fn handle_command_run(
         validate_pane_access(&registry, pane_id, &caller_window)?;
     }
 
-    // Get command count before sending, so we know which command is ours
-    let cmd_count_before = {
+    // Snapshot completion_seq before sending — D marker always bumps this,
+    // even if the command isn't recorded in history (e.g., no C marker).
+    let seq_before = {
         let registry = state.registry.lock().await;
-        registry.get(pane_id).map(|tp| tp.processor.state().commands.len()).unwrap_or(0)
+        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
     };
 
     // Send the command
@@ -248,13 +249,24 @@ async fn handle_command_run(
         {
             let registry = state.registry.lock().await;
             if let Some(tp) = registry.get(pane_id) {
-                let cmds = &tp.processor.state().commands;
-                if cmds.len() > cmd_count_before {
-                    let cmd = &cmds[0]; // newest is first
+                let pane_state = tp.processor.state();
+                if pane_state.completion_seq > seq_before {
+                    // Command completed. Return newest command if available,
+                    // or a minimal result with just the exit code.
+                    if let Some(cmd) = pane_state.commands.front() {
+                        if cmd.seq > 0 {
+                            return Ok(json!({
+                                "command": cmd.command,
+                                "exit_code": cmd.exit_code,
+                                "output": cmd.output,
+                            }));
+                        }
+                    }
+                    // No command recorded (e.g., no C marker) — return exit code from D
                     return Ok(json!({
-                        "command": cmd.command,
-                        "exit_code": cmd.exit_code,
-                        "output": cmd.output,
+                        "command": null,
+                        "exit_code": pane_state.last_exit_code,
+                        "output": "",
                     }));
                 }
             }

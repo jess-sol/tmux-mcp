@@ -46,6 +46,12 @@ pub struct PaneState {
     pub hostname: Option<String>,
     /// Next sequence number.
     seq_counter: u64,
+    /// Incremented on every D marker (command completion signal).
+    /// Used by command_run to detect completion even when the command
+    /// isn't recorded in history (e.g., no C marker, empty command).
+    pub completion_seq: u64,
+    /// Exit code from the most recent D marker.
+    pub last_exit_code: Option<i32>,
 }
 
 impl PaneState {
@@ -56,6 +62,8 @@ impl PaneState {
             cwd: None,
             hostname: None,
             seq_counter: 0,
+            completion_seq: 0,
+            last_exit_code: None,
         }
     }
 

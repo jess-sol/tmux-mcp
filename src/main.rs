@@ -33,7 +33,7 @@ async fn main() {
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                 .init();
 
-            if let Err(e) = tmux_mcp::daemon::run(&session).await {
+            if let Err(e) = tmux_mcp::daemon::run(&session, None).await {
                 tracing::error!("Daemon error: {}", e);
                 std::process::exit(1);
             }

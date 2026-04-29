@@ -55,10 +55,16 @@ pub struct TmuxNotifications {
 /// Returns split halves: `TmuxCommands` for sending commands (goes behind mutex)
 /// and `TmuxNotifications` for receiving events (used directly by event loop).
 /// This split makes deadlock structurally impossible.
-pub async fn connect(session: &str) -> Result<(TmuxCommands, TmuxNotifications)> {
+pub async fn connect(
+    session: &str,
+    server: Option<&str>,
+) -> Result<(TmuxCommands, TmuxNotifications)> {
     tracing::info!("Connecting to tmux session {}", session);
 
     let mut cmd = Command::new("tmux");
+    if let Some(srv) = server {
+        cmd.args(["-L", srv]);
+    }
     cmd.args(["-C", "attach-session", "-t", session]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());

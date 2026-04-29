@@ -23,8 +23,8 @@ use rpc::DaemonState;
 /// Connect to a tmux session, bootstrap pane state, start the socket server,
 /// and run the event loop. Returns when the session closes or the daemon is
 /// cancelled (idle timeout).
-pub async fn run(session: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut commands, notifications) = connection::connect(session).await?;
+pub async fn run(session: &str, server: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (mut commands, notifications) = connection::connect(session, server).await?;
     let mut registry = PaneRegistry::new();
 
     // Bootstrap: discover all existing panes in one query
@@ -87,7 +87,7 @@ async fn event_loop(
     mut notifications: TmuxNotifications,
     state: Arc<DaemonState>,
     cancel: CancellationToken,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let notification = tokio::select! {
             notif = notifications.recv() => notif,
