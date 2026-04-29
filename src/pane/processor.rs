@@ -312,6 +312,147 @@ mod tests {
         assert_eq!(p.screen_line_text(1), "line2");
     }
 
+    // --- OSC 133 implementation variants ---
+
+    /// C with cmdline_url parameter — command text from URL-encoded param.
+    #[test]
+    fn c_cmdline_url_provides_command_text() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        // Prompt
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        // C with cmdline_url (no E)
+        p.process_chunk(b"echo hi\x1b]133;C;cmdline_url=echo%20hi\x1b\\");
+        assert!(matches!(p.osc133_phase(), Osc133Phase::Executing { .. }));
+
+        // Output + D + next prompt
+        p.process_chunk(b"\r\nhi\r\n\x1b]133;D;0\x1b\\");
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        let cmds = p.state().recent_commands(10);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "echo hi");
+        assert!(cmds[0].output.contains("hi"));
+    }
+
+    /// E supersedes C cmdline_url when both present.
+    #[test]
+    fn e_supersedes_c_cmdline_url() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        // E arrives first, then C with cmdline_url — E wins
+        p.process_chunk(
+            b"echo correct\x1b]133;E;echo correct\x1b\\\x1b]133;C;cmdline_url=wrong\x1b\\"
+        );
+        p.process_chunk(b"\r\ncorrect\r\n\x1b]133;D;0\x1b\\");
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        let cmds = p.state().recent_commands(10);
+        assert_eq!(cmds[0].command, "echo correct");
+    }
+
+    /// No C, no E — just D/A/B. Output captured from buffer.
+    #[test]
+    fn no_c_no_e_output_from_capture_buffer() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        // Command output arrives without C or E
+        p.process_chunk(b"sub output\r\n");
+        p.process_chunk(b"\x1b]133;D;0\x1b\\");
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        let cmds = p.state().recent_commands(10);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].output.contains("sub output"));
+        assert_eq!(cmds[0].exit_code, Some(0));
+    }
+
+    /// C with no param, no E — capture fallback strips escapes from B-to-C content.
+    #[test]
+    fn capture_fallback_strips_ansi_escapes() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        // Echoed text with ANSI colors before C
+        p.process_chunk(b"\x1b[1mecho hello\x1b[0m\x1b]133;C\x1b\\");
+
+        if let Osc133Phase::Executing { command } = p.osc133_phase() {
+            // Bold escape stripped, just "echo hello" with prompt prefix
+            assert!(command.contains("echo hello"), "command: {:?}", command);
+            assert!(!command.contains("\x1b"), "should not contain raw escapes: {:?}", command);
+        } else {
+            panic!("Expected Executing");
+        }
+    }
+
+    /// OSC 7 mid-command doesn't break capture.
+    #[test]
+    fn osc7_mid_command_doesnt_break_capture() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"\x1b]133;E;cd /tmp && ls\x1b\\\x1b]133;C\x1b\\");
+
+        // Output, then OSC 7 (cwd update), then more output
+        p.process_chunk(b"file1\r\n\x1b]7;file://localhost/tmp\x1b\\file2\r\n");
+        p.process_chunk(b"\x1b]133;D;0\x1b\\");
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        let cmds = p.state().recent_commands(10);
+        assert_eq!(cmds[0].command, "cd /tmp && ls");
+        assert!(cmds[0].output.contains("file1"));
+        assert!(cmds[0].output.contains("file2"));
+        assert_eq!(p.state().cwd.as_deref(), Some("/tmp"));
+    }
+
+    /// Large output spanning multiple process_chunk calls.
+    #[test]
+    fn large_output_across_multiple_chunks() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"\x1b]133;E;seq\x1b\\\x1b]133;C\x1b\\");
+
+        // Simulate many separate chunks of output
+        for i in 1..=100 {
+            let line = format!("{}\r\n", i);
+            p.process_chunk(line.as_bytes());
+        }
+
+        p.process_chunk(b"\x1b]133;D;0\x1b\\");
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        let cmds = p.state().recent_commands(10);
+        assert!(cmds[0].output.contains("1\r\n"));
+        assert!(cmds[0].output.contains("100\r\n"));
+    }
+
+    /// Non-133 OSC (like OSC 9 notification) in output doesn't corrupt capture.
+    #[test]
+    fn osc9_in_output_doesnt_corrupt_capture() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        p.process_chunk(b"\x1b]133;E;cmd\x1b\\\x1b]133;C\x1b\\");
+
+        // Output with embedded OSC 9 notification
+        p.process_chunk(b"before\x1b]9;alert\x07after\r\n");
+        p.process_chunk(b"\x1b]133;D;0\x1b\\");
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        let cmds = p.state().recent_commands(10);
+        assert!(cmds[0].output.contains("before"));
+        assert!(cmds[0].output.contains("after"));
+    }
+
+    // --- Existing tests ---
+
     #[test]
     fn full_command_cycle_with_state() {
         let mut p = PaneProcessor::new(24, 80);

@@ -112,6 +112,19 @@ impl TestDaemon {
             .unwrap_or_else(|e| panic!("RPC {} failed: {}", method, e))
     }
 
+    /// Run a command and return (output, exit_code).
+    async fn run(&mut self, command: &str) -> (String, Option<i64>) {
+        let result = self
+            .rpc(
+                "command_run",
+                json!({"pane_id": self.origin_pane.clone(), "command": command, "timeout_secs": 5}),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("").to_string();
+        let exit_code = result["exit_code"].as_i64();
+        (output, exit_code)
+    }
+
     /// Graceful cleanup: abort daemon, kill tmux server.
     async fn cleanup(mut self) {
         drop(self.client.take());
@@ -312,6 +325,217 @@ async fn test_command_run_subshell() {
 
         let output = result["output"].as_str().unwrap_or("");
         assert!(output.contains("sub"));
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Compound commands ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_multi_statement_subshell() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, exit_code) = td.run("(echo aaa; echo bbb; echo ccc)").await;
+        assert!(output.contains("aaa"), "missing aaa: {:?}", output);
+        assert!(output.contains("bbb"), "missing bbb: {:?}", output);
+        assert!(output.contains("ccc"), "missing ccc: {:?}", output);
+        assert_eq!(exit_code, Some(0));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_nested_subshell() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("(echo outer; (echo inner))").await;
+        assert!(output.contains("outer"), "missing outer: {:?}", output);
+        assert!(output.contains("inner"), "missing inner: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_brace_group() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("{ echo aaa; echo bbb; }").await;
+        assert!(output.contains("aaa"), "missing aaa: {:?}", output);
+        assert!(output.contains("bbb"), "missing bbb: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_for_loop() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("for i in x y z; do echo $i; done").await;
+        assert!(output.contains("x"), "missing x: {:?}", output);
+        assert!(output.contains("y"), "missing y: {:?}", output);
+        assert!(output.contains("z"), "missing z: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Pipes and substitution ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_pipe_chain() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("echo hello | tr a-z A-Z | sed 's/H/h/'").await;
+        assert!(output.contains("hELLO"), "expected hELLO: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_command_substitution() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("echo $(echo inner)").await;
+        assert!(output.contains("inner"), "missing inner: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Heredoc ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_heredoc() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, exit_code) = td.run("cat <<'EOF'\nhello heredoc\nworld\nEOF").await;
+        assert!(output.contains("hello heredoc"), "missing 'hello heredoc': {:?}", output);
+        assert!(output.contains("world"), "missing 'world': {:?}", output);
+        assert_eq!(exit_code, Some(0));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Large output ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_large_output() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("seq 1 500").await;
+        assert!(output.contains("1"), "missing 1");
+        assert!(output.contains("250"), "missing 250");
+        assert!(output.contains("500"), "missing 500");
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Edge cases ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_no_output() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, exit_code) = td.run("true").await;
+        // `true` produces no visible output, but capture may contain
+        // control characters from prompt wrapping (e.g., \x01/\x02).
+        let visible: String = output.chars().filter(|c| !c.is_control()).collect();
+        assert!(visible.trim().is_empty(), "expected no visible output: {:?}", output);
+        assert_eq!(exit_code, Some(0));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_stderr_only() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, exit_code) = td.run("echo err >&2").await;
+        // Stderr goes to terminal — it should appear in capture since
+        // the terminal doesn't distinguish stdout from stderr.
+        assert!(output.contains("err"), "stderr should be captured: {:?}", output);
+        assert_eq!(exit_code, Some(0));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_ansi_in_output() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run("printf '\\033[31mred\\033[0m\\n'").await;
+        // Output contains the raw escape sequences (capture is raw terminal bytes)
+        assert!(output.contains("red"), "missing 'red': {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_special_chars_in_output() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (output, _) = td.run(r#"echo 'it'\''s "quoted"'"#).await;
+        assert!(output.contains("it's"), "missing it's: {:?}", output);
+        assert!(output.contains("\"quoted\""), "missing quoted: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Exit codes ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_exit_code_2() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (_, exit_code) = td.run("bash -c 'exit 2'").await;
+        assert_eq!(exit_code, Some(2));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_signal_exit() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let (_, exit_code) = td.run("bash -c 'kill -TERM $$'").await;
+        // SIGTERM = 15, exit code = 128 + 15 = 143
+        assert_eq!(exit_code, Some(143));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- Rapid sequential ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_command_run_rapid_sequential() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        let (out1, _) = td.run("echo rapid1").await;
+        let (out2, _) = td.run("echo rapid2").await;
+        let (out3, _) = td.run("echo rapid3").await;
+        let (out4, _) = td.run("echo rapid4").await;
+        let (out5, _) = td.run("echo rapid5").await;
+
+        assert!(out1.contains("rapid1"), "missing rapid1: {:?}", out1);
+        assert!(out2.contains("rapid2"), "missing rapid2: {:?}", out2);
+        assert!(out3.contains("rapid3"), "missing rapid3: {:?}", out3);
+        assert!(out4.contains("rapid4"), "missing rapid4: {:?}", out4);
+        assert!(out5.contains("rapid5"), "missing rapid5: {:?}", out5);
 
         td.cleanup().await;
     })
