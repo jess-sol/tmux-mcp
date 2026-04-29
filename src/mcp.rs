@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, schemars, tool, tool_router};
+use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde_json::json;
 use tokio::sync::Mutex;
 
@@ -140,6 +140,7 @@ impl TmuxMcp {
     }
 }
 
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for TmuxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
