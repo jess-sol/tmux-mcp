@@ -136,24 +136,6 @@ impl PaneState {
         id
     }
 
-    /// Push a completed command record (for backwards compat with existing callers).
-    pub fn push_command(&mut self, command: String, output: String, exit_code: Option<i32>) {
-        self.seq_counter += 1;
-        self.commands.push_front(CommandRecord {
-            id: self.seq_counter,
-            command,
-            output,
-            exit_code,
-            output_done: true,
-            completed: true,
-            read_cursor: 0,
-            timestamp: Instant::now(),
-        });
-        while self.commands.len() > MAX_COMMAND_HISTORY {
-            self.commands.pop_back();
-        }
-    }
-
     /// Get the active (incomplete) command, if any.
     pub fn active_command(&self) -> Option<&CommandRecord> {
         self.commands.front().filter(|c| !c.completed)
@@ -237,8 +219,17 @@ mod tests {
     #[test]
     fn push_and_retrieve_commands() {
         let mut s = PaneState::new();
-        s.push_command("ls".into(), "file1\nfile2".into(), Some(0));
-        s.push_command("pwd".into(), "/home/user".into(), Some(0));
+        let id1 = s.push_command_start("ls".into());
+        let cmd = s.command_by_id_mut(id1).unwrap();
+        cmd.output = "file1\nfile2".into();
+        cmd.exit_code = Some(0);
+        cmd.completed = true;
+
+        let id2 = s.push_command_start("pwd".into());
+        let cmd = s.command_by_id_mut(id2).unwrap();
+        cmd.output = "/home/user".into();
+        cmd.exit_code = Some(0);
+        cmd.completed = true;
 
         let recent = s.recent_commands(10);
         assert_eq!(recent.len(), 2);
@@ -251,7 +242,9 @@ mod tests {
     fn command_history_capped() {
         let mut s = PaneState::new();
         for i in 0..150 {
-            s.push_command(format!("cmd{}", i), String::new(), Some(0));
+            let id = s.push_command_start(format!("cmd{}", i));
+            let cmd = s.command_by_id_mut(id).unwrap();
+            cmd.completed = true;
         }
         assert_eq!(s.commands.len(), MAX_COMMAND_HISTORY);
         assert_eq!(s.commands.front().unwrap().command, "cmd149");

@@ -54,14 +54,6 @@ pub struct Osc133Parser {
     phase: Osc133Phase,
     /// Buffered command text from E marker (may arrive before C).
     pending_command_text: Option<String>,
-    /// For B-Latch: pending exit code from D (finalized by next B).
-    pending_exit_code: Option<i32>,
-    /// Command text from the most recently completed Executing phase,
-    /// held until B finalizes it.
-    pending_command: Option<String>,
-    /// Output from the most recently completed Executing phase,
-    /// held until B finalizes it.
-    pending_output: Option<String>,
     /// Single capture buffer — always accumulates terminal text.
     /// C clears it (delimiter). D consumes it. B clears it (new cycle).
     capture: String,
@@ -72,9 +64,6 @@ impl Osc133Parser {
         Self {
             phase: Osc133Phase::Idle,
             pending_command_text: None,
-            pending_exit_code: None,
-            pending_command: None,
-            pending_output: None,
             capture: String::new(),
         }
     }
@@ -122,9 +111,6 @@ impl Osc133Parser {
         self.abandon_in_flight(state);
         self.phase = Osc133Phase::Idle;
         self.pending_command_text = None;
-        self.pending_exit_code = None;
-        self.pending_command = None;
-        self.pending_output = None;
         self.capture.clear();
         state.activity = Activity::Unknown;
     }
@@ -168,9 +154,6 @@ impl Osc133Parser {
 
         self.phase = Osc133Phase::Input;
         self.capture.clear();
-        self.pending_command.take();
-        self.pending_output.take();
-        self.pending_exit_code.take();
         state.activity = Activity::Idle;
     }
 
@@ -290,9 +273,6 @@ impl Osc133Parser {
             tracing::debug!("Abandoning in-flight command on reset: {:?}", cmd.command);
             cmd.completed = true;
         }
-        self.pending_command.take();
-        self.pending_output.take();
-        self.pending_exit_code.take();
     }
 }
 

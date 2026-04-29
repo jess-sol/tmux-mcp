@@ -217,6 +217,42 @@ fn capture_screen(registry: &PaneRegistry, pane_id: &str, lines: usize) -> Strin
     selected[..end].join("\n")
 }
 
+/// Probe OSC 133 by sending ` :` and watching for a completion_seq bump.
+/// Returns true if a bump was observed within the deadline.
+async fn probe_osc133(
+    pane_id: &str,
+    state: &Arc<DaemonState>,
+    deadline_ms: u64,
+) -> Result<bool, RpcError> {
+    let seq_before = {
+        let registry = state.registry.lock().await;
+        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
+    };
+
+    {
+        let mut conn = state.conn.lock().await;
+        conn.send_command(pane_id, " :")
+            .await
+            .map_err(|e| RpcError::internal(format!("Failed to probe: {}", e)))?;
+    }
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(deadline_ms);
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        {
+            let registry = state.registry.lock().await;
+            if let Some(tp) = registry.get(pane_id) {
+                if tp.processor.state().completion_seq > seq_before {
+                    return Ok(true);
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+    }
+}
+
 // --- Handlers ---
 
 #[derive(Serialize)]
@@ -539,36 +575,7 @@ async fn handle_command_run(
         }
         None => {
             // Unknown — probe with ` :`
-            let seq_before = {
-                let registry = state.registry.lock().await;
-                registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
-            };
-
-            {
-                let mut conn = state.conn.lock().await;
-                conn.send_command(pane_id, " :")
-                    .await
-                    .map_err(|e| RpcError::internal(format!("Failed to probe: {}", e)))?;
-            }
-
-            // Wait up to 500ms for completion_seq bump
-            let probe_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-            let mut probed_ok = false;
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                {
-                    let registry = state.registry.lock().await;
-                    if let Some(tp) = registry.get(pane_id) {
-                        if tp.processor.state().completion_seq > seq_before {
-                            probed_ok = true;
-                            break;
-                        }
-                    }
-                }
-                if tokio::time::Instant::now() >= probe_deadline {
-                    break;
-                }
-            }
+            let probed_ok = probe_osc133(pane_id, state, 500).await?;
 
             {
                 let mut registry = state.registry.lock().await;
@@ -711,35 +718,15 @@ async fn handle_capture_pane(
 
     // Read from alacritty screen model
     let registry = state.registry.lock().await;
-    let tp = registry
-        .get(pane_id)
-        .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
-
-    let all_lines = tp.processor.screen_text();
-    // Take the last N lines, trim trailing empty lines
-    let total = all_lines.len();
-    let start = total.saturating_sub(lines);
-    let selected: Vec<&str> = all_lines[start..]
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-
-    // Trim trailing empty lines
-    let end = selected
-        .iter()
-        .rposition(|l| !l.is_empty())
-        .map(|i| i + 1)
-        .unwrap_or(0);
-
-    let text = selected[..end].join("\n");
+    let text = capture_screen(&registry, pane_id, lines);
 
     // Include active command metadata so MCP layer can steer LLMs toward command_read
-    let active_cmd = tp.processor.state().active_command().map(|cmd| {
+    let active_cmd = registry.get(pane_id).and_then(|tp| tp.processor.state().active_command().map(|cmd| {
         json!({
             "command_id": cmd.id,
             "command": cmd.command,
         })
-    });
+    }));
 
     Ok(json!({
         "text": text,
@@ -777,35 +764,7 @@ async fn handle_inject_osc133(
     let leaf_pid = get_leaf_pid(shell_pid);
 
     // --- Probe first: maybe markers already work ---
-    let seq_before = {
-        let registry = state.registry.lock().await;
-        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
-    };
-
-    {
-        let mut conn = state.conn.lock().await;
-        conn.send_command(pane_id, " :")
-            .await
-            .map_err(|e| RpcError::internal(format!("Failed to probe: {}", e)))?;
-    }
-
-    let probe_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-    let mut already_active = false;
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        {
-            let registry = state.registry.lock().await;
-            if let Some(tp) = registry.get(pane_id) {
-                if tp.processor.state().completion_seq > seq_before {
-                    already_active = true;
-                    break;
-                }
-            }
-        }
-        if tokio::time::Instant::now() >= probe_deadline {
-            break;
-        }
-    }
+    let already_active = probe_osc133(pane_id, state, 500).await?;
 
     if already_active {
         let mut registry = state.registry.lock().await;
@@ -827,35 +786,7 @@ async fn handle_inject_osc133(
     }
 
     // --- Post-inject probe ---
-    let seq_after_inject = {
-        let registry = state.registry.lock().await;
-        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
-    };
-
-    {
-        let mut conn = state.conn.lock().await;
-        conn.send_command(pane_id, " :")
-            .await
-            .map_err(|e| RpcError::internal(format!("Failed to send probe: {}", e)))?;
-    }
-
-    let post_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-    let mut inject_ok = false;
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        {
-            let registry = state.registry.lock().await;
-            if let Some(tp) = registry.get(pane_id) {
-                if tp.processor.state().completion_seq > seq_after_inject {
-                    inject_ok = true;
-                    break;
-                }
-            }
-        }
-        if tokio::time::Instant::now() >= post_deadline {
-            break;
-        }
-    }
+    let inject_ok = probe_osc133(pane_id, state, 500).await?;
 
     let mut registry = state.registry.lock().await;
     if inject_ok {

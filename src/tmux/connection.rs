@@ -176,21 +176,6 @@ impl TmuxCommands {
         Ok(())
     }
 
-    /// List panes in a window or session, returning raw tmux output.
-    pub async fn list_panes(&mut self, target: &str, session_wide: bool) -> Result<String> {
-        let flag = if session_wide { "-s" } else { "" };
-        self.execute(&format!(
-            "list-panes {} -t {} -F \"#{{window_id}}\t#{{pane_id}}\t#{{pane_index}}\t#{{pane_active}}\t#{{pane_title}}\t#{{pane_current_command}}\t#{{pane_current_path}}\t#{{pane_width}}\t#{{pane_height}}\"",
-            flag, target,
-        )).await
-    }
-
-    /// Capture raw pane content (for raw_read / screen snapshots).
-    pub async fn capture_pane(&mut self, target: &str, scrollback: i32) -> Result<String> {
-        self.execute(&format!("capture-pane -J -p -t {} -S -{}", target, scrollback))
-            .await
-    }
-
     /// Enable %output notifications for a pane.
     pub async fn enable_pane_output(&mut self, pane_id: &str) -> Result<()> {
         self.execute(&format!("refresh-client -A '{}:on'", pane_id))
