@@ -90,11 +90,11 @@ pub struct InjectOsc133Params {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SendKeysParams {
+pub struct PressKeyParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
     #[schemars(
-        description = "Keys to send. Use tmux key names: Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace. For literal text, just pass the string. Max 64 chars."
+        description = "Key to press. Use tmux key names: Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace. Max 5 chars."
     )]
     pub keys: String,
 }
@@ -155,7 +155,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
             if let Some(id) = command_id {
                 if output.is_empty() {
                     text.push_str(&format!(
-                        "\n[No new output. Command still running (id={}). Increase timeout_secs or use send_keys C-c to cancel.]",
+                        "\n[No new output. Command still running (id={}). Increase timeout_secs or use press_key C-c to cancel.]",
                         id
                     ));
                 } else {
@@ -168,7 +168,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                         hint.push_str(&format!(" {} search matches.", matches));
                     }
                     hint.push_str(&format!(
-                        " Use command_read(command_id={}, next=200) to continue reading, or send_keys C-c to cancel.]",
+                        " Use command_read(command_id={}, next=200) to continue reading, or press_key C-c to cancel.]",
                         id
                     ));
                     text.push_str(&hint);
@@ -198,7 +198,7 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Run a shell command in a pane and wait for it to complete. Returns output and exit code. Use next/head/tail/search to control output. On timeout, returns partial output — use command_read to continue.")]
+    #[tool(description = "Run a shell command in a pane and wait for it to complete. Returns output and exit code. Use next/head/tail/search to control output. On timeout, returns partial output — use command_read to continue. Examples: command_run('echo hello'), command_run('sudo -i', timeout_secs=0), command_run('ssh host', timeout_secs=0), command_run('exit', timeout_secs=0).")]
     async fn command_run(
         &self,
         Parameters(params): Parameters<CommandRunParams>,
@@ -335,10 +335,10 @@ impl TmuxMcp {
         Ok(result)
     }
 
-    #[tool(description = "Send keystrokes to a pane. VERY SLOW — each call has ~1 second round-trip. Only use when structured tools (command_run, inject_osc133) cannot work. Examples: Ctrl+C to cancel a stuck process, Ctrl+D to close a shell, Enter to dismiss a prompt. Returns screen capture showing the effect.")]
-    async fn send_keys(
+    #[tool(description = "Press a key in a pane. For control sequences only: C-c to cancel, C-d to close shell, C-z to suspend, Enter to confirm. NOT for running commands — use command_run instead.")]
+    async fn press_key(
         &self,
-        Parameters(params): Parameters<SendKeysParams>,
+        Parameters(params): Parameters<PressKeyParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut client = self.client.lock().await;
         let result = client

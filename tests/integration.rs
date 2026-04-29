@@ -964,10 +964,10 @@ async fn test_inject_skips_if_already_active() {
     .await;
 }
 
-// --- send_keys ---
+// --- press_key ---
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_send_keys_ctrl_c() {
+async fn test_press_key_ctrl_c() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
 
@@ -1000,7 +1000,7 @@ async fn test_send_keys_ctrl_c() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_send_keys_returns_screen() {
+async fn test_press_key_returns_screen() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
 
@@ -1010,7 +1010,7 @@ async fn test_send_keys_returns_screen() {
             .await;
 
         let screen = result["screen"].as_str().unwrap_or("");
-        assert!(!screen.is_empty(), "send_keys should return screen capture");
+        assert!(!screen.is_empty(), "press_key should return screen capture");
 
         td.cleanup().await;
     })

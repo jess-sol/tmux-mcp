@@ -821,9 +821,9 @@ async fn handle_send_keys(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("keys is required"))?;
 
-    if keys.len() > 64 {
+    if keys.len() > 5 {
         return Err(RpcError::invalid_params(
-            format!("keys too long: {} chars (max 64)", keys.len()),
+            format!("keys too long: {} chars (max 5). Use command_run for commands.", keys.len()),
         ));
     }
 
