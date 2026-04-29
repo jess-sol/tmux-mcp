@@ -141,6 +141,11 @@ impl PaneRegistry {
         self.panes.get(pane_id)
     }
 
+    /// Get a mutable reference to a tracked pane by ID.
+    pub fn get_mut(&mut self, pane_id: &str) -> Option<&mut TrackedPane> {
+        self.panes.get_mut(pane_id)
+    }
+
     /// Iterate all tracked panes.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &TrackedPane)> {
         self.panes.iter()

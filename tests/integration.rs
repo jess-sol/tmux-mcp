@@ -615,3 +615,55 @@ async fn test_list_panes_osc133_marker() {
     })
     .await;
 }
+
+// --- OSC 133 gating ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_panes_osc133_status_confirmed() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // After warm-up + command_run, the shell PID should be confirmed
+        td.run("echo gating-test").await;
+
+        let result = td.rpc("list_panes", json!({})).await;
+        let panes = result.as_array().expect("should be array");
+        let our_pane = panes
+            .iter()
+            .find(|p| p["pane_id"].as_str() == Some(&td.origin_pane))
+            .expect("origin pane should be in list");
+
+        assert_eq!(
+            our_pane["osc133_status"].as_str(),
+            Some("confirmed"),
+            "should be confirmed after successful command_run"
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_inject_skips_if_already_active() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Warm-up confirms the shell. Now inject should detect already_active.
+        td.run("echo primed").await;
+
+        let result = td
+            .rpc("inject_osc133", json!({"pane_id": td.origin_pane.clone()}))
+            .await;
+
+        assert_eq!(
+            result["status"].as_str(),
+            Some("already_active"),
+            "inject should detect existing markers: {:?}",
+            result
+        );
+
+        td.cleanup().await;
+    })
+    .await;
+}

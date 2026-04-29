@@ -57,7 +57,12 @@ pub struct PaneState {
     pub last_osc133_marker: Option<Instant>,
     /// When the most recent terminal data (%output) was received.
     pub last_data: Option<Instant>,
+    /// LRU cache of leaf PIDs → OSC 133 confirmed (true) or failed (false).
+    /// Bounded to 5 entries. Used by command_run to gate on marker availability.
+    pub osc133_cache: VecDeque<(u32, bool)>,
 }
+
+const MAX_OSC133_CACHE: usize = 5;
 
 impl PaneState {
     pub fn new() -> Self {
@@ -71,6 +76,31 @@ impl PaneState {
             last_exit_code: None,
             last_osc133_marker: None,
             last_data: None,
+            osc133_cache: VecDeque::new(),
+        }
+    }
+
+    /// Look up a leaf PID in the OSC 133 cache.
+    /// Returns Some(true) if confirmed, Some(false) if failed, None if unknown.
+    pub fn osc133_lookup(&self, pid: u32) -> Option<bool> {
+        self.osc133_cache.iter().find(|(p, _)| *p == pid).map(|(_, v)| *v)
+    }
+
+    /// Mark a leaf PID as having working OSC 133.
+    pub fn osc133_confirm(&mut self, pid: u32) {
+        self.osc133_upsert(pid, true);
+    }
+
+    /// Mark a leaf PID as not having working OSC 133.
+    pub fn osc133_fail(&mut self, pid: u32) {
+        self.osc133_upsert(pid, false);
+    }
+
+    fn osc133_upsert(&mut self, pid: u32, confirmed: bool) {
+        self.osc133_cache.retain(|(p, _)| *p != pid);
+        self.osc133_cache.push_front((pid, confirmed));
+        while self.osc133_cache.len() > MAX_OSC133_CACHE {
+            self.osc133_cache.pop_back();
         }
     }
 
@@ -191,5 +221,69 @@ mod tests {
         s.update_cwd_from_osc7("file://127.0.0.1/var/log");
         assert_eq!(s.cwd.as_deref(), Some("/var/log"));
         assert!(s.hostname.is_none());
+    }
+
+    // --- OSC 133 cache ---
+
+    #[test]
+    fn osc133_cache_lookup_empty() {
+        let s = PaneState::new();
+        assert_eq!(s.osc133_lookup(100), None);
+    }
+
+    #[test]
+    fn osc133_cache_confirm_and_lookup() {
+        let mut s = PaneState::new();
+        s.osc133_confirm(100);
+        assert_eq!(s.osc133_lookup(100), Some(true));
+        assert_eq!(s.osc133_lookup(200), None);
+    }
+
+    #[test]
+    fn osc133_cache_fail_and_lookup() {
+        let mut s = PaneState::new();
+        s.osc133_fail(100);
+        assert_eq!(s.osc133_lookup(100), Some(false));
+    }
+
+    #[test]
+    fn osc133_cache_confirm_overrides_fail() {
+        let mut s = PaneState::new();
+        s.osc133_fail(100);
+        assert_eq!(s.osc133_lookup(100), Some(false));
+        s.osc133_confirm(100);
+        assert_eq!(s.osc133_lookup(100), Some(true));
+    }
+
+    #[test]
+    fn osc133_cache_fail_overrides_confirm() {
+        let mut s = PaneState::new();
+        s.osc133_confirm(100);
+        s.osc133_fail(100);
+        assert_eq!(s.osc133_lookup(100), Some(false));
+    }
+
+    #[test]
+    fn osc133_cache_separate_pids() {
+        let mut s = PaneState::new();
+        s.osc133_confirm(100);
+        s.osc133_fail(200);
+        assert_eq!(s.osc133_lookup(100), Some(true));
+        assert_eq!(s.osc133_lookup(200), Some(false));
+        assert_eq!(s.osc133_lookup(300), None);
+    }
+
+    #[test]
+    fn osc133_cache_bounded_at_5() {
+        let mut s = PaneState::new();
+        for pid in 1..=6 {
+            s.osc133_confirm(pid);
+        }
+        // PID 1 should have been evicted
+        assert_eq!(s.osc133_lookup(1), None);
+        // PIDs 2-6 should be present
+        for pid in 2..=6 {
+            assert_eq!(s.osc133_lookup(pid), Some(true));
+        }
     }
 }

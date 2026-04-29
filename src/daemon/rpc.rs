@@ -94,6 +94,26 @@ fn validate_pane_access(
     Ok(())
 }
 
+// --- Helpers ---
+
+/// Get the leaf PID for a pane: the foreground process PID, or the shell PID if idle.
+fn get_leaf_pid(shell_pid: u32) -> u32 {
+    proc::proc_info(shell_pid)
+        .and_then(|info| info.foreground.map(|f| f.pid))
+        .unwrap_or(shell_pid)
+}
+
+/// Capture the last N lines of visible screen text from a pane's processor.
+fn capture_screen(registry: &PaneRegistry, pane_id: &str, lines: usize) -> String {
+    let Some(tp) = registry.get(pane_id) else { return String::new() };
+    let all_lines = tp.processor.screen_text();
+    let total = all_lines.len();
+    let start = total.saturating_sub(lines);
+    let selected: Vec<&str> = all_lines[start..].iter().map(|s| s.as_str()).collect();
+    let end = selected.iter().rposition(|l| !l.is_empty()).map(|i| i + 1).unwrap_or(0);
+    selected[..end].join("\n")
+}
+
 // --- Handlers ---
 
 #[derive(Serialize)]
@@ -116,6 +136,8 @@ struct PaneEntry {
     osc133_last_marker_secs: Option<f64>,
     /// Seconds since last terminal data received, or null if never seen.
     last_data_secs: Option<f64>,
+    /// OSC 133 status for current leaf PID: "confirmed", "failed", or "unknown".
+    osc133_status: String,
 }
 
 async fn handle_list_panes(
@@ -155,6 +177,13 @@ async fn handle_list_panes(
             .last_data
             .map(|t| t.elapsed().as_secs_f64());
 
+        let leaf_pid = tp.pid.map(get_leaf_pid).unwrap_or(0);
+        let osc133_status = match pane_state.osc133_lookup(leaf_pid) {
+            Some(true) => "confirmed",
+            Some(false) => "failed",
+            None => "unknown",
+        };
+
         entries.push(PaneEntry {
             pane_id: tp.pane_id.clone(),
             pid: tp.pid,
@@ -171,6 +200,7 @@ async fn handle_list_panes(
             activity: format!("{:?}", pane_state.activity),
             osc133_last_marker_secs,
             last_data_secs,
+            osc133_status: osc133_status.to_string(),
         });
     }
 
@@ -248,21 +278,105 @@ async fn handle_command_run(
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
     let timeout_secs = params["timeout_secs"].as_u64().unwrap_or(30);
 
-    // Validate window access
-    {
+    // Validate window access and get shell PID
+    let shell_pid = {
         let registry = state.registry.lock().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
+        registry
+            .get(pane_id)
+            .and_then(|tp| tp.pid)
+            .ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+    };
+
+    let leaf_pid = get_leaf_pid(shell_pid);
+
+    // --- OSC 133 gating ---
+    let cache_status = {
+        let registry = state.registry.lock().await;
+        registry.get(pane_id).and_then(|tp| tp.processor.state().osc133_lookup(leaf_pid))
+    };
+
+    match cache_status {
+        Some(false) => {
+            // Known failed — instant reject
+            let registry = state.registry.lock().await;
+            let screen = capture_screen(&registry, pane_id, 20);
+            let marker_secs = registry
+                .get(pane_id)
+                .and_then(|tp| tp.processor.state().last_osc133_marker)
+                .map(|t| t.elapsed().as_secs_f64());
+            return Err(RpcError::internal(format!(
+                "OSC 133 not active for this pane. Use inject_osc133 to enable shell integration.\n\nosc133_last_marker_secs: {:?}\n\nScreen:\n{}",
+                marker_secs, screen
+            )));
+        }
+        None => {
+            // Unknown — probe with ` :`
+            let seq_before = {
+                let registry = state.registry.lock().await;
+                registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
+            };
+
+            {
+                let mut conn = state.conn.lock().await;
+                conn.send_command(pane_id, " :")
+                    .await
+                    .map_err(|e| RpcError::internal(format!("Failed to probe: {}", e)))?;
+            }
+
+            // Wait up to 500ms for completion_seq bump
+            let probe_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+            let mut probed_ok = false;
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                {
+                    let registry = state.registry.lock().await;
+                    if let Some(tp) = registry.get(pane_id) {
+                        if tp.processor.state().completion_seq > seq_before {
+                            probed_ok = true;
+                            break;
+                        }
+                    }
+                }
+                if tokio::time::Instant::now() >= probe_deadline {
+                    break;
+                }
+            }
+
+            {
+                let mut registry = state.registry.lock().await;
+                if probed_ok {
+                    if let Some(tp) = registry.get_mut(pane_id) {
+                        tp.processor.state_mut().osc133_confirm(leaf_pid);
+                    }
+                } else {
+                    if let Some(tp) = registry.get_mut(pane_id) {
+                        tp.processor.state_mut().osc133_fail(leaf_pid);
+                    }
+                    let screen = capture_screen(&registry, pane_id, 20);
+                    return Err(RpcError::internal(format!(
+                        "OSC 133 probe failed — no markers detected. Use inject_osc133 to enable shell integration.\n\nScreen:\n{}",
+                        screen
+                    )));
+                }
+            }
+        }
+        Some(true) => {
+            // Confirmed — proceed (will verify C marker after send below)
+        }
     }
 
-    // Snapshot completion_seq before sending — D marker always bumps this,
-    // even if the command isn't recorded in history (e.g., no C marker).
+    // --- Send the command ---
     let seq_before = {
         let registry = state.registry.lock().await;
         registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
     };
+    let marker_before = {
+        let registry = state.registry.lock().await;
+        registry.get(pane_id).and_then(|tp| tp.processor.state().last_osc133_marker)
+    };
 
-    // Send the command
     {
         let mut conn = state.conn.lock().await;
         conn.send_command(pane_id, command)
@@ -270,7 +384,46 @@ async fn handle_command_run(
             .map_err(|e| RpcError::internal(format!("Failed to send command: {}", e)))?;
     }
 
-    // Poll for completion (new command appearing in history)
+    // Wait up to 500ms for any marker (C or completion_seq bump) to verify OSC 133 is alive
+    let verify_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+    let mut marker_seen = false;
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        {
+            let registry = state.registry.lock().await;
+            if let Some(tp) = registry.get(pane_id) {
+                let ps = tp.processor.state();
+                if ps.completion_seq > seq_before {
+                    marker_seen = true;
+                    break;
+                }
+                if ps.last_osc133_marker != marker_before {
+                    marker_seen = true;
+                    break;
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= verify_deadline {
+            break;
+        }
+    }
+
+    if !marker_seen {
+        // OSC 133 stopped working — command was already sent, pane state uncertain
+        tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
+        let mut registry = state.registry.lock().await;
+        if let Some(tp) = registry.get_mut(pane_id) {
+            tp.processor.state_mut().osc133_fail(leaf_pid);
+        }
+        let screen = capture_screen(&registry, pane_id, 20);
+        return Err(RpcError::internal(format!(
+            "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
+             Use capture_pane to inspect and inject_osc133 to recover.\n\nScreen:\n{}",
+            screen
+        )));
+    }
+
+    // --- Poll for completion ---
     let deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
 
@@ -282,8 +435,6 @@ async fn handle_command_run(
             if let Some(tp) = registry.get(pane_id) {
                 let pane_state = tp.processor.state();
                 if pane_state.completion_seq > seq_before {
-                    // Command completed. Return newest command if available,
-                    // or a minimal result with just the exit code.
                     if let Some(cmd) = pane_state.commands.front() {
                         if cmd.seq > 0 {
                             return Ok(json!({
@@ -293,7 +444,6 @@ async fn handle_command_run(
                             }));
                         }
                     }
-                    // No command recorded (e.g., no C marker) — return exit code from D
                     return Ok(json!({
                         "command": null,
                         "exit_code": pane_state.last_exit_code,
@@ -370,32 +520,73 @@ async fn handle_inject_osc133(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
 
-    // Validate window access
-    {
+    // Validate window access and get shell PID
+    let shell_pid = {
         let registry = state.registry.lock().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
+        registry
+            .get(pane_id)
+            .and_then(|tp| tp.pid)
+            .ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+    };
+
+    let leaf_pid = get_leaf_pid(shell_pid);
+
+    // --- Probe first: maybe markers already work ---
+    let seq_before = {
+        let registry = state.registry.lock().await;
+        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
+    };
+
+    {
+        let mut conn = state.conn.lock().await;
+        conn.send_command(pane_id, " :")
+            .await
+            .map_err(|e| RpcError::internal(format!("Failed to probe: {}", e)))?;
     }
 
-    // Send each line of the injection script
+    let probe_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+    let mut already_active = false;
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        {
+            let registry = state.registry.lock().await;
+            if let Some(tp) = registry.get(pane_id) {
+                if tp.processor.state().completion_seq > seq_before {
+                    already_active = true;
+                    break;
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= probe_deadline {
+            break;
+        }
+    }
+
+    if already_active {
+        let mut registry = state.registry.lock().await;
+        if let Some(tp) = registry.get_mut(pane_id) {
+            tp.processor.state_mut().osc133_confirm(leaf_pid);
+        }
+        return Ok(json!({ "status": "already_active" }));
+    }
+
+    // --- Inject the script ---
     {
         let mut conn = state.conn.lock().await;
         for line in OSC133_INJECT_LINES {
             conn.send_command(pane_id, line)
                 .await
                 .map_err(|e| RpcError::internal(format!("Failed to send injection: {}", e)))?;
-            // Small delay between lines to let the shell process each
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
     }
 
-    // Probe: send ` :` and wait for completion_seq bump
-    let seq_before = {
+    // --- Post-inject probe ---
+    let seq_after_inject = {
         let registry = state.registry.lock().await;
-        registry
-            .get(pane_id)
-            .map(|tp| tp.processor.state().completion_seq)
-            .unwrap_or(0)
+        registry.get(pane_id).map(|tp| tp.processor.state().completion_seq).unwrap_or(0)
     };
 
     {
@@ -405,22 +596,39 @@ async fn handle_inject_osc133(
             .map_err(|e| RpcError::internal(format!("Failed to send probe: {}", e)))?;
     }
 
-    // Wait up to 3s for completion_seq to bump (markers working)
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+    let post_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+    let mut inject_ok = false;
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         {
             let registry = state.registry.lock().await;
             if let Some(tp) = registry.get(pane_id) {
-                if tp.processor.state().completion_seq > seq_before {
-                    return Ok(json!({ "status": "active" }));
+                if tp.processor.state().completion_seq > seq_after_inject {
+                    inject_ok = true;
+                    break;
                 }
             }
         }
-
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(json!({ "status": "inactive", "message": "Injection sent but no markers detected. Shell may not be bash." }));
+        if tokio::time::Instant::now() >= post_deadline {
+            break;
         }
+    }
+
+    let mut registry = state.registry.lock().await;
+    if inject_ok {
+        if let Some(tp) = registry.get_mut(pane_id) {
+            tp.processor.state_mut().osc133_confirm(leaf_pid);
+        }
+        Ok(json!({ "status": "active" }))
+    } else {
+        if let Some(tp) = registry.get_mut(pane_id) {
+            tp.processor.state_mut().osc133_fail(leaf_pid);
+        }
+        let screen = capture_screen(&registry, pane_id, 20);
+        Ok(json!({
+            "status": "failed",
+            "message": "Injection sent but no markers detected. Shell may not be bash.",
+            "screen": screen,
+        }))
     }
 }
