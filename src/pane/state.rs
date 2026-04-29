@@ -6,18 +6,22 @@ use std::time::Instant;
 /// Maximum commands retained in history per pane.
 const MAX_COMMAND_HISTORY: usize = 100;
 
-/// A completed command with its output and metadata.
+/// A command with its output — may be in-progress or completed.
 #[derive(Debug, Clone)]
 pub struct CommandRecord {
+    /// Monotonic ID for addressing (higher = newer).
+    pub id: u64,
     /// The command text as typed by the user.
     pub command: String,
-    /// Command output (text between C and D markers, escape sequences stripped).
+    /// Command output — accumulates live during execution, persists after completion.
     pub output: String,
-    /// Exit code from D marker. None if unknown (e.g., D never arrived).
+    /// Exit code from D marker. None if still running or unknown.
     pub exit_code: Option<i32>,
-    /// Monotonic sequence number for ordering (higher = newer).
-    pub seq: u64,
-    /// When this command was finalized.
+    /// Whether the command has completed (B marker finalized).
+    pub completed: bool,
+    /// Read cursor — line offset into output. Only `next` advances this.
+    pub read_cursor: usize,
+    /// When this record was created.
     pub timestamp: Instant,
 }
 
@@ -104,19 +108,71 @@ impl PaneState {
         }
     }
 
-    /// Record a completed command.
-    pub fn push_command(&mut self, command: String, output: String, exit_code: Option<i32>) {
+    /// Push an incomplete (in-progress) command record. Returns its ID.
+    pub fn push_command_start(&mut self, command: String) -> u64 {
         self.seq_counter += 1;
+        let id = self.seq_counter;
         self.commands.push_front(CommandRecord {
+            id,
             command,
-            output,
-            exit_code,
-            seq: self.seq_counter,
+            output: String::new(),
+            exit_code: None,
+            completed: false,
+            read_cursor: 0,
             timestamp: Instant::now(),
         });
         while self.commands.len() > MAX_COMMAND_HISTORY {
             self.commands.pop_back();
         }
+        id
+    }
+
+    /// Push a completed command record (for backwards compat with existing callers).
+    pub fn push_command(&mut self, command: String, output: String, exit_code: Option<i32>) {
+        self.seq_counter += 1;
+        self.commands.push_front(CommandRecord {
+            id: self.seq_counter,
+            command,
+            output,
+            exit_code,
+            completed: true,
+            read_cursor: 0,
+            timestamp: Instant::now(),
+        });
+        while self.commands.len() > MAX_COMMAND_HISTORY {
+            self.commands.pop_back();
+        }
+    }
+
+    /// Get the active (incomplete) command, if any.
+    pub fn active_command(&self) -> Option<&CommandRecord> {
+        self.commands.front().filter(|c| !c.completed)
+    }
+
+    /// Get a mutable ref to the active command.
+    pub fn active_command_mut(&mut self) -> Option<&mut CommandRecord> {
+        self.commands.front_mut().filter(|c| !c.completed)
+    }
+
+    /// Append output to the active (incomplete) command.
+    /// Stops accumulating after D marker sets exit_code (command output is done,
+    /// remaining text before B is prompt content).
+    pub fn append_active_output(&mut self, text: &str) {
+        if let Some(cmd) = self.commands.front_mut() {
+            if !cmd.completed && cmd.exit_code.is_none() {
+                cmd.output.push_str(text);
+            }
+        }
+    }
+
+    /// Find a command by ID.
+    pub fn command_by_id(&self, id: u64) -> Option<&CommandRecord> {
+        self.commands.iter().find(|c| c.id == id)
+    }
+
+    /// Find a command by ID (mutable).
+    pub fn command_by_id_mut(&mut self, id: u64) -> Option<&mut CommandRecord> {
+        self.commands.iter_mut().find(|c| c.id == id)
     }
 
     /// Get the most recent N commands (newest first).
@@ -178,7 +234,7 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].command, "pwd"); // newest first
         assert_eq!(recent[1].command, "ls");
-        assert!(recent[0].seq > recent[1].seq);
+        assert!(recent[0].id > recent[1].id);
     }
 
     #[test]

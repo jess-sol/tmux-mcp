@@ -437,7 +437,7 @@ async fn handle_command_run(
                 let pane_state = tp.processor.state();
                 if pane_state.completion_seq > seq_before {
                     if let Some(cmd) = pane_state.commands.front() {
-                        if cmd.seq > 0 {
+                        if cmd.id > 0 {
                             return Ok(json!({
                                 "command": cmd.command,
                                 "exit_code": cmd.exit_code,

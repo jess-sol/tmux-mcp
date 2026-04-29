@@ -80,7 +80,7 @@ impl PaneProcessor {
                         self.processor.advance(&mut self.term, segment);
                         // If we're executing, this is command output
                         if let Ok(text) = std::str::from_utf8(segment) {
-                            self.osc133.append_output(text);
+                            self.osc133.append_output(text, &mut self.state);
                         }
                     }
 
@@ -96,7 +96,7 @@ impl PaneProcessor {
                     if !segment.is_empty() {
                         self.processor.advance(&mut self.term, segment);
                         if let Ok(text) = std::str::from_utf8(segment) {
-                            self.osc133.append_output(text);
+                            self.osc133.append_output(text, &mut self.state);
                         }
                     }
                     pos = bytes.len();
