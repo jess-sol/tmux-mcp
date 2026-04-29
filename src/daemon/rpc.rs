@@ -646,7 +646,7 @@ async fn handle_command_run(
         let screen = capture_screen(&registry, pane_id, 20);
         return Err(RpcError::internal(format!(
             "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
-             Use capture_pane to inspect pane state.\n\nScreen:\n{}",
+             Use debug_pane to inspect pane state.\n\nScreen:\n{}",
             screen
         )));
     }
@@ -744,7 +744,19 @@ async fn handle_capture_pane(
         .unwrap_or(0);
 
     let text = selected[..end].join("\n");
-    Ok(json!({ "text": text }))
+
+    // Include active command metadata so MCP layer can steer LLMs toward command_read
+    let active_cmd = tp.processor.state().active_command().map(|cmd| {
+        json!({
+            "command_id": cmd.id,
+            "command": cmd.command,
+        })
+    });
+
+    Ok(json!({
+        "text": text,
+        "active_command": active_cmd,
+    }))
 }
 
 /// OSC 133 + OSC 7 injection script for bash.

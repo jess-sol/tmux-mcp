@@ -76,7 +76,7 @@ pub struct CommandHistoryParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct CapturePaneParams {
+pub struct DebugPaneParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
     #[schemars(description = "Number of lines from bottom of screen (default 50, max 1000)")]
@@ -167,7 +167,10 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                     if let Some(matches) = search_matches {
                         hint.push_str(&format!(" {} search matches.", matches));
                     }
-                    hint.push_str(" Use command_read to continue, or send_keys C-c to cancel.]");
+                    hint.push_str(&format!(
+                        " Use command_read(command_id={}, next=200) to continue reading, or send_keys C-c to cancel.]",
+                        id
+                    ));
                     text.push_str(&hint);
                 }
             }
@@ -226,7 +229,7 @@ impl TmuxMcp {
         Ok(call_result)
     }
 
-    #[tool(description = "Read output of a command. Defaults to current/last command. Use next to stream new output, head/tail to view ranges, search to filter by regex. For active commands, waits up to timeout_secs for new output.")]
+    #[tool(description = "Read output of a command (use after command_run timeout, or to stream long-running output). Defaults to current/last command. Use next to stream new output, head/tail to view ranges, search to filter by regex. For active commands, waits up to timeout_secs for new output.")]
     async fn command_read(
         &self,
         Parameters(params): Parameters<CommandReadParams>,
@@ -257,10 +260,10 @@ impl TmuxMcp {
         Ok(call_result)
     }
 
-    #[tool(description = "Capture visible text from a pane's screen buffer. Works regardless of what's running in the pane.")]
-    async fn capture_pane(
+    #[tool(description = "Low-level screen capture for debugging. Shows only visible terminal text — no scrollback, no structure. NOT for reading command output (use command_read instead). Use only to debug pane state or inspect TUI apps.")]
+    async fn debug_pane(
         &self,
-        Parameters(params): Parameters<CapturePaneParams>,
+        Parameters(params): Parameters<DebugPaneParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut client = self.client.lock().await;
         let result = client
@@ -275,7 +278,20 @@ impl TmuxMcp {
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-        let text = result["text"].as_str().unwrap_or("").to_string();
+        let mut text = String::new();
+
+        // Steer LLMs toward command_read when a tracked command is active
+        if let Some(active) = result["active_command"].as_object() {
+            let cmd_id = active["command_id"].as_u64().unwrap_or(0);
+            let cmd_text = active["command"].as_str().unwrap_or("");
+            text.push_str(&format!(
+                "[Command {} ({:?}) is running. Use command_read(command_id={}) \
+                 for structured output with cursor tracking.]\n\n",
+                cmd_id, cmd_text, cmd_id
+            ));
+        }
+
+        text.push_str(result["text"].as_str().unwrap_or(""));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -372,7 +388,9 @@ impl ServerHandler for TmuxMcp {
             instructions: Some(
                 "MCP server for interacting with tmux panes. \
                  Use list_panes to discover available panes, then run \
-                 commands and read their output."
+                 commands and read their output.\n\n\
+                 After command_run timeout: use command_read(command_id=N) to continue reading. \
+                 Do NOT use debug_pane for command output — it only shows the visible screen."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
