@@ -39,6 +39,7 @@ impl RpcError {
 pub struct DaemonState {
     pub conn: Mutex<TmuxCommands>,
     pub registry: Mutex<PaneRegistry>,
+    pub started_at: std::time::Instant,
 }
 
 /// Dispatch an RPC method call.
@@ -206,7 +207,10 @@ async fn handle_list_panes(
     }
 
     entries.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
-    serde_json::to_value(&entries).map_err(|e| RpcError::internal(e.to_string()))
+    Ok(json!({
+        "daemon_uptime_secs": state.started_at.elapsed().as_secs_f64(),
+        "panes": serde_json::to_value(&entries).map_err(|e| RpcError::internal(e.to_string()))?,
+    }))
 }
 
 async fn handle_command_history(

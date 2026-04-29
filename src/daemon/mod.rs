@@ -59,6 +59,7 @@ pub async fn run(session: &str, server: Option<&str>) -> Result<(), Box<dyn std:
     let state = Arc::new(DaemonState {
         conn: Mutex::new(commands),
         registry: Mutex::new(registry),
+        started_at: std::time::Instant::now(),
     });
 
     let cancel = CancellationToken::new();

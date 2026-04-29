@@ -177,7 +177,7 @@ async fn test_list_panes() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
         let result = td.rpc("list_panes", json!({})).await;
-        let panes = result.as_array().expect("list_panes should return array");
+        let panes = result["panes"].as_array().expect("list_panes should return panes array");
         assert!(!panes.is_empty(), "should have at least one pane");
 
         // Our origin pane should be in the list
@@ -597,7 +597,7 @@ async fn test_list_panes_osc133_marker() {
 
         // After warm-up, markers should have been seen
         let result = td.rpc("list_panes", json!({})).await;
-        let panes = result.as_array().expect("should be array");
+        let panes = result["panes"].as_array().expect("should be array");
         let our_pane = panes
             .iter()
             .find(|p| p["pane_id"].as_str() == Some(&td.origin_pane))
@@ -627,7 +627,7 @@ async fn test_list_panes_osc133_status_confirmed() {
         td.run("echo gating-test").await;
 
         let result = td.rpc("list_panes", json!({})).await;
-        let panes = result.as_array().expect("should be array");
+        let panes = result["panes"].as_array().expect("should be array");
         let our_pane = panes
             .iter()
             .find(|p| p["pane_id"].as_str() == Some(&td.origin_pane))
