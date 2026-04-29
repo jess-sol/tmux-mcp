@@ -217,14 +217,21 @@ impl TmuxMcp {
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         let status = result["status"].as_str().unwrap_or("unknown");
-        let text = if status == "active" {
-            "OSC 133 injection successful — shell integration active.".to_string()
-        } else {
-            let msg = result["message"].as_str().unwrap_or("Injection may have failed");
-            format!("OSC 133 injection status: {} — {}", status, msg)
+        let text = match status {
+            "active" => "OSC 133 injection successful — shell integration active.".to_string(),
+            "already_active" => "OSC 133 already active — no injection needed. command_run should work.".to_string(),
+            _ => {
+                let msg = result["message"].as_str().unwrap_or("Injection may have failed");
+                let screen = result["screen"].as_str().unwrap_or("");
+                if screen.is_empty() {
+                    format!("OSC 133 injection status: {} — {}", status, msg)
+                } else {
+                    format!("OSC 133 injection status: {} — {}\n\nScreen:\n{}", status, msg, screen)
+                }
+            }
         };
 
-        let is_error = status != "active";
+        let is_error = status == "failed";
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         if is_error {
             result.is_error = Some(true);
