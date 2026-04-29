@@ -9,7 +9,11 @@ pub enum Notification {
     SessionClose { session_id: String },
     /// %exit [reason]
     Exit { reason: Option<String> },
-    /// Anything else (window-add, layout-change, pane-mode-changed, etc.)
+    /// %layout-change @<window_id> <layout_string>
+    LayoutChange { window_id: String, layout: String },
+    /// %window-add @<window_id>
+    WindowAdd { window_id: String },
+    /// Anything else (pane-mode-changed, etc.)
     Other { line: String },
 }
 
@@ -111,6 +115,15 @@ pub fn parse_notification(line: &str) -> Notification {
         Some("%session-closed") if parts.len() >= 2 => {
             Notification::SessionClose { session_id: parts[1].to_string() }
         }
+        Some("%layout-change") if parts.len() >= 3 => {
+            Notification::LayoutChange {
+                window_id: parts[1].to_string(),
+                layout: parts[2].to_string(),
+            }
+        }
+        Some("%window-add") if parts.len() >= 2 => {
+            Notification::WindowAdd { window_id: parts[1].to_string() }
+        }
         Some("%exit") => Notification::Exit { reason: parts.get(1).map(|s| s.to_string()) },
         _ => Notification::Other { line: line.to_string() },
     }
@@ -184,18 +197,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_notification() {
+    fn parse_window_add() {
         let n = parse_notification("%window-add @5");
-        assert_eq!(n, Notification::Other { line: "%window-add @5".to_string() });
+        assert_eq!(n, Notification::WindowAdd { window_id: "@5".to_string() });
     }
 
     #[test]
     fn parse_layout_change() {
-        let n = parse_notification("%layout-change @1 abc123");
+        let n = parse_notification("%layout-change @1 abc123,80x24,0,0,0");
         assert_eq!(
             n,
-            Notification::Other {
-                line: "%layout-change @1 abc123".to_string(),
+            Notification::LayoutChange {
+                window_id: "@1".to_string(),
+                layout: "abc123,80x24,0,0,0".to_string(),
             }
         );
     }

@@ -116,6 +116,13 @@ impl PaneProcessor {
         self.osc133.phase()
     }
 
+    /// Resize the headless terminal to new dimensions.
+    /// Called when tmux reports changed pane dimensions via `%layout-change`.
+    pub fn resize(&mut self, lines: usize, columns: usize) {
+        let dims = PaneDimensions { lines, columns };
+        self.term.resize(dims);
+    }
+
     // --- Screen queries ---
 
     /// Read text from a specific line of the screen.
@@ -205,6 +212,16 @@ mod tests {
         assert_eq!(p.screen_lines(), 24);
         assert_eq!(p.columns(), 80);
         assert_eq!(p.cursor_position(), (0, 0));
+    }
+
+    #[test]
+    fn resize_updates_dimensions() {
+        let mut p = PaneProcessor::new(24, 80);
+        assert_eq!(p.screen_lines(), 24);
+        assert_eq!(p.columns(), 80);
+        p.resize(40, 120);
+        assert_eq!(p.screen_lines(), 40);
+        assert_eq!(p.columns(), 120);
     }
 
     #[test]
