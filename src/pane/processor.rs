@@ -1,6 +1,7 @@
 /// Pane processor: owns a headless alacritty terminal instance and
 /// processes byte chunks with OSC boundary splitting for synchronized
-/// metadata extraction.
+/// metadata extraction. Integrates the OSC 133 state machine for
+/// structured command tracking.
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
@@ -8,7 +9,9 @@ use alacritty_terminal::term::Config;
 use alacritty_terminal::Term;
 use vte::ansi::Processor;
 
-use crate::pane::osc::{find_next_osc_from, OscMatch};
+use crate::pane::osc::{OscEvent, OscMatch, find_next_osc_from};
+use crate::pane::osc133::{Osc133Parser, Osc133Phase};
+use crate::pane::state::PaneState;
 
 // --- Terminal dimensions ---
 
@@ -36,6 +39,8 @@ impl Dimensions for PaneDimensions {
 pub struct PaneProcessor {
     term: Term<VoidListener>,
     processor: Processor,
+    osc133: Osc133Parser,
+    state: PaneState,
 }
 
 impl PaneProcessor {
@@ -45,7 +50,12 @@ impl PaneProcessor {
         let config = Config::default();
         let term = Term::new(config, &dims, VoidListener);
         let processor = Processor::new();
-        Self { term, processor }
+        Self {
+            term,
+            processor,
+            osc133: Osc133Parser::new(),
+            state: PaneState::new(),
+        }
     }
 
     /// Process a chunk of raw terminal bytes (already unescaped from tmux octal).
@@ -64,19 +74,30 @@ impl PaneProcessor {
             match find_next_osc_from(bytes, pos) {
                 Some(osc_match) => {
                     // Feed bytes before the OSC to the terminal emulator
-                    if osc_match.start > pos {
-                        self.processor.advance(&mut self.term, &bytes[pos..osc_match.start]);
+                    let segment = &bytes[pos..osc_match.start];
+                    if !segment.is_empty() {
+                        self.processor.advance(&mut self.term, segment);
+                        // If we're executing, this is command output
+                        if let Ok(text) = std::str::from_utf8(segment) {
+                            self.osc133.append_output(text);
+                        }
                     }
 
-                    // Record the event (screen is at exactly the right state here)
-                    events.push(osc_match.clone());
+                    // Handle the OSC event (screen is synchronized)
+                    self.handle_osc_event(&osc_match.event);
 
-                    // Advance past the OSC sequence
+                    events.push(osc_match.clone());
                     pos = osc_match.end;
                 }
                 None => {
                     // No more OSC events — feed remaining bytes to terminal
-                    self.processor.advance(&mut self.term, &bytes[pos..]);
+                    let segment = &bytes[pos..];
+                    if !segment.is_empty() {
+                        self.processor.advance(&mut self.term, segment);
+                        if let Ok(text) = std::str::from_utf8(segment) {
+                            self.osc133.append_output(text);
+                        }
+                    }
                     pos = bytes.len();
                 }
             }
@@ -84,6 +105,18 @@ impl PaneProcessor {
 
         events
     }
+
+    /// Access the structured pane state (command history, activity, cwd).
+    pub fn state(&self) -> &PaneState {
+        &self.state
+    }
+
+    /// Access the OSC 133 parser state.
+    pub fn osc133_phase(&self) -> &Osc133Phase {
+        self.osc133.phase()
+    }
+
+    // --- Screen queries ---
 
     /// Read text from a specific line of the screen.
     /// Line 0 is the topmost visible line.
@@ -98,7 +131,6 @@ impl PaneProcessor {
         for cell in row {
             text.push(cell.c);
         }
-        // Trim trailing spaces
         text.trim_end().to_string()
     }
 
@@ -130,12 +162,42 @@ impl PaneProcessor {
             .map(|line| self.screen_line_text(line))
             .collect()
     }
+
+    // --- Internal ---
+
+    fn handle_osc_event(&mut self, event: &OscEvent) {
+        match event {
+            OscEvent::Osc133 { marker, param } => {
+                let param_ref = param.as_deref();
+                // Capture cursor line text for screen query (used by C marker)
+                let cursor_text = self.cursor_line_text();
+                self.osc133.handle_marker(
+                    *marker,
+                    param_ref,
+                    &mut self.state,
+                    || cursor_text,
+                );
+                // Update activity based on phase
+                match self.osc133.phase() {
+                    Osc133Phase::Executing { .. } => {
+                        self.state.activity = crate::pane::state::Activity::Busy;
+                    }
+                    _ => {}
+                }
+            }
+            OscEvent::Osc7 { uri } => {
+                self.state.update_cwd_from_osc7(uri);
+            }
+            OscEvent::Osc9 { text } => {
+                tracing::debug!("OSC 9 notification: {}", text);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane::osc::OscEvent;
 
     #[test]
     fn empty_processor() {
@@ -164,7 +226,6 @@ mod tests {
     #[test]
     fn backspace_editing() {
         let mut p = PaneProcessor::new(24, 80);
-        // Type "abcd", backspace twice, type "ef"
         p.process_chunk(b"abcd\x08\x08ef");
         assert_eq!(p.screen_line_text(0), "abef");
     }
@@ -172,7 +233,6 @@ mod tests {
     #[test]
     fn cursor_movement_editing() {
         let mut p = PaneProcessor::new(24, 80);
-        // Type "hello", move cursor left 3, type "X"
         p.process_chunk(b"hello\x1b[3DX");
         assert_eq!(p.screen_line_text(0), "heXlo");
     }
@@ -196,10 +256,8 @@ mod tests {
     #[test]
     fn osc133_c_captures_command_text() {
         let mut p = PaneProcessor::new(24, 80);
-        // Simulate: prompt, user types "ls -la", then C marker
         p.process_chunk(b"\x1b]133;A\x07$ \x1b]133;B\x07");
         let events = p.process_chunk(b"ls -la\x1b]133;C\x07");
-        // At the moment of C, the screen should show "$ ls -la"
         assert_eq!(p.screen_line_text(0), "$ ls -la");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'C', param: None });
@@ -208,12 +266,8 @@ mod tests {
     #[test]
     fn osc133_c_with_readline_editing() {
         let mut p = PaneProcessor::new(24, 80);
-        // Prompt
         p.process_chunk(b"\x1b]133;A\x07$ \x1b]133;B\x07");
-        // User types "shwo", backspaces twice, types "ow" → "show"
-        // Then C marker
         let events = p.process_chunk(b"shwo\x08\x08ow\x1b]133;C\x07");
-        // Screen should show "$ show" at the moment of C
         assert_eq!(p.screen_line_text(0), "$ show");
         assert_eq!(events.len(), 1);
     }
@@ -227,12 +281,14 @@ mod tests {
             events[0].event,
             OscEvent::Osc7 { uri: "file://myhost/home/user".to_string() }
         );
+        // State should be updated
+        assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
+        assert_eq!(p.state().hostname.as_deref(), Some("myhost"));
     }
 
     #[test]
     fn non_intercepted_osc_passes_through() {
         let mut p = PaneProcessor::new(24, 80);
-        // OSC 0 (window title) should pass through to alacritty, not be intercepted
         let events = p.process_chunk(b"\x1b]0;My Title\x07hello");
         assert!(events.is_empty());
         assert_eq!(p.screen_line_text(0), "hello");
@@ -243,29 +299,54 @@ mod tests {
         let mut p = PaneProcessor::new(24, 80);
         let events = p.process_chunk(b"before\x1b]133;C\x07after\r\nline2");
         assert_eq!(events.len(), 1);
-        // "before" was fed to terminal before C, "after" after
         assert_eq!(p.screen_line_text(0), "beforeafter");
         assert_eq!(p.screen_line_text(1), "line2");
+    }
+
+    #[test]
+    fn full_command_cycle_with_state() {
+        let mut p = PaneProcessor::new(24, 80);
+
+        // D;0 from previous command + A + OSC7 + prompt text + B
+        p.process_chunk(
+            b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\\x1b]7;file://localhost/home/user\x1b\\$ \x1b]133;B\x1b\\"
+        );
+
+        // User types command + C + E
+        p.process_chunk(b"echo hello\x1b]133;C\x1b\\\x1b]133;E;echo hello\x1b\\");
+        assert_eq!(p.screen_line_text(0), "$ echo hello");
+        assert!(matches!(p.osc133_phase(), Osc133Phase::Executing { .. }));
+
+        // Command output + D
+        p.process_chunk(b"\r\nhello\r\n\x1b]133;D;0\x1b\\");
+        assert_eq!(p.screen_line_text(1), "hello");
+
+        // Next prompt cycle (B finalizes the command)
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+
+        // Command should be in history now
+        let cmds = p.state().recent_commands(10);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "echo hello");
+        assert_eq!(cmds[0].exit_code, Some(0));
+        assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
     }
 
     #[test]
     fn full_command_cycle() {
         let mut p = PaneProcessor::new(24, 80);
 
-        // D;0 from previous command + A + OSC7 + prompt text + B
         let e1 = p.process_chunk(
             b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\\x1b]7;file://localhost/home/user\x1b\\$ \x1b]133;B\x1b\\"
         );
-        assert_eq!(e1.len(), 4); // D, A, 7, B
+        assert_eq!(e1.len(), 4);
 
-        // User types command + C + E
         let e2 = p.process_chunk(b"echo hello\x1b]133;C\x1b\\\x1b]133;E;echo hello\x1b\\");
-        assert_eq!(e2.len(), 2); // C, E
+        assert_eq!(e2.len(), 2);
         assert_eq!(p.screen_line_text(0), "$ echo hello");
 
-        // Command output + D
         let e3 = p.process_chunk(b"\r\nhello\r\n\x1b]133;D;0\x1b\\");
-        assert_eq!(e3.len(), 1); // D
+        assert_eq!(e3.len(), 1);
         assert_eq!(p.screen_line_text(1), "hello");
     }
 }
