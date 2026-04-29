@@ -532,6 +532,301 @@ async fn test_command_run_rapid_sequential() {
     .await;
 }
 
+// --- Read params (next/head/tail/search) ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_head_returns_first_n_lines() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 10", "timeout_secs": 5, "head": 3}),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "head=3 should return 3 lines, got: {:?}", lines);
+        assert!(output.contains("1") && output.contains("2") && output.contains("3"),
+            "should contain first 3 lines, got: {:?}", output);
+        assert!(!output.contains("4"), "should not contain line 4, got: {:?}", output);
+        assert!(result["total_lines"].as_u64().unwrap_or(0) >= 10,
+            "total_lines should reflect full output");
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tail_returns_last_n_lines() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 10", "timeout_secs": 5, "tail": 3}),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("8") && output.contains("9") && output.contains("10"),
+            "should contain last 3 lines, got: {:?}", output);
+        assert!(!output.contains("\n7\n") && !output.starts_with("7\n"),
+            "should not contain line 7, got: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_next_advances_cursor_across_calls() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // First call: next=3 → lines 1,2,3
+        let r1 = td
+            .rpc(
+                "command_run",
+                json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 10", "timeout_secs": 5, "next": 3}),
+            )
+            .await;
+        let o1 = r1["output"].as_str().unwrap_or("");
+        assert!(o1.contains("1") && o1.contains("3"), "first window: {:?}", o1);
+        assert!(!o1.contains("4"), "first window should not have 4: {:?}", o1);
+
+        // Second call: next=3 → lines 4,5,6
+        let r2 = td
+            .rpc(
+                "command_read",
+                json!({"pane_id": td.origin_pane.clone(), "next": 3}),
+            )
+            .await;
+        let o2 = r2["output"].as_str().unwrap_or("");
+        assert!(o2.contains("4") && o2.contains("6"), "second window: {:?}", o2);
+        assert!(!o2.contains("3") && !o2.contains("7"), "second window bounds: {:?}", o2);
+
+        // Third call: next=100 → remainder (7..10)
+        let r3 = td
+            .rpc(
+                "command_read",
+                json!({"pane_id": td.origin_pane.clone(), "next": 100}),
+            )
+            .await;
+        let o3 = r3["output"].as_str().unwrap_or("");
+        assert!(o3.contains("7") && o3.contains("10"), "remainder: {:?}", o3);
+        assert!(!o3.contains("6"), "remainder should not have 6: {:?}", o3);
+
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_head_does_not_advance_cursor() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // head=2 returns first 2 lines but should NOT move cursor
+        td.rpc(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 10", "timeout_secs": 5, "head": 2}),
+        )
+        .await;
+
+        // next=3 should start from line 1, not line 3
+        let r = td
+            .rpc(
+                "command_read",
+                json!({"pane_id": td.origin_pane.clone(), "next": 3}),
+            )
+            .await;
+        let output = r["output"].as_str().unwrap_or("");
+        assert!(output.contains("1") && output.contains("3"),
+            "next after head should start from 0, got: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tail_does_not_advance_cursor() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // tail=2 returns last 2 lines but should NOT move cursor
+        td.rpc(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 10", "timeout_secs": 5, "tail": 2}),
+        )
+        .await;
+
+        // next=3 should start from line 1, not from the end
+        let r = td
+            .rpc(
+                "command_read",
+                json!({"pane_id": td.origin_pane.clone(), "next": 3}),
+            )
+            .await;
+        let output = r["output"].as_str().unwrap_or("");
+        assert!(output.contains("1") && output.contains("3"),
+            "next after tail should start from 0, got: {:?}", output);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_next_past_end_returns_empty() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Consume all output
+        td.rpc(
+            "command_run",
+            json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 3", "timeout_secs": 5, "next": 3}),
+        )
+        .await;
+
+        // Next call should return empty
+        let r = td
+            .rpc(
+                "command_read",
+                json!({"pane_id": td.origin_pane.clone(), "next": 10}),
+            )
+            .await;
+        let output = r["output"].as_str().unwrap_or("");
+        assert!(output.is_empty(), "next past end should be empty, got: {:?}", output);
+        assert_eq!(r["status"].as_str(), Some("completed"));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_filters_matching_lines() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf '1 apple\\n2 banana\\n3 apple pie\\n4 cherry\\n'",
+                    "timeout_secs": 5,
+                    "search": "apple"
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("apple"), "should contain apple lines: {:?}", output);
+        assert!(!output.contains("banana") && !output.contains("cherry"),
+            "should not contain non-matching lines: {:?}", output);
+        assert_eq!(result["search_matches"].as_u64(), Some(2),
+            "search_matches should be 2");
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_combined_with_tail() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "seq 1 20",
+                    "timeout_secs": 5,
+                    "tail": 10,
+                    "search": "1"
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        // tail=10 selects lines 11-20; search="1" filters to lines containing "1"
+        // Lines 11-19 all contain "1", line 20 does not
+        assert!(output.contains("11"), "should include 11: {:?}", output);
+        assert!(!output.contains("20"), "20 doesn't match '1': {:?}", output);
+        // Lines 1-10 are outside the tail window
+        assert!(!output.split('\n').any(|l| l.trim() == "1"),
+            "line '1' is outside tail window: {:?}", output);
+        let matches = result["search_matches"].as_u64().unwrap_or(0);
+        assert!(matches >= 9, "should have at least 9 matches (11-19), got: {}", matches);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_next_and_head_mutually_exclusive() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc_err(
+                "command_run",
+                json!({"pane_id": td.origin_pane.clone(), "command": "seq 1 5", "timeout_secs": 5, "next": 2, "head": 2}),
+            )
+            .await;
+        assert!(result.is_err(), "should reject mutually exclusive params, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("mutually exclusive"), "error should explain: {:?}", err);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+// --- debug_pane ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_debug_pane_shows_redirect_when_command_active() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Start a long command that will timeout
+        let run_result = td
+            .rpc(
+                "command_run",
+                json!({"pane_id": td.origin_pane.clone(), "command": "sleep 30", "timeout_secs": 1}),
+            )
+            .await;
+        let command_id = run_result["command_id"].as_u64().expect("should have command_id");
+
+        // capture_pane should include active_command metadata
+        let cap = td
+            .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone(), "lines": 50}))
+            .await;
+        assert!(cap["active_command"].is_object(),
+            "should have active_command when command is running, got: {:?}", cap);
+        assert_eq!(cap["active_command"]["command_id"].as_u64(), Some(command_id),
+            "active_command should match the running command");
+
+        // Clean up
+        td.rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-c"})).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_debug_pane_no_redirect_when_idle() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+
+        // Run a command that completes
+        td.run("echo done").await;
+
+        let cap = td
+            .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone(), "lines": 50}))
+            .await;
+        assert!(cap["active_command"].is_null(),
+            "should not have active_command when idle, got: {:?}", cap["active_command"]);
+        td.cleanup().await;
+    })
+    .await;
+}
+
 // --- capture_pane ---
 
 #[tokio::test(flavor = "multi_thread")]
