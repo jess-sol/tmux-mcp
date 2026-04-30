@@ -9,6 +9,8 @@ use tokio::sync::{Mutex, RwLock};
 use crate::pane::osc133::Osc133Phase;
 use crate::pane::registry::{PaneHandle, PaneRegistry};
 use crate::pane::state::Activity;
+use crate::policy;
+use crate::policy::approval::ApprovalStore;
 use crate::proc;
 use crate::tmux::connection::TmuxCommands;
 
@@ -41,6 +43,7 @@ impl RpcError {
 pub struct DaemonState {
     pub conn: Mutex<TmuxCommands>,
     pub registry: RwLock<PaneRegistry>,
+    pub approvals: Mutex<ApprovalStore>,
     pub started_at: std::time::Instant,
 }
 
@@ -58,6 +61,7 @@ pub async fn dispatch(
         "capture_pane" => handle_capture_pane(params, state).await,
         "inject_osc133" => handle_inject_osc133(params, state).await,
         "send_keys" => handle_send_keys(params, state).await,
+        "request_approval" => handle_request_approval(params, state).await,
         _ => Err(RpcError::method_not_found(method)),
     }
 }
@@ -505,6 +509,9 @@ async fn handle_command_run(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
     let timeout_secs = params["timeout_secs"].as_u64().unwrap_or(30);
+    let origin_pane = params["origin_pane"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("origin_pane is required"))?;
 
     // Lint the command for anti-patterns
     if let Err(err) = crate::lint::lint_command_run(command) {
@@ -524,6 +531,39 @@ async fn handle_command_run(
         };
         (handle, pid)
     };
+
+    // --- Policy check ---
+    {
+        let ctx = read_pane_context(state, pane_id).await?;
+        let result = policy::evaluate(command, &ctx);
+        match result.decision {
+            policy::Decision::Allow => { /* proceed */ }
+            policy::Decision::Deny => {
+                return Err(RpcError {
+                    code: -32001,
+                    message: format!("Policy denied (rule: {})", result.rule),
+                });
+            }
+            policy::Decision::Ask => {
+                let live_ctx = read_pane_context(state, pane_id).await?;
+                let verify = state
+                    .approvals
+                    .lock()
+                    .await
+                    .verify_and_consume(origin_pane, pane_id, command, &live_ctx);
+                if let Err(msg) = verify {
+                    return Err(RpcError {
+                        code: -32001,
+                        message: format!(
+                            "Policy: {} (rule: {}). Install the tmux-mcp policy hook \
+                             for interactive approval, or update the policy.",
+                            msg, result.rule
+                        ),
+                    });
+                }
+            }
+        }
+    }
 
     let leaf_pid = get_leaf_pid(shell_pid);
 
@@ -844,4 +884,68 @@ async fn handle_send_keys(
     let tp = pane_handle.lock().await;
     let screen = capture_screen(&tp, 20);
     Ok(json!({ "screen": screen }))
+}
+
+// --- Policy ---
+
+/// Read the current pane context for policy evaluation.
+async fn read_pane_context(
+    state: &Arc<DaemonState>,
+    pane_id: &str,
+) -> Result<policy::PaneContext, RpcError> {
+    let handle = {
+        let registry = state.registry.read().await;
+        registry
+            .get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
+    };
+    let tp = handle.lock().await;
+    let term_state = tp.processor.state();
+    Ok(policy::PaneContext {
+        hostname: term_state.hostname.clone(),
+        cwd: term_state.cwd.clone(),
+        foreground: tp.pid.and_then(|pid| {
+            proc::proc_info(pid).and_then(|info| info.foreground.map(|f| f.comm.clone()))
+        }),
+        user: term_state.user.clone(),
+    })
+}
+
+async fn handle_request_approval(
+    params: &Value,
+    state: &Arc<DaemonState>,
+) -> Result<Value, RpcError> {
+    let pane_id = params["pane_id"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
+    let command = params["command"]
+        .as_str()
+        .ok_or_else(|| RpcError::invalid_params("command is required"))?;
+
+    // Window scoping still applies
+    let origin_pane = {
+        let registry = state.registry.read().await;
+        let caller_window = resolve_caller_window(&registry, params)?;
+        validate_pane_access(&registry, pane_id, &caller_window)?;
+        params["origin_pane"]
+            .as_str()
+            .ok_or_else(|| RpcError::invalid_params("origin_pane is required"))?
+            .to_string()
+    };
+
+    let ctx = read_pane_context(state, pane_id).await?;
+    let result = policy::evaluate(command, &ctx);
+
+    match result.decision {
+        policy::Decision::Allow => Ok(json!({"result": "allow", "rule": result.rule})),
+        policy::Decision::Deny => Ok(json!({"result": "deny", "rule": result.rule})),
+        policy::Decision::Ask => {
+            state
+                .approvals
+                .lock()
+                .await
+                .store(&origin_pane, pane_id, command, &ctx);
+            Ok(json!({"result": "ask", "rule": result.rule}))
+        }
+    }
 }

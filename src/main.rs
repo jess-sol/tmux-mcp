@@ -16,6 +16,8 @@ enum Commands {
         /// Session target (name or ID, e.g. "main" or "$0")
         session: String,
     },
+    /// Policy hook for Claude Code (PreToolUse hook for command_run)
+    PolicyCheck,
 }
 
 #[tokio::main]
@@ -23,6 +25,12 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::PolicyCheck) => {
+            if let Err(e) = run_policy_check().await {
+                eprintln!("{}", e);
+                std::process::exit(2);
+            }
+        }
         Some(Commands::Daemon { session }) => {
             // Daemon mode: logs to stderr
             tracing_subscriber::registry()
@@ -54,6 +62,68 @@ async fn main() {
             }
         }
     }
+}
+
+async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
+    let input: serde_json::Value = serde_json::from_reader(std::io::stdin())?;
+    let tool_name = input["tool_name"].as_str().unwrap_or("");
+    let tool_input = &input["tool_input"];
+
+    // Only handle command_run — allow everything else through
+    if tool_name != "mcp__tmux-mcp__command_run" {
+        print_hook_response("allow", None);
+        return Ok(());
+    }
+
+    let pane_id = tool_input["pane_id"].as_str().unwrap_or("");
+    let command = tool_input["command"].as_str().unwrap_or("");
+
+    if pane_id.is_empty() || command.is_empty() {
+        print_hook_response("allow", None); // let daemon handle validation
+        return Ok(());
+    }
+
+    let session = tmux_mcp::client::discover_session()?;
+    let origin_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    let mut client = tmux_mcp::client::DaemonClient::connect(&session).await?;
+
+    let result = client
+        .request(
+            "request_approval",
+            serde_json::json!({
+                "origin_pane": origin_pane,
+                "pane_id": pane_id,
+                "command": command,
+            }),
+        )
+        .await?;
+
+    let decision = result["result"].as_str().unwrap_or("ask");
+    let rule = result["rule"].as_str().unwrap_or("");
+
+    match decision {
+        "allow" => print_hook_response("allow", None),
+        "deny" => {
+            eprintln!("Policy denied (rule: {}): {}", rule, command);
+            std::process::exit(2);
+        }
+        _ => {
+            let reason = format!("command: {}  pane: {}  rule: {}", command, pane_id, rule);
+            print_hook_response("ask", Some(&reason));
+        }
+    }
+    Ok(())
+}
+
+fn print_hook_response(decision: &str, reason: Option<&str>) {
+    let mut hook = serde_json::json!({
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+    });
+    if let Some(r) = reason {
+        hook["permissionDecisionReason"] = serde_json::json!(r);
+    }
+    println!("{}", serde_json::json!({"hookSpecificOutput": hook}));
 }
 
 async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {

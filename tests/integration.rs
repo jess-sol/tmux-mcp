@@ -125,7 +125,16 @@ impl TestDaemon {
     }
 
     /// Run a command and return (output, exit_code).
+    /// Calls request_approval first to simulate the hook flow.
     async fn run(&mut self, command: &str) -> (String, Option<i64>) {
+        // Simulate hook: request approval so command_run can verify it
+        let _ = self
+            .rpc(
+                "request_approval",
+                json!({"pane_id": self.origin_pane.clone(), "command": command}),
+            )
+            .await;
+
         let result = self
             .rpc(
                 "command_run",
