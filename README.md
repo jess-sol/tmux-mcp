@@ -74,6 +74,24 @@ Add to `~/.claude/settings.json` (merge with existing):
   - Approvals are context-aware — if the pane's hostname, cwd, user, or foreground process changes between approval and execution, the approval is invalidated
 - **`press_key`** is intentionally omitted. It's a potential bypass for command_run policy (type a command, press Enter). Claude Code prompts for each use.
 
+### 4. Install the policy skill (optional)
+
+Copy the skill to your Claude Code skills directory:
+
+```sh
+cp skills/tmux-policy.md ~/.claude/skills/
+```
+
+This adds the `/tmux-policy` command. When a command gets blocked, type `/tmux-policy allow` to generate and save a CEL rule for it. Examples:
+
+```
+/tmux-policy allow cargo install
+/tmux-policy allow                   # allow the last blocked command
+/tmux-policy ask rm                  # require approval for rm
+```
+
+Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.toml` (project). Changes take effect immediately via file watcher.
+
 ### Without the hook (autonomous mode)
 
 If no hook is configured but `command_run` is in the allow list, the daemon enforces policy directly:
@@ -81,6 +99,38 @@ If no hook is configured but `command_run` is in the allow list, the daemon enfo
 - Everything else is rejected with an actionable hint telling Claude which commands are available
 
 This is useful for autonomous sessions where no human is in the loop.
+
+## Policy Configuration
+
+Policy rules are CEL expressions in TOML files. Three sources are merged (built-in < user < project):
+
+| Source | Path | Purpose |
+|--------|------|---------|
+| Built-in | (compiled into binary) | Default safe/dangerous command lists |
+| User | `~/.claude/tmux-mcp.toml` | Personal rules across all projects |
+| Project | `.claude/tmux-mcp.toml` | Project-specific rules |
+
+Example `~/.claude/tmux-mcp.toml`:
+
+```toml
+[[rules]]
+description = "allow npm"
+when = 'command.name == "npm"'
+action = "allow"
+
+[[rules]]
+description = "allow rustup"
+when = 'command.name == "rustup"'
+action = "allow"
+
+[[rules]]
+description = "block production hosts"
+when = 'pane.hostname != null && glob("prod-*", pane.hostname)'
+action = "deny"
+message = "production hosts are read-only"
+```
+
+Use `/tmux-policy` to generate rules interactively, or edit the files directly.
 
 ## Tools
 
