@@ -98,10 +98,9 @@ when = 'command.name in ["awk","gawk","mawk","nawk"] && command.args.exists(a, c
 action = "ask"
 
 [[rules]]
-description = "chmod dangerous"
-when = 'command.name == "chmod" && command.args.exists(a, contains(a, "+s") || a == "000" || a == "777" || startsWith(a, "4") || startsWith(a, "2"))'
+description = "chmod"
+when = 'command.name == "chmod"'
 action = "ask"
-message = "setuid/setgid/broad permissions are dangerous"
 
 [[rules]]
 description = "chown"
@@ -114,23 +113,57 @@ when = 'command.name == "cargo" && command.args.exists(a, a == "install")'
 action = "ask"
 message = "cargo install downloads and compiles arbitrary code from crates.io"
 
+# --- Write redirect protection (runs before safe commands) ---
+
+[[rules]]
+description = "write redirect out-of-project"
+when = 'command.write_targets.exists(t, !startsWith(path(t), pane.cwd))'
+action = "ask"
+order = -1
+message = "write redirect targets a file outside project directory"
+
 # --- Safe commands (allow) ---
 
-[[rules]]
-description = "read-only tools"
-when = 'command.name in ["ls","cat","head","tail","wc","sort","uniq","grep","rg","find","fd","tree","less","file","stat","realpath","diff","md5sum","sha256sum","base64"]'
-action = "allow"
-
+# Commands that don't take file paths — unrestricted
 [[rules]]
 description = "info commands"
-when = 'command.name in ["echo","printf","pwd","whoami","hostname","date","uname","env","id","which","ps","uptime","seq","sleep","true","false","test",":","type","man"]'
+when = 'command.name in ["echo","printf","pwd","whoami","hostname","date","uname","id","which","ps","uptime","seq","sleep","true","false","test",":","type","man"]'
+action = "allow"
+
+# File-reading tools — contained to project dir
+[[rules]]
+description = "file readers (in-project)"
+when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
 action = "allow"
 
 [[rules]]
-description = "file operations"
-when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee","xargs"]'
+description = "file readers (out-of-project)"
+when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"]'
+action = "ask"
+
+# Search/list tools — contained to project dir
+[[rules]]
+description = "search tools (in-project)"
+when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
 action = "allow"
 
+[[rules]]
+description = "search tools (out-of-project)"
+when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"]'
+action = "ask"
+
+# File-write tools — contained to project dir
+[[rules]]
+description = "file ops (in-project)"
+when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
+action = "allow"
+
+[[rules]]
+description = "file ops (out-of-project)"
+when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"]'
+action = "ask"
+
+# Dev tools — no path restriction (they manage their own paths)
 [[rules]]
 description = "cargo"
 when = 'command.name == "cargo"'
@@ -138,7 +171,7 @@ action = "allow"
 
 [[rules]]
 description = "git read-only"
-when = 'command.name == "git" && command.args.exists(a, a in ["status","log","diff","show","branch","tag","remote","config","stash list","ls-files","ls-tree","rev-parse","describe","shortlog","blame","reflog"])'
+when = 'command.name == "git" && command.args.exists(a, a in ["status","log","diff","show","branch","tag","remote","config","ls-files","ls-tree","rev-parse","describe","shortlog","blame","reflog"])'
 action = "allow"
 
 [[rules]]

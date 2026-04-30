@@ -131,7 +131,7 @@ mod tests {
     fn local_ctx() -> PaneContext {
         PaneContext {
             hostname: None,
-            cwd: Some("/home/user".into()),
+            cwd: Some("/home/user/project".into()),
             foreground: Some("bash".into()),
             user: Some("user".into()),
         }
@@ -146,13 +146,33 @@ mod tests {
     }
 
     #[test]
-    fn cat_allowed() {
-        assert_eq!(evaluate_test("cat /tmp/file", &local_ctx()).decision, Decision::Allow);
+    fn cat_in_project_allowed() {
+        assert_eq!(evaluate_test("cat src/main.rs", &local_ctx()).decision, Decision::Allow);
     }
 
     #[test]
-    fn grep_allowed() {
+    fn cat_out_of_project_asks() {
+        assert_eq!(evaluate_test("cat /tmp/file", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cat_ssh_key_asks() {
+        assert_eq!(evaluate_test("cat ~/.ssh/id_ed25519", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cat_traversal_asks() {
+        assert_eq!(evaluate_test("cat ../../.ssh/id_rsa", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn grep_in_project_allowed() {
         assert_eq!(evaluate_test("grep -r pattern src/", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn grep_out_of_project_asks() {
+        assert_eq!(evaluate_test("grep -r pattern /var/log/syslog", &local_ctx()).decision, Decision::Ask);
     }
 
     #[test]
@@ -318,9 +338,10 @@ mod tests {
     // --- Wrapper evaluation ---
 
     #[test]
-    fn env_cargo_test_allowed() {
+    fn env_cargo_test_asks() {
+        // env removed from allow list (can leak secrets, env -S can execute arbitrary commands)
         let r = evaluate_test("env FOO=bar cargo test", &local_ctx());
-        assert_eq!(r.decision, Decision::Allow);
+        assert_eq!(r.decision, Decision::Ask);
     }
 
     // --- Aggregation ---
@@ -480,11 +501,9 @@ mod tests {
         // echo with >> redirect — echo is "Allow" but the redirect is dangerous
         // NOTE: This currently allows because echo is in safe list and >> is a redirect,
         // not an arg. The policy engine doesn't check redirect targets.
-        // This is a KNOWN LIMITATION — redirects are shell-level, not command-level.
+        // Write redirect to ~/.ssh/ is caught by path containment
         let r = evaluate_test("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys", &local_ctx());
-        // Currently: Allow (echo is safe). This is a gap.
-        // For now, document as known limitation — redirect analysis is future work.
-        assert_eq!(r.decision, Decision::Allow);
+        assert_eq!(r.decision, Decision::Ask);
     }
 
     #[test]
@@ -517,6 +536,17 @@ mod tests {
     #[test]
     fn sudo_bash_asks() {
         assert_eq!(evaluate_test("sudo bash", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_double_dash_eval_denied() {
+        // sudo -- eval bad: "--" is consumed as a flag, "eval" is correctly extracted
+        assert_eq!(evaluate_test("sudo -- eval bad", &local_ctx()).decision, Decision::Deny);
+    }
+
+    #[test]
+    fn sudo_double_dash_rm_asks() {
+        assert_eq!(evaluate_test("sudo -- rm -rf /", &local_ctx()).decision, Decision::Ask);
     }
 
     #[test]
@@ -720,10 +750,12 @@ mod tests {
     // --- Process substitution ---
 
     #[test]
-    fn process_substitution_all_safe_allowed() {
-        // diff is in read-only tools, ls is safe — everything allowed
-        let r = evaluate_test("diff <(ls /tmp) <(ls /var)", &local_ctx());
-        assert_eq!(r.decision, Decision::Allow);
+    fn process_substitution_with_safe_inner_asks() {
+        // diff with process substitutions — args are non-exhaustive (expansion),
+        // so path containment can't prove all paths are in-project → Ask.
+        // Inner commands (ls) are still individually checked and allowed.
+        let r = evaluate_test("diff <(ls src) <(ls tests)", &local_ctx());
+        assert_eq!(r.decision, Decision::Ask);
     }
 
     #[test]
@@ -797,30 +829,14 @@ mod tests {
     // ====================================================================
 
     #[test]
-    fn chmod_setuid_asks() {
+    fn chmod_always_asks() {
+        // All chmod operations require approval — permission changes are security-relevant
         assert_eq!(evaluate_test("chmod u+s /bin/bash", &local_ctx()).decision, Decision::Ask);
-    }
-
-    #[test]
-    fn chmod_4755_asks() {
         assert_eq!(evaluate_test("chmod 4755 /tmp/exploit", &local_ctx()).decision, Decision::Ask);
-    }
-
-    #[test]
-    fn chmod_000_asks() {
         assert_eq!(evaluate_test("chmod 000 /etc/shadow", &local_ctx()).decision, Decision::Ask);
-    }
-
-    #[test]
-    fn chmod_777_asks() {
         assert_eq!(evaluate_test("chmod 777 /etc/passwd", &local_ctx()).decision, Decision::Ask);
-    }
-
-    #[test]
-    fn chmod_normal_allowed() {
-        // Normal chmod (not setuid, not 000/777) is fine
-        assert_eq!(evaluate_test("chmod 644 file.txt", &local_ctx()).decision, Decision::Allow);
-        assert_eq!(evaluate_test("chmod +x script.sh", &local_ctx()).decision, Decision::Allow);
+        assert_eq!(evaluate_test("chmod 644 file.txt", &local_ctx()).decision, Decision::Ask);
+        assert_eq!(evaluate_test("chmod +x script.sh", &local_ctx()).decision, Decision::Ask);
     }
 
     #[test]
@@ -993,7 +1009,13 @@ mod tests {
         assert_eq!(evaluate_test("cp src/old.rs src/new.rs", &local_ctx()).decision, Decision::Allow);
         assert_eq!(evaluate_test("mv src/temp.rs src/final.rs", &local_ctx()).decision, Decision::Allow);
         assert_eq!(evaluate_test("touch src/mod.rs", &local_ctx()).decision, Decision::Allow);
-        assert_eq!(evaluate_test("ln -s ../shared/lib.rs src/lib.rs", &local_ctx()).decision, Decision::Allow);
+        assert_eq!(evaluate_test("ln -s src/lib.rs src/link.rs", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn symlink_out_of_project_asks() {
+        // ../shared resolves outside project dir
+        assert_eq!(evaluate_test("ln -s ../shared/lib.rs src/lib.rs", &local_ctx()).decision, Decision::Ask);
     }
 
     #[test]
@@ -1043,10 +1065,15 @@ mod tests {
     }
 
     #[test]
-    fn awk_normal_use_allowed() {
-        assert_eq!(evaluate_test("awk -F: '{print $1}' /etc/passwd", &local_ctx()).decision, Decision::Allow);
+    fn awk_in_project_allowed() {
         assert_eq!(evaluate_test("awk 'NR>1{print $2}'", &local_ctx()).decision, Decision::Allow);
         assert_eq!(evaluate_test("awk '{sum+=$1} END{print sum}'", &local_ctx()).decision, Decision::Allow);
+        assert_eq!(evaluate_test("awk -F: '{print $1}' data.csv", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn awk_out_of_project_asks() {
+        assert_eq!(evaluate_test("awk -F: '{print $1}' /etc/passwd", &local_ctx()).decision, Decision::Ask);
     }
 
     #[test]

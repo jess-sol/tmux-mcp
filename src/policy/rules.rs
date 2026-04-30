@@ -207,6 +207,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "contains" => eval_contains(call, ctx),
         "startsWith" => eval_starts_with(call, ctx),
         "has_short_flag" => eval_has_short_flag(call, ctx),
+        "path" => eval_path(call, ctx),
         _ => TriVal::Unknown,
     }
 }
@@ -445,6 +446,103 @@ fn eval_has_short_flag(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> T
     }
 }
 
+/// Resolve a path string relative to pane.cwd. Pure string manipulation,
+/// no filesystem access. Returns Null for flags (starts with -).
+fn eval_path(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
+    // path(arg) — single argument
+    if call.args.len() != 1 { return TriVal::Unknown; }
+    let arg = eval_expr(&call.args[0].expr, ctx);
+
+    let arg_str = match &arg {
+        TriVal::String(s) => s.as_str(),
+        TriVal::Unknown => return TriVal::Unknown,
+        TriVal::Null => return TriVal::Null,
+        _ => return TriVal::Null,
+    };
+
+    // Get pane.cwd and pane.user from context
+    let pane_cwd = ctx.get("pane")
+        .and_then(|p| if let TriVal::Map(m) = p { m.get("cwd") } else { None })
+        .and_then(|v| if let TriVal::String(s) = v { Some(s.as_str()) } else { None })
+        .unwrap_or("/");
+
+    let pane_user = ctx.get("pane")
+        .and_then(|p| if let TriVal::Map(m) = p { m.get("user") } else { None })
+        .and_then(|v| if let TriVal::String(s) = v { Some(s.as_str()) } else { None });
+
+    let resolved = resolve_path(arg_str, pane_cwd, pane_user);
+    match resolved {
+        Some(p) => TriVal::String(p),
+        None => TriVal::Null,
+    }
+}
+
+/// Resolve a path string to absolute, normalizing `.` and `..` segments.
+/// Pure string manipulation — no filesystem access, safe for remote systems.
+fn resolve_path(arg: &str, cwd: &str, user: Option<&str>) -> Option<String> {
+    use std::path::{Component, Path};
+
+    // Flags are not paths
+    if arg.starts_with('-') {
+        return None;
+    }
+
+    let expanded = if let Some(rest) = arg.strip_prefix("~/") {
+        // ~/foo → /home/{user}/foo
+        let home = user.map(|u| format!("/home/{}", u))?;
+        format!("{}/{}", home, rest)
+    } else if arg == "~" {
+        let home = user.map(|u| format!("/home/{}", u))?;
+        home
+    } else if arg.starts_with('/') {
+        // Already absolute
+        arg.to_string()
+    } else {
+        // Relative — join with cwd
+        format!("{}/{}", cwd, arg)
+    };
+
+    // Normalize: resolve . and .. segments
+    let mut components = Vec::new();
+    for comp in Path::new(&expanded).components() {
+        match comp {
+            Component::RootDir => { components.clear(); components.push("/"); }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if components.last().is_some_and(|c| *c != "/") {
+                    components.pop();
+                }
+            }
+            Component::Normal(s) => {
+                components.push(s.to_str()?);
+            }
+            Component::Prefix(_) => {} // Windows, ignore
+        }
+    }
+
+    if components.is_empty() {
+        return Some("/".to_string());
+    }
+
+    let mut result = String::new();
+    for (i, comp) in components.iter().enumerate() {
+        if i == 0 && *comp == "/" {
+            result.push('/');
+        } else if i == 1 && components[0] == "/" {
+            result.push_str(comp);
+        } else {
+            result.push('/');
+            result.push_str(comp);
+        }
+    }
+
+    if result.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(result)
+    }
+}
+
 // --- Context construction ---
 
 fn build_context(cmd: &CommandInfo, pane: &PaneContext) -> HashMap<String, TriVal> {
@@ -480,6 +578,29 @@ fn build_command_val(cmd: &CommandInfo, pane: &PaneContext) -> TriVal {
         Effective::Unknown => TriVal::Unknown,
     };
     map.insert("effective_host".into(), effective_host);
+
+    // Redirect targets
+    let write_targets: Vec<TriVal> = cmd.redirects.iter()
+        .filter(|r| r.is_write)
+        .map(|r| {
+            if r.has_expansion { TriVal::Unknown } else { TriVal::String(r.target.clone()) }
+        })
+        .collect();
+    map.insert("write_targets".into(), TriVal::List {
+        elements: write_targets,
+        exhaustive: true,
+    });
+
+    let read_targets: Vec<TriVal> = cmd.redirects.iter()
+        .filter(|r| !r.is_write)
+        .map(|r| {
+            if r.has_expansion { TriVal::Unknown } else { TriVal::String(r.target.clone()) }
+        })
+        .collect();
+    map.insert("read_targets".into(), TriVal::List {
+        elements: read_targets,
+        exhaustive: true,
+    });
 
     let parent = match &cmd.parent {
         Some(parent) => build_command_val(parent, pane),
@@ -1041,5 +1162,119 @@ mod tests {
             ("local", r#"command.effective_host == """#, "allow"),
         ]);
         assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+    }
+
+    // --- path() function ---
+
+    #[test]
+    fn resolve_path_absolute() {
+        assert_eq!(resolve_path("/etc/passwd", "/home/user/project", Some("user")), Some("/etc/passwd".into()));
+    }
+
+    #[test]
+    fn resolve_path_relative() {
+        assert_eq!(resolve_path("src/main.rs", "/home/user/project", Some("user")), Some("/home/user/project/src/main.rs".into()));
+    }
+
+    #[test]
+    fn resolve_path_dotdot_traversal() {
+        assert_eq!(resolve_path("../../.ssh/id_rsa", "/home/user/project", Some("user")), Some("/home/.ssh/id_rsa".into()));
+    }
+
+    #[test]
+    fn resolve_path_dotdot_at_root() {
+        assert_eq!(resolve_path("/../../../etc/shadow", "/", Some("user")), Some("/etc/shadow".into()));
+    }
+
+    #[test]
+    fn resolve_path_tilde() {
+        assert_eq!(resolve_path("~/.ssh/id_rsa", "/home/user/project", Some("user")), Some("/home/user/.ssh/id_rsa".into()));
+    }
+
+    #[test]
+    fn resolve_path_tilde_alone() {
+        assert_eq!(resolve_path("~", "/home/user/project", Some("user")), Some("/home/user".into()));
+    }
+
+    #[test]
+    fn resolve_path_tilde_no_user() {
+        assert_eq!(resolve_path("~/.ssh/id_rsa", "/home/user/project", None), None);
+    }
+
+    #[test]
+    fn resolve_path_dot_current() {
+        assert_eq!(resolve_path("./README.md", "/home/user/project", Some("user")), Some("/home/user/project/README.md".into()));
+    }
+
+    #[test]
+    fn resolve_path_bare_filename() {
+        assert_eq!(resolve_path("Cargo.toml", "/home/user/project", Some("user")), Some("/home/user/project/Cargo.toml".into()));
+    }
+
+    #[test]
+    fn resolve_path_flag_returns_none() {
+        assert_eq!(resolve_path("-rf", "/home/user/project", Some("user")), None);
+    }
+
+    #[test]
+    fn resolve_path_long_flag_returns_none() {
+        assert_eq!(resolve_path("--verbose", "/home/user/project", Some("user")), None);
+    }
+
+    #[test]
+    fn resolve_path_normalizes_dots() {
+        assert_eq!(resolve_path("/a/b/./c/../d", "/", Some("user")), Some("/a/b/d".into()));
+    }
+
+    // --- path() in CEL rules (integration) ---
+
+    #[test]
+    fn path_cel_in_project_allowed() {
+        let rules = compile_rules(&[
+            ("in-project", r#"command.name == "cat" && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))"#, "allow"),
+        ]);
+        let c = cmd_with_args("cat", &["src/main.rs"]);
+        let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
+        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn path_cel_out_of_project_asks() {
+        let rules = compile_rules(&[
+            ("in-project", r#"command.name == "cat" && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))"#, "allow"),
+        ]);
+        let c = cmd_with_args("cat", &["/etc/passwd"]);
+        let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
+        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn path_cel_traversal_caught() {
+        let rules = compile_rules(&[
+            ("in-project", r#"command.name == "cat" && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))"#, "allow"),
+        ]);
+        let c = cmd_with_args("cat", &["../../.ssh/id_rsa"]);
+        let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
+        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn path_cel_tilde_caught() {
+        let rules = compile_rules(&[
+            ("in-project", r#"command.name == "cat" && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))"#, "allow"),
+        ]);
+        let c = cmd_with_args("cat", &["~/.ssh/id_ed25519"]);
+        let pane = PaneContext { cwd: Some("/home/user/project".into()), user: Some("user".into()), ..local_pane() };
+        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn path_cel_flag_args_ignored() {
+        let rules = compile_rules(&[
+            ("in-project", r#"command.name == "cat" && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))"#, "allow"),
+        ]);
+        let c = cmd_with_args("cat", &["-n", "src/main.rs"]);
+        let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
+        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Allow);
     }
 }

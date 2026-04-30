@@ -30,8 +30,21 @@ pub struct CommandInfo {
     pub effective_host: Effective,
     /// True if this command receives piped stdin in a pipeline.
     pub is_pipe_target: bool,
+    /// Shell redirects attached to this command.
+    pub redirects: Vec<RedirectInfo>,
     /// Immediate parent wrapper (if any). Walk parent.parent for the full chain.
     pub parent: Option<Arc<CommandInfo>>,
+}
+
+/// A shell redirect (>, >>, <, etc.) attached to a command.
+#[derive(Debug, Clone)]
+pub struct RedirectInfo {
+    /// The target path/word.
+    pub target: String,
+    /// True for write redirects (>, >>, &>, >|). False for read (<, <<, <<<).
+    pub is_write: bool,
+    /// True if target contains expansions ($(), ${}, etc.).
+    pub has_expansion: bool,
 }
 
 impl CommandInfo {
@@ -44,6 +57,7 @@ impl CommandInfo {
             effective_user: Effective::Unchanged,
             effective_host: Effective::Unchanged,
             is_pipe_target: false,
+            redirects: Vec::new(),
             parent: None,
         }
     }
@@ -199,6 +213,15 @@ fn extract_from_simple_command(
         .map(|p| p.effective_host.clone())
         .unwrap_or(Effective::Unchanged);
 
+    // Extract redirects from prefix and suffix
+    let mut redirects = Vec::new();
+    if let Some(prefix) = &simple.prefix {
+        extract_redirects(&prefix.0, &mut redirects);
+    }
+    if let Some(suffix) = &simple.suffix {
+        extract_redirects(&suffix.0, &mut redirects);
+    }
+
     let info = CommandInfo {
         name: name_word.value.clone(),
         args,
@@ -206,6 +229,7 @@ fn extract_from_simple_command(
         effective_user,
         effective_host,
         is_pipe_target,
+        redirects,
         parent,
     };
 
@@ -251,6 +275,44 @@ fn extract_from_compound_command(compound: &ast::CompoundCommand, out: &mut Vec<
         }
         ast::CompoundCommand::ArithmeticForClause(c) => extract_from_compound_list(&c.body.list, out),
         ast::CompoundCommand::Arithmetic(_) => {}
+    }
+}
+
+// --- Redirect extraction ---
+
+/// Extract redirect info from prefix/suffix items.
+fn extract_redirects(items: &[ast::CommandPrefixOrSuffixItem], out: &mut Vec<RedirectInfo>) {
+    for item in items {
+        if let ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
+            match redirect {
+                ast::IoRedirect::File(_, kind, target) => {
+                    let is_write = matches!(
+                        kind,
+                        ast::IoFileRedirectKind::Write
+                            | ast::IoFileRedirectKind::Append
+                            | ast::IoFileRedirectKind::Clobber
+                            | ast::IoFileRedirectKind::ReadAndWrite
+                    );
+                    if let ast::IoFileRedirectTarget::Filename(word) = target {
+                        out.push(RedirectInfo {
+                            target: word.value.clone(),
+                            is_write,
+                            has_expansion: word_has_expansion(&word.value),
+                        });
+                    }
+                }
+                ast::IoRedirect::OutputAndError(word, _) => {
+                    out.push(RedirectInfo {
+                        target: word.value.clone(),
+                        is_write: true,
+                        has_expansion: word_has_expansion(&word.value),
+                    });
+                }
+                ast::IoRedirect::HereDocument(_, _) | ast::IoRedirect::HereString(_, _) => {
+                    // Here-docs/strings are input, not file targets — skip
+                }
+            }
+        }
     }
 }
 
@@ -356,6 +418,7 @@ fn push_inner(
         effective_user: user,
         effective_host: host,
         is_pipe_target: false,
+        redirects: Vec::new(), // inner commands from wrappers don't carry redirects
         parent: Some(parent_arc),
     };
 

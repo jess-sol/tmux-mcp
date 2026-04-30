@@ -312,9 +312,9 @@ mod tests {
     #[test]
     fn builtin_has_safe_commands() {
         let config = parse_config(BUILTIN_TOML).unwrap();
-        let safe = config.rules.iter().find(|r| r.description == "read-only tools").unwrap();
+        let safe = config.rules.iter().find(|r| r.description == "file readers (in-project)").unwrap();
         assert_eq!(safe.action, "allow");
-        assert!(safe.when.contains("ls"));
+        assert!(safe.when.contains("cat"));
     }
 
     #[test]
@@ -390,7 +390,10 @@ mod tests {
             order = -1
         "#).unwrap();
         let (_, rules) = merge(builtin, Some(home), None);
-        assert_eq!(rules[0].config.description, "early rule");
+        // The early rule should be before any order-0 rules
+        let early_pos = rules.iter().position(|r| r.config.description == "early rule").unwrap();
+        let first_order0 = rules.iter().position(|r| r.config.order == 0).unwrap();
+        assert!(early_pos < first_order0, "order -1 rule should come before order 0 rules");
     }
 
     #[test]
