@@ -936,16 +936,29 @@ async fn handle_request_approval(
     let ctx = read_pane_context(state, pane_id).await?;
     let result = policy::evaluate(command, &ctx);
 
+    let ctx_json = json!({
+        "hostname": ctx.hostname,
+        "cwd": ctx.cwd,
+        "user": ctx.user,
+        "foreground": ctx.foreground,
+    });
+
     match result.decision {
         policy::Decision::Allow => Ok(json!({"result": "allow", "rule": result.rule})),
-        policy::Decision::Deny => Ok(json!({"result": "deny", "rule": result.rule})),
+        policy::Decision::Deny => {
+            let mut resp = json!({"result": "deny", "rule": result.rule});
+            resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
+            Ok(resp)
+        }
         policy::Decision::Ask => {
             state
                 .approvals
                 .lock()
                 .await
                 .store(&origin_pane, pane_id, command, &ctx);
-            Ok(json!({"result": "ask", "rule": result.rule}))
+            let mut resp = json!({"result": "ask", "rule": result.rule});
+            resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
+            Ok(resp)
         }
     }
 }

@@ -101,14 +101,25 @@ async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
     let decision = result["result"].as_str().unwrap_or("ask");
     let rule = result["rule"].as_str().unwrap_or("");
 
+    let hostname = result["hostname"].as_str().unwrap_or("local");
+    let cwd = result["cwd"].as_str().unwrap_or("?");
+    let user = result["user"].as_str().unwrap_or("?");
+    let fg = result["foreground"].as_str().unwrap_or("?");
+
     match decision {
         "allow" => print_hook_response("allow", None),
         "deny" => {
-            eprintln!("Policy denied (rule: {}): {}", rule, command);
+            eprintln!(
+                "Policy denied: {}\n  pane {}  host: {}  cwd: {}  rule: {}",
+                command, pane_id, hostname, cwd, rule
+            );
             std::process::exit(2);
         }
         _ => {
-            let reason = format!("command: {}  pane: {}  rule: {}", command, pane_id, rule);
+            let reason = format!(
+                "{}\n  pane {}  user: {}  host: {}  cwd: {}  shell: {}  rule: {}",
+                command, pane_id, user, hostname, cwd, fg, rule
+            );
             print_hook_response("ask", Some(&reason));
         }
     }

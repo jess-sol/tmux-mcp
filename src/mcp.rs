@@ -203,7 +203,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
 #[tool_router]
 impl TmuxMcp {
-    #[tool(description = "List all tmux panes with their status, working directory, and running process")]
+    #[tool(description = "List tmux panes with status, working directory, and running process")]
     async fn list_panes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut client = self.client.lock().await;
         let result = client
@@ -216,7 +216,7 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Run a shell command in a pane and wait for it to complete. Returns output and exit code. Use next/head/tail/search to control output. On timeout, returns partial output — use command_read to continue. Examples: command_run('echo hello'), command_run('sudo -i', timeout_secs=0), command_run('ssh host', timeout_secs=0), command_run('exit', timeout_secs=0).")]
+    #[tool(description = "Run a shell command in a pane and wait for completion")]
     async fn command_run(
         &self,
         Parameters(params): Parameters<CommandRunParams>,
@@ -247,7 +247,7 @@ impl TmuxMcp {
         Ok(call_result)
     }
 
-    #[tool(description = "Read output of a command (use after command_run timeout, or to stream long-running output). Defaults to current/last command. Use next to stream new output, head/tail to view ranges, search to filter by regex. For active commands, waits up to timeout_secs for new output.")]
+    #[tool(description = "Read or stream output from a running or completed command")]
     async fn command_read(
         &self,
         Parameters(params): Parameters<CommandReadParams>,
@@ -278,7 +278,7 @@ impl TmuxMcp {
         Ok(call_result)
     }
 
-    #[tool(description = "Low-level screen capture for debugging. Shows only visible terminal text — no scrollback, no structure. NOT for reading command output (use command_read instead). Use only to debug pane state or inspect TUI apps.")]
+    #[tool(description = "Capture visible terminal screen for debugging pane state")]
     async fn debug_pane(
         &self,
         Parameters(params): Parameters<DebugPaneParams>,
@@ -313,7 +313,7 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Inject OSC 133 shell integration into a bash pane. Use after SSH or when markers aren't present. Only works with bash.")]
+    #[tool(description = "Inject shell integration into a bash pane for command tracking")]
     async fn inject_osc133(
         &self,
         Parameters(params): Parameters<InjectOsc133Params>,
@@ -353,7 +353,7 @@ impl TmuxMcp {
         Ok(result)
     }
 
-    #[tool(description = "Press a key in a pane. For control sequences only: C-c to cancel, C-d to close shell, C-z to suspend, Enter to confirm. NOT for running commands — use command_run instead.")]
+    #[tool(description = "Send a control key to a pane (C-c, C-d, Enter, Escape, etc.)")]
     async fn press_key(
         &self,
         Parameters(params): Parameters<PressKeyParams>,
@@ -375,7 +375,7 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(screen)]))
     }
 
-    #[tool(description = "List command history for a pane, showing commands and their exit codes")]
+    #[tool(description = "List recent commands and their exit codes for a pane")]
     async fn command_history(
         &self,
         Parameters(params): Parameters<CommandHistoryParams>,
@@ -404,11 +404,20 @@ impl ServerHandler for TmuxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "MCP server for interacting with tmux panes. \
-                 Use list_panes to discover available panes, then run \
-                 commands and read their output.\n\n\
-                 After command_run timeout: use command_read(command_id=N) to continue reading. \
-                 Do NOT use debug_pane for command output — it only shows the visible screen."
+                "MCP server for interacting with tmux panes. Use list_panes to discover \
+                 available panes, then run commands and read their output.\n\n\
+                 command_run: Use next/head/tail/search params to control output windowing. \
+                 On timeout, returns partial output — use command_read(command_id=N) to \
+                 continue reading. Use timeout_secs=0 for commands that change shell state \
+                 (sudo -i, ssh host, exit).\n\n\
+                 command_read: Use next to stream new output from a running command, \
+                 head/tail to view ranges, search to filter by regex. For active commands, \
+                 waits up to timeout_secs for new output.\n\n\
+                 debug_pane: Shows only visible terminal text — no scrollback, no structure. \
+                 NOT for reading command output (use command_read instead). Use only to \
+                 debug pane state or inspect TUI apps.\n\n\
+                 press_key: For control sequences only. NOT for running commands — use \
+                 command_run instead."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

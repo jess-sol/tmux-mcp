@@ -101,7 +101,7 @@ action = "allow"
 
 [[rules]]
 description = "info commands"
-when = 'command.name in ["echo","printf","pwd","whoami","hostname","date","uname","env","id","which","ps","uptime","seq","true","false","test",":","type","man"]'
+when = 'command.name in ["echo","printf","pwd","whoami","hostname","date","uname","env","id","which","ps","uptime","seq","sleep","true","false","test",":","type","man"]'
 action = "allow"
 
 [[rules]]
