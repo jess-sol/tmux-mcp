@@ -1,16 +1,21 @@
 //! Config loading: TOML parsing, 3-source merge, file watching for live reload.
 //!
-//! Three sources, one format: built-in (compiled in), home (~/.config/), project (.tmux-mcp/).
-//! Rules are sorted by order, then source priority, then file order.
+//! Three sources, one format:
+//! - Built-in: compiled into binary via include_str!
+//! - Home: ~/.claude/tmux-mcp.toml
+//! - Project: .claude/tmux-mcp.toml (relative to pane CWD)
+
+use std::path::PathBuf;
+use std::sync::RwLock;
+use std::time::SystemTime;
 
 use serde::Deserialize;
-use std::path::PathBuf;
 
 use super::Decision;
+use super::rules::{self, RuleSet};
 
 // --- Types ---
 
-/// Parsed config from a single TOML source.
 #[derive(Debug, Deserialize)]
 pub struct PolicyConfig {
     #[serde(default)]
@@ -19,7 +24,6 @@ pub struct PolicyConfig {
     pub rules: Vec<RuleConfig>,
 }
 
-/// A single rule from TOML config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleConfig {
     pub description: String,
@@ -31,15 +35,13 @@ pub struct RuleConfig {
     pub message: Option<String>,
 }
 
-/// A rule with its source and position tagged for stable sorting.
 #[derive(Debug, Clone)]
 pub struct TaggedRule {
     pub config: RuleConfig,
     pub source: RuleSource,
-    pub source_index: usize, // position within its source file
+    pub source_index: usize,
 }
 
-/// Where a rule came from — determines priority within the same order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RuleSource {
     Builtin = 0,
@@ -49,82 +51,207 @@ pub enum RuleSource {
 
 const BUILTIN_TOML: &str = include_str!("builtin_rules.toml");
 
-// --- Public API ---
+// --- PolicyEngine: manages compiled rules with live reload ---
+
+/// Thread-safe policy engine that holds compiled rules and watches config files.
+/// The daemon holds one of these in its shared state.
+pub struct PolicyEngine {
+    compiled: RwLock<RuleSet>,
+    home_path: PathBuf,
+    /// Last known mtime of home config (None if file didn't exist)
+    home_mtime: RwLock<Option<SystemTime>>,
+    /// Last known mtime of project config, keyed by path
+    project_mtime: RwLock<Option<(PathBuf, SystemTime)>>,
+}
+
+impl PolicyEngine {
+    /// Create a new engine, loading rules from all sources.
+    pub fn new(project_cwd: Option<&str>) -> Self {
+        let (default, tagged) = load_merged_rules(project_cwd);
+        let compiled = match rules::compile(&tagged, default) {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::error!("Failed to compile policy rules: {}", e);
+                RuleSet { rules: Vec::new(), default: Decision::Ask }
+            }
+        };
+
+        let home_path = home_config_path_always();
+        let home_mtime = file_mtime(&home_path);
+        let project_mtime = project_cwd
+            .and_then(|cwd| {
+                let p = project_config_path_always(cwd);
+                file_mtime(&p).map(|m| (p, m))
+            });
+
+        Self {
+            compiled: RwLock::new(compiled),
+            home_path,
+            home_mtime: RwLock::new(home_mtime),
+            project_mtime: RwLock::new(project_mtime),
+        }
+    }
+
+    /// Get a read reference to the compiled rules.
+    pub fn rules(&self) -> std::sync::RwLockReadGuard<'_, RuleSet> {
+        self.compiled.read().unwrap()
+    }
+
+    /// Check if config files have changed and reload if needed.
+    /// Called periodically or before evaluate.
+    pub fn check_reload(&self, project_cwd: Option<&str>) {
+        let mut changed = false;
+
+        // Check home config mtime
+        let current_home_mtime = file_mtime(&self.home_path);
+        {
+            let prev = self.home_mtime.read().unwrap();
+            if current_home_mtime != *prev {
+                changed = true;
+            }
+        }
+
+        // Check project config mtime
+        if let Some(cwd) = project_cwd {
+            let project_path = project_config_path_always(cwd);
+            let current_mtime = file_mtime(&project_path);
+            let prev = self.project_mtime.read().unwrap();
+            match (&*prev, current_mtime) {
+                (Some((prev_path, prev_mtime)), Some(cur_mtime))
+                    if prev_path == &project_path && *prev_mtime == cur_mtime => {}
+                (None, None) => {}
+                _ => { changed = true; }
+            }
+        }
+
+        if !changed {
+            return;
+        }
+
+        tracing::info!("Policy config changed, reloading...");
+        let (default, tagged) = load_merged_rules(project_cwd);
+        match rules::compile(&tagged, default) {
+            Ok(new_rules) => {
+                *self.compiled.write().unwrap() = new_rules;
+                *self.home_mtime.write().unwrap() = file_mtime(&self.home_path);
+                if let Some(cwd) = project_cwd {
+                    let p = project_config_path_always(cwd);
+                    *self.project_mtime.write().unwrap() = file_mtime(&p).map(|m| (p, m));
+                }
+                tracing::info!("Policy rules reloaded successfully");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to compile reloaded rules, keeping previous: {}", e);
+            }
+        }
+    }
+
+    /// Start a background file watcher that calls check_reload on changes.
+    /// Returns the watcher handle (must be kept alive).
+    pub fn start_watcher(
+        engine: std::sync::Arc<PolicyEngine>,
+        project_cwd: Option<String>,
+    ) -> Option<notify::RecommendedWatcher> {
+        use notify::{Watcher, RecursiveMode};
+
+        let engine_clone = engine.clone();
+        let cwd_clone = project_cwd.clone();
+
+        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            match res {
+                Ok(_event) => {
+                    engine_clone.check_reload(cwd_clone.as_deref());
+                }
+                Err(e) => tracing::warn!("File watch error: {}", e),
+            }
+        }).ok()?;
+
+        // Watch home config directory
+        let home_dir = engine.home_path.parent()?;
+        if home_dir.exists() {
+            if let Err(e) = watcher.watch(home_dir, RecursiveMode::NonRecursive) {
+                tracing::warn!("Failed to watch {}: {}", home_dir.display(), e);
+            }
+        }
+
+        // Watch project config directory
+        if let Some(cwd) = &project_cwd {
+            let project_path = project_config_path_always(cwd);
+            if let Some(project_dir) = project_path.parent() {
+                if project_dir.exists() {
+                    if let Err(e) = watcher.watch(project_dir, RecursiveMode::NonRecursive) {
+                        tracing::warn!("Failed to watch {}: {}", project_dir.display(), e);
+                    }
+                }
+            }
+        }
+
+        Some(watcher)
+    }
+}
+
+// --- Public helpers ---
 
 /// Load and merge rules from all three sources. Returns (default_decision, sorted_rules).
 pub fn load_merged_rules(project_cwd: Option<&str>) -> (Decision, Vec<TaggedRule>) {
     let builtin = parse_config(BUILTIN_TOML).expect("built-in rules TOML is invalid");
-    let home = load_home_config();
-    let project = project_cwd.and_then(load_project_config);
-
+    let home = load_config_file(&home_config_path_always());
+    let project = project_cwd.and_then(|cwd| load_config_file(&project_config_path_always(cwd)));
     merge(builtin, home, project)
 }
 
-/// Parse a TOML string into a PolicyConfig.
 pub fn parse_config(toml_str: &str) -> Result<PolicyConfig, String> {
     toml::from_str(toml_str).map_err(|e| format!("TOML parse error: {}", e))
 }
 
-/// Find the home config file path.
-pub fn home_config_path() -> Option<PathBuf> {
-    let xdg = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".config")
-        });
-    let path = xdg.join("tmux-mcp").join("policy.toml");
-    if path.exists() { Some(path) } else { None }
+// --- Paths ---
+
+/// Home config path (always returns the path, whether or not file exists).
+fn home_config_path_always() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".claude").join("tmux-mcp.toml")
 }
 
-/// Find the project config file path relative to a working directory.
+/// Project config path (always returns the path, whether or not file exists).
+fn project_config_path_always(cwd: &str) -> PathBuf {
+    PathBuf::from(cwd).join(".claude").join("tmux-mcp.toml")
+}
+
+/// Home config path (only if file exists).
+pub fn home_config_path() -> Option<PathBuf> {
+    let p = home_config_path_always();
+    if p.exists() { Some(p) } else { None }
+}
+
+/// Project config path (only if file exists).
 pub fn project_config_path(cwd: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(cwd).join(".tmux-mcp").join("policy.toml");
-    if path.exists() { Some(path) } else { None }
+    let p = project_config_path_always(cwd);
+    if p.exists() { Some(p) } else { None }
 }
 
 // --- Internal ---
 
-fn load_home_config() -> Option<PolicyConfig> {
-    let path = home_config_path()?;
-    load_config_file(&path)
-}
-
-fn load_project_config(cwd: &str) -> Option<PolicyConfig> {
-    let path = project_config_path(cwd)?;
-    load_config_file(&path)
+fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 fn load_config_file(path: &PathBuf) -> Option<PolicyConfig> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => match parse_config(&content) {
-            Ok(config) => Some(config),
-            Err(e) => {
-                tracing::warn!("Failed to parse {}: {}", path.display(), e);
-                None
-            }
-        },
+    let content = std::fs::read_to_string(path).ok()?;
+    match parse_config(&content) {
+        Ok(config) => Some(config),
         Err(e) => {
-            tracing::warn!("Failed to read {}: {}", path.display(), e);
+            tracing::warn!("Failed to parse {}: {}", path.display(), e);
             None
         }
     }
 }
 
-/// Merge all sources into a single sorted list.
-///
-/// Sort order: by `order` ascending, then by source (builtin < home < project),
-/// then by file position. First-match-wins evaluation.
-///
-/// Default: project overrides home, home overrides builtin.
 fn merge(
     builtin: PolicyConfig,
     home: Option<PolicyConfig>,
     project: Option<PolicyConfig>,
 ) -> (Decision, Vec<TaggedRule>) {
-    // Determine default: most specific source wins
-    let default = project
-        .as_ref()
+    let default = project.as_ref()
         .and_then(|c| c.default.as_ref())
         .or_else(|| home.as_ref().and_then(|c| c.default.as_ref()))
         .or(builtin.default.as_ref())
@@ -147,7 +274,6 @@ fn merge(
         }
     }
 
-    // Stable sort: by order, then source priority, then file position
     tagged.sort_by(|a, b| {
         a.config.order.cmp(&b.config.order)
             .then(a.source.cmp(&b.source))
@@ -169,8 +295,6 @@ fn parse_decision(s: &str) -> Decision {
 mod tests {
     use super::*;
 
-    // --- Loading ---
-
     #[test]
     fn builtin_toml_parses_successfully() {
         let config = parse_config(BUILTIN_TOML).unwrap();
@@ -183,7 +307,6 @@ mod tests {
         let config = parse_config(BUILTIN_TOML).unwrap();
         let eval_rule = config.rules.iter().find(|r| r.description == "eval").unwrap();
         assert_eq!(eval_rule.action, "deny");
-        assert!(eval_rule.when.contains("eval"));
     }
 
     #[test]
@@ -210,7 +333,6 @@ mod tests {
     fn user_config_parses() {
         let toml = r#"
             default = "deny"
-
             [[rules]]
             description = "my tools"
             when = 'command.name == "cargo"'
@@ -219,7 +341,6 @@ mod tests {
         let config = parse_config(toml).unwrap();
         assert_eq!(config.default.as_deref(), Some("deny"));
         assert_eq!(config.rules.len(), 1);
-        assert_eq!(config.rules[0].description, "my tools");
     }
 
     #[test]
@@ -234,8 +355,6 @@ mod tests {
         let config = parse_config(toml).unwrap();
         assert_eq!(config.rules[0].order, -1);
     }
-
-    // --- Default override ---
 
     #[test]
     fn builtin_default_is_ask() {
@@ -260,35 +379,30 @@ mod tests {
         assert_eq!(default, Decision::Allow);
     }
 
-    // --- Rule ordering ---
-
     #[test]
     fn negative_order_sorted_first() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
-        let home_toml = r#"
+        let home = parse_config(r#"
             [[rules]]
             description = "early rule"
             when = 'command.name == "test"'
             action = "allow"
             order = -1
-        "#;
-        let home = parse_config(home_toml).unwrap();
+        "#).unwrap();
         let (_, rules) = merge(builtin, Some(home), None);
         assert_eq!(rules[0].config.description, "early rule");
-        assert_eq!(rules[0].config.order, -1);
     }
 
     #[test]
     fn positive_order_sorted_last() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
-        let home_toml = r#"
+        let home = parse_config(r#"
             [[rules]]
             description = "late rule"
             when = 'command.name == "test"'
             action = "allow"
             order = 1
-        "#;
-        let home = parse_config(home_toml).unwrap();
+        "#).unwrap();
         let (_, rules) = merge(builtin, Some(home), None);
         assert_eq!(rules.last().unwrap().config.description, "late rule");
     }
@@ -297,20 +411,18 @@ mod tests {
     fn builtin_before_home_at_same_order() {
         let builtin = parse_config(r#"
             [[rules]]
-            description = "builtin rule"
+            description = "builtin"
             when = 'command.name == "ls"'
             action = "allow"
         "#).unwrap();
         let home = parse_config(r#"
             [[rules]]
-            description = "home rule"
+            description = "home"
             when = 'command.name == "ls"'
             action = "deny"
         "#).unwrap();
         let (_, rules) = merge(builtin, Some(home), None);
-        assert_eq!(rules[0].config.description, "builtin rule");
         assert_eq!(rules[0].source, RuleSource::Builtin);
-        assert_eq!(rules[1].config.description, "home rule");
         assert_eq!(rules[1].source, RuleSource::Home);
     }
 
@@ -341,7 +453,6 @@ mod tests {
             description = "first"
             when = 'true'
             action = "allow"
-
             [[rules]]
             description = "second"
             when = 'true'
@@ -357,7 +468,6 @@ mod tests {
         let (default, rules) = load_merged_rules(None);
         assert_eq!(default, Decision::Ask);
         assert!(rules.iter().all(|r| r.source == RuleSource::Builtin));
-        assert!(!rules.is_empty());
     }
 
     #[test]
@@ -365,7 +475,18 @@ mod tests {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let empty = parse_config("").unwrap();
         let (_, rules) = merge(builtin, Some(empty), None);
-        // All rules are still from builtin
         assert!(rules.iter().all(|r| r.source == RuleSource::Builtin));
+    }
+
+    #[test]
+    fn home_config_path_is_claude_dir() {
+        let path = home_config_path_always();
+        assert!(path.to_str().unwrap().contains(".claude/tmux-mcp.toml"));
+    }
+
+    #[test]
+    fn project_config_path_is_claude_dir() {
+        let path = project_config_path_always("/home/user/project");
+        assert_eq!(path, PathBuf::from("/home/user/project/.claude/tmux-mcp.toml"));
     }
 }

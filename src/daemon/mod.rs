@@ -56,12 +56,17 @@ pub async fn run(session: &str, server: Option<&str>) -> Result<(), Box<dyn std:
     tracing::info!("Monitoring {} panes", registry.len());
 
     // Shared state for RPC handlers
+    let policy = Arc::new(crate::policy::PolicyEngine::new(None));
     let state = Arc::new(DaemonState {
         conn: Mutex::new(commands),
         registry: RwLock::new(registry),
         approvals: Mutex::new(crate::policy::approval::ApprovalStore::new()),
+        policy: policy.clone(),
         started_at: std::time::Instant::now(),
     });
+
+    // Start file watcher for live policy reload
+    let _policy_watcher = crate::policy::PolicyEngine::start_watcher(policy, None);
 
     let cancel = CancellationToken::new();
 

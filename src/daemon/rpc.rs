@@ -44,6 +44,7 @@ pub struct DaemonState {
     pub conn: Mutex<TmuxCommands>,
     pub registry: RwLock<PaneRegistry>,
     pub approvals: Mutex<ApprovalStore>,
+    pub policy: std::sync::Arc<crate::policy::PolicyEngine>,
     pub started_at: std::time::Instant,
 }
 
@@ -535,7 +536,7 @@ async fn handle_command_run(
     // --- Policy check ---
     {
         let ctx = read_pane_context(state, pane_id).await?;
-        let result = policy::evaluate(command, &ctx);
+        let result = policy::evaluate(command, &ctx, &state.policy);
         match result.decision {
             policy::Decision::Allow => { /* proceed */ }
             policy::Decision::Deny => {
@@ -934,7 +935,7 @@ async fn handle_request_approval(
     };
 
     let ctx = read_pane_context(state, pane_id).await?;
-    let result = policy::evaluate(command, &ctx);
+    let result = policy::evaluate(command, &ctx, &state.policy);
 
     let ctx_json = json!({
         "hostname": ctx.hostname,
