@@ -4,6 +4,7 @@
 //! can be replaced without touching the rest of the codebase.
 
 pub mod approval;
+pub mod parse;
 
 /// Pane context used for policy evaluation. Derives PartialEq so adding
 /// a field automatically includes it in approval drift detection.

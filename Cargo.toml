@@ -19,3 +19,8 @@ hostname = "0.4"
 tokio-util = "0.7"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 vte = { version = "0.15.0", features = ["ansi"] }
+brush-parser = "0.3"
+cel-interpreter = "0.10"
+toml = "0.8"
+globset = "0.4"
+notify = "7"
