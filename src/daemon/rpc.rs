@@ -385,10 +385,12 @@ async fn handle_command_history(
     let entries: Vec<Value> = cmds
         .iter()
         .map(|cmd| {
+            let line_count = cmd.output.strip_suffix('\n').unwrap_or(&cmd.output).lines().count();
             json!({
+                "command_id": cmd.id,
                 "command": cmd.command,
                 "exit_code": cmd.exit_code,
-                "output_lines": cmd.output.lines().count(),
+                "output_lines": line_count,
             })
         })
         .collect();

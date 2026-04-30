@@ -406,13 +406,19 @@ impl ServerHandler for TmuxMcp {
             instructions: Some(
                 "MCP server for interacting with tmux panes. Use list_panes to discover \
                  available panes, then run commands and read their output.\n\n\
-                 command_run: Use next/head/tail/search params to control output windowing. \
-                 On timeout, returns partial output — use command_read(command_id=N) to \
-                 continue reading. Use timeout_secs=0 for commands that change shell state \
+                 command_run: Prefer tail=30 for commands where you only need the result \
+                 (builds, tests, installs). Use search to filter verbose output \
+                 (e.g. search=\"error|fail|warn\" on test runs). Use head or next when \
+                 exploring unknown output. On timeout, returns partial output — use \
+                 command_read(command_id=N) to continue reading. \
+                 Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit).\n\n\
                  command_read: Use next to stream new output from a running command, \
                  head/tail to view ranges, search to filter by regex. For active commands, \
                  waits up to timeout_secs for new output.\n\n\
+                 command_history: Lists recent commands with their command_id, exit code, \
+                 and output line count. Use command_id with command_read to revisit \
+                 output from earlier commands.\n\n\
                  debug_pane: Shows only visible terminal text — no scrollback, no structure. \
                  NOT for reading command output (use command_read instead). Use only to \
                  debug pane state or inspect TUI apps.\n\n\
