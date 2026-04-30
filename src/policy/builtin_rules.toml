@@ -97,6 +97,23 @@ description = "awk code execution"
 when = 'command.name in ["awk","gawk","mawk","nawk"] && command.args.exists(a, contains(a, "system"))'
 action = "ask"
 
+[[rules]]
+description = "chmod dangerous"
+when = 'command.name == "chmod" && command.args.exists(a, contains(a, "+s") || a == "000" || a == "777" || startsWith(a, "4") || startsWith(a, "2"))'
+action = "ask"
+message = "setuid/setgid/broad permissions are dangerous"
+
+[[rules]]
+description = "chown"
+when = 'command.name == "chown"'
+action = "ask"
+
+[[rules]]
+description = "cargo install"
+when = 'command.name == "cargo" && command.args.exists(a, a == "install")'
+action = "ask"
+message = "cargo install downloads and compiles arbitrary code from crates.io"
+
 # --- Safe commands (allow) ---
 
 [[rules]]
@@ -111,7 +128,7 @@ action = "allow"
 
 [[rules]]
 description = "file operations"
-when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","chown","sed","awk","cut","tr","tee","xargs"]'
+when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee","xargs"]'
 action = "allow"
 
 [[rules]]
@@ -120,6 +137,11 @@ when = 'command.name == "cargo"'
 action = "allow"
 
 [[rules]]
-description = "git"
-when = 'command.name == "git"'
+description = "git read-only"
+when = 'command.name == "git" && command.args.exists(a, a in ["status","log","diff","show","branch","tag","remote","config","stash list","ls-files","ls-tree","rev-parse","describe","shortlog","blame","reflog"])'
 action = "allow"
+
+[[rules]]
+description = "git write"
+when = 'command.name == "git"'
+action = "ask"
