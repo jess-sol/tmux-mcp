@@ -180,7 +180,8 @@ Add to `~/.claude/settings.json` (merge with existing):
 Copy the skill to your Claude Code skills directory:
 
 ```sh
-cp skills/tmux-policy.md ~/.claude/skills/
+mkdir -p ~/.claude/skills/tmux-policy
+cp skills/tmux-policy.md ~/.claude/skills/tmux-policy/SKILL.md
 ```
 
 This adds the `/tmux-policy` command. When a command gets blocked, type `/tmux-policy allow` to generate and save a CEL rule for it. Examples:
