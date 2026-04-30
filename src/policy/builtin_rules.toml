@@ -43,13 +43,13 @@ when = 'command.name == "find" && command.args.exists(a, a in ["-exec", "-execdi
 action = "ask"
 
 [[rules]]
-description = "rm dangerous flags"
-when = 'command.name == "rm" && command.args.exists(a, a in ["-rf", "-r"])'
+description = "rm recursive"
+when = 'command.name == "rm" && has_short_flag(command.args, "r")'
 action = "ask"
 
 [[rules]]
 description = "git destructive"
-when = 'command.name == "git" && command.args.exists(a, a in ["push","reset","clean"]) && command.args.exists(a, a in ["--force","--hard","-f","-D"])'
+when = 'command.name == "git" && command.args.exists(a, a in ["push","reset","clean"]) && (command.args.exists(a, startsWith(a, "--force") || a == "--hard") || has_short_flag(command.args, "f") || has_short_flag(command.args, "D"))'
 action = "ask"
 
 [[rules]]
@@ -90,6 +90,11 @@ action = "ask"
 [[rules]]
 description = "curl/wget"
 when = 'command.name in ["curl", "wget"]'
+action = "ask"
+
+[[rules]]
+description = "awk code execution"
+when = 'command.name in ["awk","gawk","mawk","nawk"] && command.args.exists(a, contains(a, "system"))'
 action = "ask"
 
 # --- Safe commands (allow) ---
