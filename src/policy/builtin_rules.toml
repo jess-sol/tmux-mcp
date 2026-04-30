@@ -1,0 +1,120 @@
+# Built-in policy rules — compiled into the tmux-mcp binary.
+# Users override by adding rules with negative order in their config.
+# All rules here are at order 0 (implicit).
+
+default = "ask"
+
+# --- Circumvention patterns (deny by default, user can override to ask) ---
+
+[[rules]]
+description = "eval"
+when = 'command.name == "eval"'
+action = "deny"
+message = "eval executes arbitrary strings"
+
+[[rules]]
+description = "source"
+when = 'command.name in ["source", "."]'
+action = "deny"
+message = "source executes file contents"
+
+[[rules]]
+description = "exec"
+when = 'command.name == "exec"'
+action = "deny"
+message = "exec replaces the shell process"
+
+[[rules]]
+description = "pipe to shell"
+when = 'command.name in ["bash","sh","zsh","dash","ksh","csh","tcsh","fish"] && command.is_pipe_target'
+action = "deny"
+message = "piping to a shell interpreter can execute arbitrary code"
+
+# --- Dangerous commands (ask) ---
+
+[[rules]]
+description = "privilege escalation"
+when = 'command.name in ["sudo", "su", "doas"]'
+action = "ask"
+
+[[rules]]
+description = "find dangerous flags"
+when = 'command.name == "find" && command.args.exists(a, a in ["-exec", "-execdir", "-delete", "-ok"])'
+action = "ask"
+
+[[rules]]
+description = "rm dangerous flags"
+when = 'command.name == "rm" && command.args.exists(a, a in ["-rf", "-r"])'
+action = "ask"
+
+[[rules]]
+description = "git destructive"
+when = 'command.name == "git" && command.args.exists(a, a in ["push","reset","clean"]) && command.args.exists(a, a in ["--force","--hard","-f","-D"])'
+action = "ask"
+
+[[rules]]
+description = "disk and filesystem"
+when = 'command.name in ["dd", "mkfs", "fdisk", "mount", "umount"]'
+action = "ask"
+
+[[rules]]
+description = "system power"
+when = 'command.name in ["reboot", "shutdown", "poweroff", "halt"]'
+action = "ask"
+
+[[rules]]
+description = "process signals"
+when = 'command.name in ["kill", "pkill", "killall"]'
+action = "ask"
+
+[[rules]]
+description = "package removal"
+when = 'command.name in ["apt","dnf","pacman","yum"] && command.args.exists(a, a in ["remove","purge","autoremove"])'
+action = "ask"
+
+[[rules]]
+description = "firewall"
+when = 'command.name in ["iptables", "ufw", "firewall-cmd"]'
+action = "ask"
+
+[[rules]]
+description = "service disruption"
+when = 'command.name == "systemctl" && command.args.exists(a, a in ["stop","disable","mask","restart"])'
+action = "ask"
+
+[[rules]]
+description = "xargs"
+when = 'command.name == "xargs"'
+action = "ask"
+
+[[rules]]
+description = "curl/wget"
+when = 'command.name in ["curl", "wget"]'
+action = "ask"
+
+# --- Safe commands (allow) ---
+
+[[rules]]
+description = "read-only tools"
+when = 'command.name in ["ls","cat","head","tail","wc","sort","uniq","grep","rg","find","fd","tree","less","file","stat","realpath","diff","md5sum","sha256sum","base64"]'
+action = "allow"
+
+[[rules]]
+description = "info commands"
+when = 'command.name in ["echo","printf","pwd","whoami","hostname","date","uname","env","id","which","ps","uptime","seq","true","false","test",":","type","man"]'
+action = "allow"
+
+[[rules]]
+description = "file operations"
+when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","chown","sed","awk","cut","tr","tee","xargs"]'
+action = "allow"
+
+[[rules]]
+description = "cargo"
+when = 'command.name == "cargo"'
+action = "allow"
+
+[[rules]]
+description = "git"
+when = 'command.name == "git"'
+action = "allow"
