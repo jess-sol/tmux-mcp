@@ -34,6 +34,9 @@ pub fn lint_command_run(command: &str) -> Result<(), LintError> {
     if let Some(err) = lint_tee_pipe(command) {
         return Err(err);
     }
+    if let Some(err) = lint_background_job(command) {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -134,6 +137,25 @@ fn lint_tee_pipe(command: &str) -> Option<LintError> {
              Try:         command_run(command=\"{base}\")\n\
              \n\
              Use command_read to access full output as many times as needed."
+        ),
+    })
+}
+
+fn lint_background_job(command: &str) -> Option<LintError> {
+    // Match trailing & but not && or &> or &>>
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[^&])\s*&\s*$").unwrap());
+    if !RE.is_match(command) {
+        return None;
+    }
+
+    Some(LintError {
+        message: format!(
+            "Don't background commands with & — use a separate pane instead.\n\
+             \n\
+             Rejected:    command_run(command=\"{command}\")\n\
+             \n\
+             Background jobs bypass output capture and can't be monitored reliably. \
+             Use list_panes to find or create another pane and run the command there."
         ),
     })
 }
@@ -253,6 +275,40 @@ mod tests {
     #[test]
     fn tee_without_pipe_allowed() {
         assert!(lint_command_run("tee output.log").is_ok());
+    }
+
+    // --- Background ---
+
+    #[test]
+    fn background_trailing_ampersand_rejected() {
+        let err = lint_command_run("sleep 60 &").unwrap_err();
+        assert!(err.message.contains("separate pane"), "{}", err);
+    }
+
+    #[test]
+    fn background_no_space_rejected() {
+        assert!(lint_command_run("make&").is_err());
+    }
+
+    #[test]
+    fn background_trailing_whitespace_rejected() {
+        assert!(lint_command_run("cargo build &  ").is_err());
+    }
+
+    #[test]
+    fn logical_and_allowed() {
+        assert!(lint_command_run("make && make install").is_ok());
+    }
+
+    #[test]
+    fn redirect_ampersand_allowed() {
+        assert!(lint_command_run("make &> /dev/null").is_ok());
+        assert!(lint_command_run("make &>> log.txt").is_ok());
+    }
+
+    #[test]
+    fn ampersand_in_url_allowed() {
+        assert!(lint_command_run("curl 'http://example.com?a=1&b=2'").is_ok());
     }
 
     // --- Valid ---
