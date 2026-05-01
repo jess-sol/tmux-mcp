@@ -14,7 +14,7 @@ use cel_parser::ast as cel;
 use cel_parser::reference::Val;
 
 use super::config::TaggedRule;
-use super::parse::{CommandInfo, Effective};
+use super::parse::{CommandInfo, Effective, InnerExtraction};
 use super::{Decision, PaneContext, PolicyResult};
 
 // --- Three-valued types ---
@@ -91,6 +91,12 @@ pub struct CompiledRule {
     pub ast: cel::IdedExpr,
     pub action: Decision,
     pub message: Option<String>,
+    /// True if the CEL expression directly references command.effective_user.
+    /// When true, the implicit same-user constraint on `allow` is skipped.
+    pub privilege_aware: bool,
+    /// True if the CEL expression directly references command.effective_host.
+    /// When true, the implicit same-host constraint on `allow` is skipped.
+    pub host_aware: bool,
 }
 
 pub struct RuleSet {
@@ -116,24 +122,84 @@ pub fn compile(tagged_rules: &[TaggedRule], default: Decision) -> Result<RuleSet
                 other, tagged.config.description
             )),
         };
+        let privilege_aware = references_command_field(&ast.expr, "effective_user");
+        let host_aware = references_command_field(&ast.expr, "effective_host");
         rules.push(CompiledRule {
             description: tagged.config.description.clone(),
             ast,
             action,
             message: tagged.config.message.clone(),
+            privilege_aware,
+            host_aware,
         });
     }
     Ok(RuleSet { rules, default })
 }
 
+/// Check if a CEL expression directly references `command.<field>`.
+/// Walks the AST looking for Select nodes where operand is Ident("command")
+/// and the field name matches. Does NOT match `command.parent.<field>`.
+fn references_command_field(expr: &cel::Expr, field: &str) -> bool {
+    match expr {
+        cel::Expr::Select(s) => {
+            if s.field == field {
+                if let cel::Expr::Ident(name) = &s.operand.expr {
+                    if name == "command" {
+                        return true;
+                    }
+                }
+            }
+            references_command_field(&s.operand.expr, field)
+        }
+        cel::Expr::Call(c) => {
+            c.args.iter().any(|a| references_command_field(&a.expr, field))
+                || c.target.as_ref().is_some_and(|t| references_command_field(&t.expr, field))
+        }
+        cel::Expr::List(l) => {
+            l.elements.iter().any(|e| references_command_field(&e.expr, field))
+        }
+        cel::Expr::Comprehension(comp) => {
+            [&comp.iter_range, &comp.accu_init, &comp.loop_cond, &comp.loop_step, &comp.result]
+                .iter().any(|e| references_command_field(&e.expr, field))
+        }
+        _ => false,
+    }
+}
+
 /// Evaluate a single CommandInfo against the rule set.
 /// First matching rule wins, or returns default.
+///
+/// For `allow` rules: an implicit context constraint applies. The rule only
+/// matches if effective_user resolves to pane.user AND effective_host resolves
+/// to pane.hostname. This is skipped if the rule's CEL expression directly
+/// references command.effective_user or command.effective_host (the rule
+/// author has explicitly considered the context).
 pub fn evaluate(cmd: &CommandInfo, ctx: &PaneContext, rules: &RuleSet) -> PolicyResult {
     let eval_ctx = build_context(cmd, ctx);
 
     for rule in &rules.rules {
         let result = eval_expr(&rule.ast.expr, &eval_ctx);
         if result.is_truthy() == TriBool::True {
+            // For `allow` rules: check implicit context constraint.
+            if rule.action == Decision::Allow {
+                if !rule.privilege_aware {
+                    let user_ok = match &cmd.effective_user {
+                        Effective::Unchanged => true,
+                        Effective::Known(u) => ctx.user.as_deref() == Some(u.as_str()),
+                        Effective::Unknown => false,
+                    };
+                    if !user_ok { continue; }
+                }
+                if !rule.host_aware {
+                    let host_ok = match &cmd.effective_host {
+                        Effective::Unchanged => true,
+                        Effective::Known(h) => ctx.hostname.as_deref() == Some(h.as_str()),
+                        Effective::Unknown => false,
+                    };
+                    if !host_ok { continue; }
+                }
+            }
+
             let rule_desc = match &rule.message {
                 Some(msg) => format!("{}: {}", rule.description, msg),
                 None => rule.description.clone(),
@@ -564,16 +630,17 @@ fn build_command_val(cmd: &CommandInfo, pane: &PaneContext) -> TriVal {
 
     map.insert("args_complete".into(), TriVal::Bool(cmd.args_complete));
     map.insert("is_pipe_target".into(), TriVal::Bool(cmd.is_pipe_target));
+    map.insert("has_inner".into(), TriVal::Bool(cmd.inner != InnerExtraction::None));
 
     let effective_user = match &cmd.effective_user {
-        Effective::Unchanged => TriVal::String(pane.user.clone().unwrap_or_default()),
+        Effective::Unchanged => option_to_trival(&pane.user),
         Effective::Known(user) => TriVal::String(user.clone()),
         Effective::Unknown => TriVal::Unknown,
     };
     map.insert("effective_user".into(), effective_user);
 
     let effective_host = match &cmd.effective_host {
-        Effective::Unchanged => TriVal::String(pane.hostname.clone().unwrap_or_default()),
+        Effective::Unchanged => option_to_trival(&pane.hostname),
         Effective::Known(host) => TriVal::String(host.clone()),
         Effective::Unknown => TriVal::Unknown,
     };
@@ -611,12 +678,19 @@ fn build_command_val(cmd: &CommandInfo, pane: &PaneContext) -> TriVal {
     TriVal::Map(map)
 }
 
+fn option_to_trival(opt: &Option<String>) -> TriVal {
+    match opt {
+        Some(s) => TriVal::String(s.clone()),
+        None => TriVal::Null,
+    }
+}
+
 fn build_pane_val(pane: &PaneContext) -> TriVal {
     let mut map = HashMap::new();
-    map.insert("hostname".into(), TriVal::String(pane.hostname.clone().unwrap_or_default()));
-    map.insert("cwd".into(), TriVal::String(pane.cwd.clone().unwrap_or_default()));
-    map.insert("foreground".into(), TriVal::String(pane.foreground.clone().unwrap_or_default()));
-    map.insert("user".into(), TriVal::String(pane.user.clone().unwrap_or_default()));
+    map.insert("hostname".into(), option_to_trival(&pane.hostname));
+    map.insert("cwd".into(), option_to_trival(&pane.cwd));
+    map.insert("foreground".into(), option_to_trival(&pane.foreground));
+    map.insert("user".into(), option_to_trival(&pane.user));
     TriVal::Map(map)
 }
 
@@ -1157,9 +1231,9 @@ mod tests {
     }
 
     #[test]
-    fn local_pane_host_is_empty_string() {
+    fn local_pane_host_is_null() {
         let rules = compile_rules(&[
-            ("local", r#"command.effective_host == """#, "allow"),
+            ("local", r#"command.effective_host == null"#, "allow"),
         ]);
         assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
     }
@@ -1276,5 +1350,135 @@ mod tests {
         let c = cmd_with_args("cat", &["-n", "src/main.rs"]);
         let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
         assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Allow);
+    }
+
+    // --- AST walker: references_command_field ---
+
+    #[test]
+    fn detects_command_effective_user() {
+        let parser = cel_parser::Parser::new();
+        let ast = parser.parse(r#"command.effective_user == "root""#).unwrap();
+        assert!(references_command_field(&ast.expr, "effective_user"));
+    }
+
+    #[test]
+    fn does_not_detect_parent_effective_user() {
+        let parser = cel_parser::Parser::new();
+        let ast = parser.parse(r#"command.parent.effective_user == "root""#).unwrap();
+        assert!(!references_command_field(&ast.expr, "effective_user"));
+    }
+
+    #[test]
+    fn detects_effective_user_in_complex_expr() {
+        let parser = cel_parser::Parser::new();
+        let ast = parser.parse(r#"command.name == "cargo" && command.effective_user == "root""#).unwrap();
+        assert!(references_command_field(&ast.expr, "effective_user"));
+    }
+
+    #[test]
+    fn does_not_detect_unrelated_field() {
+        let parser = cel_parser::Parser::new();
+        let ast = parser.parse(r#"command.name == "cargo""#).unwrap();
+        assert!(!references_command_field(&ast.expr, "effective_user"));
+    }
+
+    #[test]
+    fn detects_effective_host() {
+        let parser = cel_parser::Parser::new();
+        let ast = parser.parse(r#"command.effective_host == "prod""#).unwrap();
+        assert!(references_command_field(&ast.expr, "effective_host"));
+    }
+
+    // --- Implicit allow constraint ---
+
+    #[test]
+    fn allow_skipped_when_user_differs() {
+        let rules = compile_rules(&[
+            ("cargo", r#"command.name == "cargo""#, "allow"),
+        ]);
+        let mut c = cmd("cargo");
+        c.effective_user = Effective::Known("root".into());
+        // Rule matches CEL but implicit constraint fails (root != jess)
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn allow_passes_when_user_unchanged() {
+        let rules = compile_rules(&[
+            ("cargo", r#"command.name == "cargo""#, "allow"),
+        ]);
+        assert_eq!(evaluate(&cmd("cargo"), &local_pane(), &rules).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn allow_passes_when_user_same() {
+        let rules = compile_rules(&[
+            ("cargo", r#"command.name == "cargo""#, "allow"),
+        ]);
+        let mut c = cmd("cargo");
+        c.effective_user = Effective::Known("jess".into()); // same as pane.user
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn allow_skipped_when_user_unknown() {
+        let rules = compile_rules(&[
+            ("cargo", r#"command.name == "cargo""#, "allow"),
+        ]);
+        let mut c = cmd("cargo");
+        c.effective_user = Effective::Unknown;
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn privilege_aware_rule_allows_different_user() {
+        let rules = compile_rules(&[
+            ("cargo root", r#"command.name == "cargo" && command.effective_user == "root""#, "allow"),
+        ]);
+        let mut c = cmd("cargo");
+        c.effective_user = Effective::Known("root".into());
+        // Rule is privilege-aware (references command.effective_user), so constraint skipped
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn allow_skipped_when_host_differs() {
+        let rules = compile_rules(&[
+            ("ls", r#"command.name == "ls""#, "allow"),
+        ]);
+        let mut c = cmd("ls");
+        c.effective_host = Effective::Known("server".into());
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn host_aware_rule_allows_different_host() {
+        let rules = compile_rules(&[
+            ("ls staging", r#"command.name == "ls" && command.effective_host == "staging""#, "allow"),
+        ]);
+        let mut c = cmd("ls");
+        c.effective_host = Effective::Known("staging".into());
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn ask_rule_not_affected_by_constraint() {
+        // ask/deny rules should NOT have implicit constraint
+        let rules = compile_rules(&[
+            ("rm", r#"command.name == "rm""#, "ask"),
+        ]);
+        let mut c = cmd("rm");
+        c.effective_user = Effective::Known("root".into());
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn deny_rule_not_affected_by_constraint() {
+        let rules = compile_rules(&[
+            ("eval", r#"command.name == "eval""#, "deny"),
+        ]);
+        let mut c = cmd("eval");
+        c.effective_user = Effective::Known("root".into());
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
     }
 }

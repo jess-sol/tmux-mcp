@@ -124,6 +124,14 @@ message = "write redirect targets a file outside project directory"
 
 # --- Safe commands (allow) ---
 
+# Noop wrappers — these don't change security context, just scheduling/tracing.
+# Only evaluated when has_inner=false (no inner command extracted, e.g. bare "timeout").
+# When has_inner=true, these are skipped by the engine.
+[[rules]]
+description = "noop wrappers"
+when = 'command.name in ["timeout","nice","nohup","command","builtin","watch","strace"]'
+action = "allow"
+
 # Commands that don't take file paths — unrestricted
 [[rules]]
 description = "info commands"

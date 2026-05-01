@@ -45,10 +45,12 @@ Rules are evaluated top-to-bottom within each order level. First match wins. If 
 | `command.args` | list[string] | Known literal arguments |
 | `command.args_complete` | bool | `false` if dynamic/unknown args possible (xargs, expansions) |
 | `command.is_pipe_target` | bool | `true` if receiving piped stdin |
-| `command.effective_user` | string/null | User after sudo/su unwrapping. null if unchanged or unknowable |
-| `command.effective_host` | string/null | Host after ssh unwrapping. null if unchanged or unknowable |
+| `command.has_inner` | bool | `true` if this is a recognized wrapper whose inner commands were extracted |
+| `command.effective_user` | string/unknown | Effective user. Equals `pane.user` if unchanged, unknown if unknowable (e.g. `sudo -u $VAR`) |
+| `command.effective_host` | string/unknown | Effective host. Equals `pane.hostname` if unchanged, unknown if unknowable |
 | `command.write_targets` | list[string] | File paths from write redirects (`>`, `>>`, `&>`, `>|`) |
 | `command.read_targets` | list[string] | File paths from read redirects (`<`) |
+| `command.parent` | object/null | Parent wrapper command. Has same fields as `command.*`. Walk `parent.parent` for chains. `null` if top-level |
 
 ### pane.*
 
@@ -79,6 +81,23 @@ Rules are evaluated top-to-bottom within each order level. First match wins. If 
 | `~/.ssh/id_rsa` | (any) | `/home/{pane.user}/.ssh/id_rsa` |
 | `/etc/passwd` | (any) | `/etc/passwd` |
 | `-rf` | (any) | null (it's a flag) |
+
+## Wrapper transparency
+
+The parser extracts inner commands from recognized wrappers. Wrappers are transparent — the engine skips them and only evaluates the inner commands. The wrapper's security impact is encoded on the inner command via `effective_user` and `effective_host`.
+
+**Exception:** `env` is NOT transparent (it modifies environment variables we don't capture). It falls to default Ask.
+
+**Recognized wrappers:** `sudo`, `su`, `doas`, `ssh`, `timeout`, `nice`, `nohup`, `strace`, `watch`, `command`, `builtin`, `env`, `find` (with `-exec`), `xargs`, `bash`/`sh`/`zsh`/`dash` (with `-c`), `podman`/`docker`/`kubectl` (with `exec`)
+
+## Implicit allow constraints
+
+`allow` rules only match when the command runs as the current user on the current host, **unless** the rule's CEL expression directly references `command.effective_user` or `command.effective_host`. This prevents accidentally allowing commands under privilege escalation or on remote hosts.
+
+- `command.name == "cargo"` → allow: only matches when `effective_user == pane.user`. `sudo cargo test` would NOT match (falls to default Ask).
+- `command.name == "cargo" && command.effective_user == "root"` → allow: the rule references `command.effective_user`, so the implicit constraint is skipped. Matches `sudo cargo test`.
+
+`ask` and `deny` rules are NOT affected — they always apply regardless of user/host context.
 
 ## CEL expression examples
 
@@ -234,6 +253,8 @@ command.name == "rm" && has_short_flag(command.args, "r") && pane.hostname != nu
    - **Use `glob` for hostname/path patterns.** `glob("*.prod.*", pane.hostname)`
    - **Use `command.write_targets` for redirect safety.** Catch writes outside project dir.
    - **Pair pattern for containment.** In-project allow + catch-all ask for the same commands.
+   - **Privilege override.** To allow a command under sudo, reference `command.effective_user` in the condition. This lifts the implicit same-user constraint. Example: `command.name == "mkdir" && command.effective_user == "root" && ...` → allow.
+   - **Host override.** Same for remote: reference `command.effective_host` to lift the same-host constraint.
 
 4. **Ask the user which scope** (user-wide `~/.claude/tmux-mcp.toml` or project `.claude/tmux-mcp.toml`) unless obvious from context. Default to user-wide for tool-specific rules, project for project-specific paths or hosts.
 

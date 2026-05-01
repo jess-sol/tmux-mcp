@@ -87,6 +87,10 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
 
 /// Evaluate all commands in the flat list. Most restrictive result wins.
 /// Deny > Ask > Allow.
+///
+/// Transparent wrappers (inner == Transparent) are skipped — their effects are
+/// fully captured on inner commands via effective_user/effective_host. Wrappers
+/// that modify uncaptured state (inner == Evaluated, e.g. env) are still evaluated.
 fn evaluate_all(
     commands: &[parse::CommandInfo],
     ctx: &PaneContext,
@@ -95,6 +99,12 @@ fn evaluate_all(
     let mut worst: Option<PolicyResult> = None;
 
     for cmd in commands {
+        // Transparent wrappers are redundant — their effects are captured
+        // on inner commands via effective_user/effective_host.
+        if cmd.inner == parse::InnerExtraction::Transparent {
+            continue;
+        }
+
         let result = rules::evaluate(cmd, ctx, ruleset);
         if result.decision == Decision::Deny {
             return result;
@@ -335,21 +345,55 @@ mod tests {
         assert_eq!(r.decision, Decision::Allow);
     }
 
-    // --- Wrapper evaluation ---
+    // --- Wrapper transparency ---
+
+    #[test]
+    fn timeout_cargo_test_allowed() {
+        // timeout is transparent (has_inner, skipped), cargo → Allow
+        assert_eq!(evaluate_test("timeout 30 cargo test", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn nice_cargo_build_allowed() {
+        assert_eq!(evaluate_test("nice -n 10 cargo build", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn nohup_cargo_build_allowed() {
+        assert_eq!(evaluate_test("nohup cargo build", &local_ctx()).decision, Decision::Allow);
+    }
 
     #[test]
     fn env_cargo_test_asks() {
-        // env removed from allow list (can leak secrets, env -S can execute arbitrary commands)
-        let r = evaluate_test("env FOO=bar cargo test", &local_ctx());
-        assert_eq!(r.decision, Decision::Ask);
+        // env is NOT transparent (changes environment vars we don't capture)
+        assert_eq!(evaluate_test("env FOO=bar cargo test", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_cargo_test_asks() {
+        // sudo is transparent (has_inner, skipped), but cargo has effective_user="root"
+        // which doesn't match pane.user → implicit constraint fails → Ask
+        assert_eq!(evaluate_test("sudo cargo test", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn sudo_eval_denied() {
+        // sudo skipped, eval → Deny
+        assert_eq!(evaluate_test("sudo eval bad", &local_ctx()).decision, Decision::Deny);
+    }
+
+    #[test]
+    fn sudo_i_asks() {
+        // sudo -i has no inner command (has_inner=false), hits privilege escalation rule
+        assert_eq!(evaluate_test("sudo -i", &local_ctx()).decision, Decision::Ask);
     }
 
     // --- Aggregation ---
 
     #[test]
     fn most_restrictive_wins_across_tree() {
-        // ls is Allow, sudo is Ask → overall Ask
-        let r = evaluate_test("ls && sudo echo", &local_ctx());
+        // ls is Allow, sudo -i is Ask → overall Ask
+        let r = evaluate_test("ls && sudo -i", &local_ctx());
         assert_eq!(r.decision, Decision::Ask);
     }
 
@@ -818,10 +862,9 @@ mod tests {
 
     #[test]
     fn bash_c_with_safe_command() {
-        // bash -c "ls" — sh is in the command list, inner extracts ls
-        // Both bash and ls are checked. bash → Ask (unknown), ls → Allow
+        // bash -c "ls" — bash is transparent (has_inner), inner ls → Allow
         let r = evaluate_test("bash -c 'ls -la'", &local_ctx());
-        assert_eq!(r.decision, Decision::Ask); // bash itself is Ask
+        assert_eq!(r.decision, Decision::Allow);
     }
 
     // ====================================================================

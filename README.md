@@ -67,6 +67,8 @@ For active commands, `next` blocks up to a timeout waiting for new output — no
 
 This isn't a sandbox against adversarial agents — it's guardrails for good-faith ones that occasionally reach for `rm -rf` or `curl | sh` without thinking twice. Every command is parsed into a structured tree (via [brush](https://github.com/reubeno/brush)), then evaluated against CEL rules. The evaluator uses **three-valued logic** (true / false / unknown) because some properties — like what a variable expands to — can't be known statically. When any command in a pipeline is unknown, the engine falls through to human approval rather than guessing.
 
+The parser recognizes wrapper commands (sudo, env, timeout, ssh, docker exec, etc.) and extracts their inner commands. Wrappers that only change user/host context are transparent — the engine evaluates only the inner commands, with `effective_user` and `effective_host` propagated. `allow` rules implicitly require same-user/same-host unless the rule explicitly references `command.effective_user` or `command.effective_host`.
+
 Rules are loaded from three tiers (built-in < user < project) and hot-reload on file change:
 
 ```toml
@@ -82,7 +84,7 @@ action = "deny"
 message = "production hosts are read-only"
 ```
 
-Available context in rules: `command.name`, `command.args`, `pane.cwd`, `pane.hostname`, `pane.user`, `pane.foreground`, plus helpers like `path()`, `glob()`, `redirect_targets()`, and `pipe_targets()`.
+Available context in rules: `command.name`, `command.args`, `command.has_inner`, `command.effective_user`, `command.effective_host`, `command.parent`, `pane.cwd`, `pane.hostname`, `pane.user`, `pane.foreground`, plus helpers like `path()`, `glob()`, `startsWith()`, and `has_short_flag()`.
 
 ### Context-aware approval drift detection
 

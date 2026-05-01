@@ -34,6 +34,8 @@ pub struct CommandInfo {
     pub redirects: Vec<RedirectInfo>,
     /// Immediate parent wrapper (if any). Walk parent.parent for the full chain.
     pub parent: Option<Arc<CommandInfo>>,
+    /// Whether this command is a wrapper with extracted inner commands.
+    pub inner: InnerExtraction,
 }
 
 /// A shell redirect (>, >>, <, etc.) attached to a command.
@@ -59,6 +61,7 @@ impl CommandInfo {
             is_pipe_target: false,
             redirects: Vec::new(),
             parent: None,
+            inner: InnerExtraction::None,
         }
     }
 }
@@ -72,6 +75,20 @@ pub enum Effective {
     Known(String),
     /// Wrapper used but value unknowable (expansion in arg) — resolves to null in CEL.
     Unknown,
+}
+
+/// Whether a wrapper's inner commands were extracted, and how the engine should
+/// treat the wrapper during evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InnerExtraction {
+    /// Not a wrapper, or extraction failed. Evaluate normally.
+    None,
+    /// Inner commands extracted and wrapper is redundant — all effects (user/host)
+    /// are captured on inner commands. Engine skips this wrapper during evaluation.
+    Transparent,
+    /// Inner commands extracted, but wrapper modifies uncaptured state (e.g. env vars).
+    /// Both wrapper and inner commands are evaluated.
+    Evaluated,
 }
 
 /// Error returned when brush-parser can't parse the command.
@@ -222,7 +239,7 @@ fn extract_from_simple_command(
         extract_redirects(&suffix.0, &mut redirects);
     }
 
-    let info = CommandInfo {
+    let mut info = CommandInfo {
         name: name_word.value.clone(),
         args,
         args_complete,
@@ -231,22 +248,17 @@ fn extract_from_simple_command(
         is_pipe_target,
         redirects,
         parent,
+        inner: InnerExtraction::None,
     };
 
     // Try wrapper extraction — produces inner commands with this as parent
-    let inner_produced = extract_wrapper_children(&info, out);
+    info.inner = extract_wrapper_children(&info, out);
 
     // Add this command to the output
     out.push(info);
 
-    // If no inner commands were produced by wrapper logic, add command sub commands
-    // (wrapper children already handle their own inner extraction)
-    if !inner_produced {
-        out.extend(cmd_sub_commands);
-    } else {
-        // Still add command substitution commands found in wrapper's args
-        out.extend(cmd_sub_commands);
-    }
+    // Add command substitution commands (from args of this command or its wrapper)
+    out.extend(cmd_sub_commands);
 }
 
 fn extract_from_compound_command(compound: &ast::CompoundCommand, out: &mut Vec<CommandInfo>) {
@@ -372,27 +384,46 @@ fn extract_command_subs_from_piece(piece: &WordPiece, out: &mut Vec<CommandInfo>
 //
 // Wrappers produce both themselves (added by caller) and their inner commands.
 // Inner commands get `parent` set to the wrapper and inherit context
-// (effective_user, effective_host). Returns true if inner commands were produced.
+// (effective_user, effective_host).
+//
+// Returns the extraction result:
+// - Transparent: inner extracted, wrapper effects fully captured (user/host).
+//   Engine skips this wrapper during evaluation.
+// - Evaluated: inner extracted, but wrapper modifies uncaptured state (env vars).
+//   Both wrapper and inner are evaluated.
+// - None: not a wrapper, or extraction failed.
 
-fn extract_wrapper_children(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    match wrapper.name.as_str() {
+fn extract_wrapper_children(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> InnerExtraction {
+    let extracted = match wrapper.name.as_str() {
+        // Noop wrappers — change nothing security-relevant
         "command" | "builtin" | "nohup" => extract_transparent(wrapper, out),
         "nice" => extract_skip_flags(wrapper, &["-n"], out),
         "timeout" => extract_timeout(wrapper, out),
         "strace" => extract_skip_flags(wrapper, &["-e", "-s", "-o", "-p"], out),
         "watch" => extract_skip_flags(wrapper, &["-n"], out),
+        // Context-changing — modify user/host (captured via effective_user/host)
         "sudo" => extract_sudo(wrapper, out),
         "su" => extract_su(wrapper, out),
         "doas" => extract_doas(wrapper, out),
-        "env" => extract_env(wrapper, out),
-        "sh" | "bash" | "zsh" | "dash" => extract_string_eval(wrapper, out),
-        "find" => extract_find(wrapper, out),
-        "xargs" => extract_xargs(wrapper, out),
         "ssh" => extract_ssh(wrapper, out),
         "podman" | "docker" => extract_subcommand_exec(wrapper, out),
         "kubectl" => extract_kubectl(wrapper, out),
-        _ => false,
-    }
+        // Shell eval — inner command fully extracted
+        "sh" | "bash" | "zsh" | "dash" => extract_string_eval(wrapper, out),
+        // Delegating — inner command extracted with args_complete=false
+        "find" => extract_find(wrapper, out),
+        "xargs" => extract_xargs(wrapper, out),
+        // Environment — modifies env vars we don't capture
+        "env" => {
+            return if extract_env(wrapper, out) {
+                InnerExtraction::Evaluated
+            } else {
+                InnerExtraction::None
+            };
+        }
+        _ => return InnerExtraction::None,
+    };
+    if extracted { InnerExtraction::Transparent } else { InnerExtraction::None }
 }
 
 /// Create an inner CommandInfo and add it (and any recursive inner commands) to out.
@@ -411,7 +442,7 @@ fn push_inner(
     };
 
     let parent_arc = Arc::new(parent.clone());
-    let inner = CommandInfo {
+    let mut inner = CommandInfo {
         name: cmd_name,
         args: cmd_args,
         args_complete,
@@ -420,10 +451,11 @@ fn push_inner(
         is_pipe_target: false,
         redirects: Vec::new(), // inner commands from wrappers don't carry redirects
         parent: Some(parent_arc),
+        inner: InnerExtraction::None,
     };
 
     // Recursively extract if inner is also a wrapper
-    extract_wrapper_children(&inner, out);
+    inner.inner = extract_wrapper_children(&inner, out);
     out.push(inner);
     true
 }
@@ -1053,6 +1085,45 @@ mod tests {
         let cmds = parse_command("timeout 30 curl example.com").unwrap();
         let curl = find_cmd(&cmds, "curl");
         assert_eq!(curl.parent.as_ref().unwrap().name, "timeout");
+    }
+
+    // --- InnerExtraction ---
+
+    #[test]
+    fn wrapper_is_transparent() {
+        let cmds = parse_command("sudo rm -rf /").unwrap();
+        assert_eq!(find_cmd(&cmds, "sudo").inner, InnerExtraction::Transparent);
+    }
+
+    #[test]
+    fn leaf_is_none() {
+        let cmds = parse_command("sudo rm -rf /").unwrap();
+        assert_eq!(find_cmd(&cmds, "rm").inner, InnerExtraction::None);
+    }
+
+    #[test]
+    fn non_wrapper_is_none() {
+        let cmds = parse_command("ls -la").unwrap();
+        assert_eq!(cmds[0].inner, InnerExtraction::None);
+    }
+
+    #[test]
+    fn wrapper_no_inner_is_none() {
+        let cmds = parse_command("sudo -i").unwrap();
+        assert_eq!(find_cmd(&cmds, "sudo").inner, InnerExtraction::None);
+    }
+
+    #[test]
+    fn env_is_evaluated() {
+        let cmds = parse_command("env FOO=bar cargo test").unwrap();
+        assert_eq!(find_cmd(&cmds, "env").inner, InnerExtraction::Evaluated);
+    }
+
+    #[test]
+    fn chained_wrappers_inner_types() {
+        let cmds = parse_command("env FOO=bar sudo cargo test").unwrap();
+        assert_eq!(find_cmd(&cmds, "env").inner, InnerExtraction::Evaluated);
+        assert_eq!(find_cmd(&cmds, "sudo").inner, InnerExtraction::Transparent);
     }
 
     // --- Parse failures ---
