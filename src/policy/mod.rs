@@ -10,6 +10,7 @@
 //! 4. Most restrictive result across all commands in tree wins
 
 pub mod approval;
+pub mod args;
 pub mod parse;
 mod config;
 mod rules;
