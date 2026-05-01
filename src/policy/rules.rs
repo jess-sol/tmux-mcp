@@ -238,19 +238,6 @@ pub(super) fn eval_expr(expr: &cel::Expr, ctx: &HashMap<String, TriVal>) -> TriV
         }
         cel::Expr::Call(call) => eval_call(call, ctx),
         cel::Expr::Comprehension(comp) => eval_comprehension(comp, ctx),
-        cel::Expr::Map(map) => {
-            let mut result = HashMap::new();
-            for entry in &map.entries {
-                if let cel::EntryExpr::MapEntry(me) = &entry.expr {
-                    let key = eval_expr(&me.key.expr, ctx);
-                    let val = eval_expr(&me.value.expr, ctx);
-                    if let TriVal::String(k) = key {
-                        result.insert(k, val);
-                    }
-                }
-            }
-            TriVal::Map(result)
-        }
         _ => TriVal::Unknown,
     }
 }
@@ -290,8 +277,6 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "getopt" => eval_getopt(call, ctx),
         "or" => eval_or_func(&call.args, ctx),
         "rsplit" => eval_rsplit(&call.args, ctx),
-        "after" => eval_after(&call.args, ctx),
-        "dropwhile" => eval_dropwhile(call, ctx),
         "_[_]" => eval_index(&call.args, ctx),
         _ => {
             // Member calls: obj.method(args)
@@ -706,105 +691,44 @@ fn eval_rsplit(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal 
     }
 }
 
-/// `after(list, element)` — everything after first occurrence
-fn eval_after(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
-    if args.len() != 2 { return TriVal::Unknown; }
-    let list = eval_expr(&args[0].expr, ctx);
-    let element = eval_expr(&args[1].expr, ctx);
-    match (&list, &element) {
-        (TriVal::List { elements, .. }, TriVal::String(target)) => {
-            for (i, el) in elements.iter().enumerate() {
-                if let TriVal::String(s) = el {
-                    if s == target {
-                        return TriVal::List {
-                            elements: elements[i + 1..].to_vec(),
-                            exhaustive: true,
-                        };
-                    }
-                }
-            }
-            TriVal::Null
-        }
-        (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
-        _ => TriVal::Null,
-    }
-}
-
-/// `dropwhile(list, var, predicate)` — skip leading matches
-fn eval_dropwhile(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
-    if call.args.len() != 3 { return TriVal::Unknown; }
-    let list = eval_expr(&call.args[0].expr, ctx);
-    let var_name = match &call.args[1].expr {
-        cel::Expr::Ident(name) => name.clone(),
-        _ => return TriVal::Unknown,
-    };
-    let elements = match &list {
-        TriVal::List { elements, .. } => elements,
-        TriVal::Unknown => return TriVal::Unknown,
-        _ => return TriVal::Null,
-    };
-    let mut skip_count = 0;
-    for el in elements {
-        let mut inner_ctx = ctx.clone();
-        inner_ctx.insert(var_name.clone(), el.clone());
-        let result = eval_expr(&call.args[2].expr, &inner_ctx);
-        if result.is_truthy() == TriBool::True {
-            skip_count += 1;
-        } else {
-            break;
-        }
-    }
-    TriVal::List { elements: elements[skip_count..].to_vec(), exhaustive: true }
-}
-
-/// `getopt(args, valued)` or `getopt(args, valued, terminated)` — CEL function (escape hatch)
+/// `getopt(args, optstring)` or `getopt(args, [valued_list])` — CEL function escape hatch.
+/// Accepts optstring ("u:C:") or legacy valued list (["-u", "-C"]) as second arg.
 fn eval_getopt(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
-    if call.args.len() < 2 || call.args.len() > 3 { return TriVal::Unknown; }
+    if call.args.len() != 2 { return TriVal::Unknown; }
     let args_val = eval_expr(&call.args[0].expr, ctx);
-    let valued_val = eval_expr(&call.args[1].expr, ctx);
-    let terminated_val = if call.args.len() == 3 {
-        Some(eval_expr(&call.args[2].expr, ctx))
-    } else {
-        None
-    };
+    let spec_val = eval_expr(&call.args[1].expr, ctx);
 
     let (args, input_exhaustive) = match &args_val {
         TriVal::List { elements, exhaustive } => (elements.as_slice(), *exhaustive),
         TriVal::Unknown => return TriVal::Unknown,
         _ => return TriVal::Null,
     };
-    let valued: Vec<String> = match &valued_val {
-        TriVal::List { elements, .. } => elements.iter().filter_map(|e| {
-            if let TriVal::String(s) = e { Some(s.clone()) } else { None }
-        }).collect(),
-        _ => Vec::new(),
-    };
-    let terminated: HashMap<String, Vec<String>> = match &terminated_val {
-        Some(TriVal::Map(map)) => {
-            map.iter().filter_map(|(k, v)| {
-                if let TriVal::List { elements, .. } = v {
-                    let terms: Vec<String> = elements.iter().filter_map(|e| {
-                        if let TriVal::String(s) = e { Some(s.clone()) } else { None }
-                    }).collect();
-                    Some((k.clone(), terms))
+
+    let spec = match &spec_val {
+        // New: optstring format "u:C:"
+        TriVal::String(optstring) => {
+            super::args::ArgSpec::from_optstring(super::args::ArgStyle::Posix, optstring)
+        }
+        // Legacy: valued list ["-u", "-C"] — treat all as valued
+        TriVal::List { elements, .. } => {
+            let options: Vec<super::args::OptDef> = elements.iter().filter_map(|e| {
+                if let TriVal::String(s) = e {
+                    let name = s.trim_start_matches('-').to_string();
+                    Some(super::args::OptDef { name, has_arg: true })
                 } else {
                     None
                 }
-            }).collect()
+            }).collect();
+            super::args::ArgSpec { style: super::args::ArgStyle::Posix, options }
         }
-        _ => HashMap::new(),
+        _ => return TriVal::Unknown,
     };
 
-    let spec = super::args::ArgSpec {
-        style: super::args::ArgStyle::Posix, // CEL getopt() function defaults to POSIX
-        valued,
-        terminated,
-    };
     let parsed = super::args::parse_args(args, &spec, input_exhaustive);
     super::parse::parsed_args_to_trival(&parsed)
 }
 
-/// Member-call methods on getopt result: .value(flag), .values(flag), .positional(n), .operands_from(n)
+/// Member-call methods on getopt result: .value(flag), .positional(n), .operands_from(n)
 fn eval_getopt_method(
     getopt_map: &HashMap<String, TriVal>,
     method: &str,
@@ -819,25 +743,11 @@ fn eval_getopt_method(
             if args.len() != 1 { return Some(TriVal::Unknown); }
             let flag = eval_expr(&args[0].expr, ctx);
             if let TriVal::String(flag_name) = &flag {
+                let name = flag_name.trim_start_matches('-');
                 if let Some(TriVal::Map(flags)) = getopt_map.get("flags") {
-                    Some(flags.get(flag_name).cloned().unwrap_or(absent))
+                    Some(flags.get(name).cloned().unwrap_or(absent))
                 } else {
                     Some(absent)
-                }
-            } else {
-                Some(TriVal::Unknown)
-            }
-        }
-        "values" => {
-            if args.len() != 1 { return Some(TriVal::Unknown); }
-            let flag = eval_expr(&args[0].expr, ctx);
-            if let TriVal::String(flag_name) = &flag {
-                if let Some(TriVal::Map(tmap)) = getopt_map.get("terminated") {
-                    Some(tmap.get(flag_name.as_str()).cloned().unwrap_or(TriVal::List {
-                        elements: Vec::new(), exhaustive,
-                    }))
-                } else {
-                    Some(TriVal::List { elements: Vec::new(), exhaustive })
                 }
             } else {
                 Some(TriVal::Unknown)

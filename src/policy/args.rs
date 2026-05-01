@@ -23,34 +23,83 @@ pub enum ArgStyle {
     Gnu,
 }
 
+/// A known option definition, matching C's struct option.
+/// Short (1 char name) → `-x`, groupable, attachable value.
+/// Long (2+ char name) → `--flag`, `--flag=val`.
+#[derive(Debug, Clone)]
+pub struct OptDef {
+    pub name: String,
+    pub has_arg: bool,
+}
+
 /// Specification for how to parse a command's arguments.
 #[derive(Debug, Clone)]
 pub struct ArgSpec {
     pub style: ArgStyle,
-    /// Flags that consume the next argument as their value.
-    /// Supports short (`-u`), long (`--user`), and non-POSIX multi-char (`-name`).
-    pub valued: Vec<String>,
-    /// Flags that consume arguments until a sentinel token.
-    /// E.g., find's `-exec` consumes until `;` or `+`.
-    pub terminated: HashMap<String, Vec<String>>,
+    pub options: Vec<OptDef>,
 }
 
 impl ArgSpec {
-    pub fn posix(valued: &[&str]) -> Self {
-        Self {
-            style: ArgStyle::Posix,
-            valued: valued.iter().map(|s| s.to_string()).collect(),
-            terminated: HashMap::new(),
-        }
+    /// Build from a C-style optstring: "isC:D:u:" → i, s standalone; C, D, u take values.
+    pub fn from_optstring(style: ArgStyle, optstring: &str) -> Self {
+        Self { style, options: parse_optstring(optstring) }
     }
 
-    pub fn gnu(valued: &[&str]) -> Self {
-        Self {
-            style: ArgStyle::Gnu,
-            valued: valued.iter().map(|s| s.to_string()).collect(),
-            terminated: HashMap::new(),
-        }
+    /// Build with short optstring + long options: long = ["signal:", "kill-after:"]
+    pub fn from_optstring_long(style: ArgStyle, optstring: &str, long: &[&str]) -> Self {
+        let mut options = parse_optstring(optstring);
+        options.extend(parse_long_opts(long));
+        Self { style, options }
     }
+
+    /// Shorthand: POSIX mode from optstring. `ArgSpec::posix("u:C:")`
+    pub fn posix(optstring: &str) -> Self {
+        Self::from_optstring(ArgStyle::Posix, optstring)
+    }
+
+    /// Shorthand: GNU mode from optstring. `ArgSpec::gnu("n:c:")`
+    pub fn gnu(optstring: &str) -> Self {
+        Self::from_optstring(ArgStyle::Gnu, optstring)
+    }
+
+    /// Check if a flag name is a known option (short or long).
+    fn find_opt(&self, name: &str) -> Option<&OptDef> {
+        self.options.iter().find(|o| o.name == name)
+    }
+
+    /// Is this flag name known as a valued option?
+    fn is_valued(&self, name: &str) -> bool {
+        self.find_opt(name).is_some_and(|o| o.has_arg)
+    }
+
+    /// Is this flag name known at all?
+    fn is_known(&self, name: &str) -> bool {
+        self.find_opt(name).is_some()
+    }
+}
+
+/// Parse C optstring: "isC:D:u:" → OptDefs
+fn parse_optstring(s: &str) -> Vec<OptDef> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut opts = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let has_arg = i + 1 < chars.len() && chars[i + 1] == ':';
+        opts.push(OptDef { name: chars[i].to_string(), has_arg });
+        i += if has_arg { 2 } else { 1 };
+    }
+    opts
+}
+
+/// Parse long options: ["signal:", "kill-after:"] → OptDefs
+fn parse_long_opts(list: &[&str]) -> Vec<OptDef> {
+    list.iter().map(|s| {
+        if let Some(name) = s.strip_suffix(':') {
+            OptDef { name: name.to_string(), has_arg: true }
+        } else {
+            OptDef { name: s.to_string(), has_arg: false }
+        }
+    }).collect()
 }
 
 /// Result of parsing arguments.
@@ -60,8 +109,6 @@ pub struct ParsedArgs {
     pub operands: Vec<TriVal>,
     /// Flag values: flag name → value. Only flags in the valued list appear here.
     pub flags: HashMap<String, TriVal>,
-    /// Terminated flag blocks: flag name → list of blocks (each block is a list of args).
-    pub terminated_blocks: HashMap<String, Vec<Vec<TriVal>>>,
     /// False if unknown flags or other uncertainty degraded confidence in the parse.
     /// When false, absent flags/positionals should be treated as Unknown, not Null.
     pub exhaustive: bool,
@@ -69,8 +116,10 @@ pub struct ParsedArgs {
 
 impl ParsedArgs {
     /// Value of a flag, or Null (exhaustive) / Unknown (non-exhaustive) if absent.
+    /// Accepts either bare name ("u") or dashed form ("-u", "--signal").
     pub fn value(&self, flag: &str) -> TriVal {
-        self.flags.get(flag).cloned().unwrap_or_else(|| self.absent())
+        let name = flag.trim_start_matches('-');
+        self.flags.get(name).cloned().unwrap_or_else(|| self.absent())
     }
 
     /// Nth operand (0-indexed), or Null/Unknown if out of bounds.
@@ -87,11 +136,6 @@ impl ParsedArgs {
         }
     }
 
-    /// All blocks for a terminated flag.
-    pub fn values(&self, flag: &str) -> &[Vec<TriVal>] {
-        self.terminated_blocks.get(flag).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-
     fn absent(&self) -> TriVal {
         if self.exhaustive { TriVal::Null } else { TriVal::Unknown }
     }
@@ -102,10 +146,9 @@ pub fn parse_args(args: &[TriVal], spec: &ArgSpec, exhaustive: bool) -> ParsedAr
     let mut result = ParsedArgs {
         operands: Vec::new(),
         flags: HashMap::new(),
-        terminated_blocks: HashMap::new(),
         exhaustive,
     };
-    let mut past_options = false; // POSIX: set on first non-option
+    let mut past_options = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -119,24 +162,6 @@ pub fn parse_args(args: &[TriVal], spec: &ArgSpec, exhaustive: bool) -> ParsedAr
             }
             _ => { i += 1; continue; }
         };
-
-        // Terminated flags: recognized anywhere (both modes).
-        if let Some(terminators) = spec.terminated.get(&arg_str) {
-            i += 1;
-            let mut block = Vec::new();
-            while i < args.len() {
-                if let TriVal::String(s) = &args[i] {
-                    if terminators.contains(s) {
-                        i += 1;
-                        break;
-                    }
-                }
-                block.push(args[i].clone());
-                i += 1;
-            }
-            result.terminated_blocks.entry(arg_str).or_default().push(block);
-            continue;
-        }
 
         // Option processing gate:
         //   POSIX: only before first non-option (past_options)
@@ -159,17 +184,27 @@ pub fn parse_args(args: &[TriVal], spec: &ArgSpec, exhaustive: bool) -> ParsedAr
 
             // Long option: --flag or --flag=value
             if arg_str.starts_with("--") {
+                let opt_name = if let Some(eq_pos) = arg_str.find('=') {
+                    &arg_str[2..eq_pos]
+                } else {
+                    &arg_str[2..]
+                };
+
                 if let Some(eq_pos) = arg_str.find('=') {
-                    let flag_part = &arg_str[..eq_pos];
-                    if spec.valued.iter().any(|f| f == flag_part) {
+                    // --flag=value form
+                    if spec.is_valued(opt_name) {
                         let val_str = &arg_str[eq_pos + 1..];
-                        result.flags.entry(flag_part.to_string()).or_insert_with(|| str_to_trival(val_str));
+                        result.flags.entry(opt_name.to_string()).or_insert_with(|| str_to_trival(val_str));
                     }
                     // --unknown=val is self-contained; doesn't affect exhaustiveness
                     i += 1;
-                } else if spec.valued.iter().any(|f| f == &arg_str) {
-                    result.flags.entry(arg_str).or_insert_with(|| consume_value(args, i + 1));
+                } else if spec.is_valued(opt_name) {
+                    // --flag value (separate)
+                    result.flags.entry(opt_name.to_string()).or_insert_with(|| consume_value(args, i + 1));
                     i += 2;
+                } else if spec.is_known(opt_name) {
+                    // Known standalone long flag
+                    i += 1;
                 } else {
                     // Unknown long flag without = — might take a value
                     result.exhaustive = false;
@@ -178,9 +213,10 @@ pub fn parse_args(args: &[TriVal], spec: &ArgSpec, exhaustive: bool) -> ParsedAr
                 continue;
             }
 
-            // Short option: first check full string as valued (find's -name)
-            if spec.valued.iter().any(|f| f == &arg_str) {
-                result.flags.entry(arg_str).or_insert_with(|| consume_value(args, i + 1));
+            // Short option: first check full string as multi-char valued (find's -name)
+            let full_name = &arg_str[1..];
+            if full_name.len() > 1 && spec.is_valued(full_name) {
+                result.flags.entry(full_name.to_string()).or_insert_with(|| consume_value(args, i + 1));
                 i += 2;
                 continue;
             }
@@ -189,25 +225,26 @@ pub fn parse_args(args: &[TriVal], spec: &ArgSpec, exhaustive: bool) -> ParsedAr
             let chars: Vec<char> = arg_str[1..].chars().collect();
             let mut ci = 0;
             let mut consumed_next = false;
-            let mut found_valued = false;
+            let mut all_known = true;
             while ci < chars.len() {
-                let flag_name = format!("-{}", chars[ci]);
-                if spec.valued.iter().any(|f| f == &flag_name) {
-                    found_valued = true;
+                let ch = chars[ci].to_string();
+                if spec.is_valued(&ch) {
                     if ci + 1 < chars.len() {
                         // Attached: rest of string is value
                         let val_str: String = chars[ci + 1..].iter().collect();
-                        result.flags.entry(flag_name).or_insert_with(|| str_to_trival(&val_str));
+                        result.flags.entry(ch).or_insert_with(|| str_to_trival(&val_str));
                     } else {
                         // Separate: next arg is value
-                        result.flags.entry(flag_name).or_insert_with(|| consume_value(args, i + 1));
+                        result.flags.entry(ch).or_insert_with(|| consume_value(args, i + 1));
                         consumed_next = true;
                     }
                     break;
+                } else if !spec.is_known(&ch) {
+                    all_known = false;
                 }
                 ci += 1;
             }
-            if !found_valued {
+            if !all_known {
                 result.exhaustive = false;
             }
             i += if consumed_next { 2 } else { 1 };
@@ -262,13 +299,6 @@ mod tests {
         r.value(name)
     }
 
-    fn terminated(r: &ParsedArgs, name: &str) -> Vec<Vec<String>> {
-        r.values(name).iter().map(|block| {
-            block.iter().filter_map(|e| {
-                if let TriVal::String(s) = e { Some(s.clone()) } else { None }
-            }).collect()
-        }).collect()
-    }
 
     // ========================================================================
     // POSIX mode
@@ -276,20 +306,20 @@ mod tests {
 
     #[test]
     fn posix_empty_args() {
-        let r = parse_args(&[], &ArgSpec::posix(&[]), true);
+        let r = parse_args(&[], &ArgSpec::posix(""), true);
         assert!(operands(&r).is_empty());
         assert!(r.exhaustive);
     }
 
     #[test]
     fn posix_all_operands() {
-        let r = parse_args(&tv_args(&["ls", "-la", "/"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["ls", "-la", "/"]), &ArgSpec::posix(""), true);
         assert_eq!(operands(&r), vec!["ls", "-la", "/"]);
     }
 
     #[test]
     fn posix_valued_flag_separate() {
-        let r = parse_args(&tv_args(&["-n", "10", "cmd"]), &ArgSpec::posix(&["-n"]), true);
+        let r = parse_args(&tv_args(&["-n", "10", "cmd"]), &ArgSpec::posix("n:"), true);
         assert_eq!(flag(&r, "-n"), s("10"));
         assert_eq!(operands(&r), vec!["cmd"]);
     }
@@ -297,7 +327,7 @@ mod tests {
     #[test]
     fn posix_valued_flag_attached() {
         // -fvalue: -f takes "value" (attached, POSIX Guideline 7 form 2)
-        let r = parse_args(&tv_args(&["-fvalue", "cmd"]), &ArgSpec::posix(&["-f"]), true);
+        let r = parse_args(&tv_args(&["-fvalue", "cmd"]), &ArgSpec::posix("f:"), true);
         assert_eq!(flag(&r, "-f"), s("value"));
         assert_eq!(operands(&r), vec!["cmd"]);
     }
@@ -305,7 +335,7 @@ mod tests {
     #[test]
     fn posix_grouped_boolean_flags() {
         // -abc: three standalone flags, no valued
-        let r = parse_args(&tv_args(&["-abc", "file"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["-abc", "file"]), &ArgSpec::posix(""), true);
         assert_eq!(operands(&r), vec!["file"]);
     }
 
@@ -314,7 +344,7 @@ mod tests {
         // -au root: -a standalone, -u valued (last char, separate value)
         let r = parse_args(
             &tv_args(&["-au", "root", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -326,7 +356,7 @@ mod tests {
         // -uroot: -u with attached value "root"
         let r = parse_args(
             &tv_args(&["-uroot", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -338,7 +368,7 @@ mod tests {
         // -iuroot: -i standalone, -u valued with attached "root"
         let r = parse_args(
             &tv_args(&["-iuroot", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -348,13 +378,13 @@ mod tests {
     #[test]
     fn posix_bare_dash_is_operand() {
         // "-" is not an option per POSIX spec
-        let r = parse_args(&tv_args(&["-v", "-", "file"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["-v", "-", "file"]), &ArgSpec::posix(""), true);
         assert_eq!(operands(&r), vec!["-", "file"]);
     }
 
     #[test]
     fn posix_bare_dash_alone() {
-        let r = parse_args(&tv_args(&["-"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["-"]), &ArgSpec::posix(""), true);
         assert_eq!(operands(&r), vec!["-"]);
     }
 
@@ -362,7 +392,7 @@ mod tests {
     fn posix_double_dash_ends_options() {
         let r = parse_args(
             &tv_args(&["-n", "5", "--", "-rf", "file"]),
-            &ArgSpec::posix(&["-n"]),
+            &ArgSpec::posix("n:"),
             true,
         );
         assert_eq!(flag(&r, "-n"), s("5"));
@@ -371,7 +401,7 @@ mod tests {
 
     #[test]
     fn posix_double_dash_only() {
-        let r = parse_args(&tv_args(&["--"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["--"]), &ArgSpec::posix(""), true);
         assert!(operands(&r).is_empty());
     }
 
@@ -379,7 +409,7 @@ mod tests {
     fn posix_double_dash_before_any_flags() {
         let r = parse_args(
             &tv_args(&["--", "-n", "10", "cmd"]),
-            &ArgSpec::posix(&["-n"]),
+            &ArgSpec::posix("n:"),
             true,
         );
         assert!(matches!(flag(&r, "-n"), TriVal::Null));
@@ -391,7 +421,7 @@ mod tests {
         // After "rm", "-rf" is an operand, not a flag
         let r = parse_args(
             &tv_args(&["-u", "root", "rm", "-rf", "/"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -402,7 +432,7 @@ mod tests {
     fn posix_flags_after_operand_are_operands() {
         let r = parse_args(
             &tv_args(&["cmd", "-n", "10"]),
-            &ArgSpec::posix(&["-n"]),
+            &ArgSpec::posix("n:"),
             true,
         );
         assert_eq!(operands(&r), vec!["cmd", "-n", "10"]);
@@ -415,7 +445,7 @@ mod tests {
         // -- after an operand is just another operand.
         let r = parse_args(
             &tv_args(&["cmd", "--", "-rf"]),
-            &ArgSpec::posix(&[]),
+            &ArgSpec::posix(""),
             true,
         );
         assert_eq!(operands(&r), vec!["cmd", "--", "-rf"]);
@@ -423,7 +453,7 @@ mod tests {
 
     #[test]
     fn posix_valued_flag_missing_value() {
-        let r = parse_args(&tv_args(&["-u"]), &ArgSpec::posix(&["-u"]), true);
+        let r = parse_args(&tv_args(&["-u"]), &ArgSpec::posix("u:"), true);
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
     }
 
@@ -432,7 +462,7 @@ mod tests {
         // -u takes next arg even if it starts with -
         let r = parse_args(
             &tv_args(&["-u", "-1", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("-1"));
@@ -443,7 +473,7 @@ mod tests {
     fn posix_long_flag_separate() {
         let r = parse_args(
             &tv_args(&["--signal", "KILL", "cmd"]),
-            &ArgSpec::posix(&["--signal"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Posix, "", &["signal:"]),
             true,
         );
         assert_eq!(flag(&r, "--signal"), s("KILL"));
@@ -454,7 +484,7 @@ mod tests {
     fn posix_long_flag_equals() {
         let r = parse_args(
             &tv_args(&["--signal=KILL", "cmd"]),
-            &ArgSpec::posix(&["--signal"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Posix, "", &["signal:"]),
             true,
         );
         assert_eq!(flag(&r, "--signal"), s("KILL"));
@@ -463,13 +493,13 @@ mod tests {
 
     #[test]
     fn posix_multi_char_single_dash() {
-        // find-style: -name is a valued flag with single dash
+        // find-style: -name is a multi-char valued option (uses long option list)
         let r = parse_args(
             &tv_args(&["-name", "*.rs", "."]),
-            &ArgSpec::posix(&["-name"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Posix, "", &["name:"]),
             true,
         );
-        assert_eq!(flag(&r, "-name"), s("*.rs"));
+        assert_eq!(flag(&r, "name"), s("*.rs"));
         assert_eq!(operands(&r), vec!["."]);
     }
 
@@ -477,7 +507,7 @@ mod tests {
     fn posix_multiple_valued_flags() {
         let r = parse_args(
             &tv_args(&["-u", "root", "-C", "3", "rm", "-rf"]),
-            &ArgSpec::posix(&["-u", "-C"]),
+            &ArgSpec::posix("u:C:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -487,7 +517,7 @@ mod tests {
 
     #[test]
     fn posix_absent_flag_is_null() {
-        let r = parse_args(&tv_args(&["cmd"]), &ArgSpec::posix(&["-u"]), true);
+        let r = parse_args(&tv_args(&["cmd"]), &ArgSpec::posix("u:"), true);
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
     }
 
@@ -503,7 +533,7 @@ mod tests {
     fn posix_spec_separate() {
         let r = parse_args(
             &tv_args(&["-a", "-o", "arg", "path1", "path2"]),
-            &ArgSpec::posix(&["-o"]),
+            &ArgSpec::posix("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -514,7 +544,7 @@ mod tests {
     fn posix_spec_grouped_separate() {
         let r = parse_args(
             &tv_args(&["-ao", "arg", "path1", "path2"]),
-            &ArgSpec::posix(&["-o"]),
+            &ArgSpec::posix("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -525,7 +555,7 @@ mod tests {
     fn posix_spec_reordered() {
         let r = parse_args(
             &tv_args(&["-o", "arg", "-a", "path1", "path2"]),
-            &ArgSpec::posix(&["-o"]),
+            &ArgSpec::posix("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -536,7 +566,7 @@ mod tests {
     fn posix_spec_double_dash() {
         let r = parse_args(
             &tv_args(&["-a", "-o", "arg", "--", "path1", "path2"]),
-            &ArgSpec::posix(&["-o"]),
+            &ArgSpec::posix("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -547,7 +577,7 @@ mod tests {
     fn posix_spec_attached() {
         let r = parse_args(
             &tv_args(&["-a", "-oarg", "path1", "path2"]),
-            &ArgSpec::posix(&["-o"]),
+            &ArgSpec::posix("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -558,7 +588,7 @@ mod tests {
     fn posix_spec_grouped_attached() {
         let r = parse_args(
             &tv_args(&["-aoarg", "path1", "path2"]),
-            &ArgSpec::posix(&["-o"]),
+            &ArgSpec::posix("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -574,7 +604,7 @@ mod tests {
         // GNU: flags recognized anywhere before --
         let r = parse_args(
             &tv_args(&["pod", "-c", "container", "extra"]),
-            &ArgSpec::gnu(&["-c"]),
+            &ArgSpec::gnu("c:"),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("container"));
@@ -585,7 +615,7 @@ mod tests {
     fn gnu_double_dash_stops() {
         let r = parse_args(
             &tv_args(&["-c", "container", "pod", "--", "ls", "-la"]),
-            &ArgSpec::gnu(&["-c"]),
+            &ArgSpec::gnu("c:"),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("container"));
@@ -597,7 +627,7 @@ mod tests {
         // -a op -b op2 -c: all three flags processed
         let r = parse_args(
             &tv_args(&["-a", "op", "-b", "op2", "-c"]),
-            &ArgSpec::gnu(&[]),
+            &ArgSpec::gnu(""),
             true,
         );
         assert_eq!(operands(&r), vec!["op", "op2"]);
@@ -607,7 +637,7 @@ mod tests {
     fn gnu_valued_after_operand() {
         let r = parse_args(
             &tv_args(&["op1", "-n", "5", "op2"]),
-            &ArgSpec::gnu(&["-n"]),
+            &ArgSpec::gnu("n:"),
             true,
         );
         assert_eq!(flag(&r, "-n"), s("5"));
@@ -619,7 +649,7 @@ mod tests {
         // Grouping works the same in GNU mode
         let r = parse_args(
             &tv_args(&["-au", "root", "cmd"]),
-            &ArgSpec::gnu(&["-u"]),
+            &ArgSpec::gnu("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -630,7 +660,7 @@ mod tests {
     fn gnu_long_flag_equals() {
         let r = parse_args(
             &tv_args(&["op", "--signal=KILL", "op2"]),
-            &ArgSpec::gnu(&["--signal"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "", &["signal:"]),
             true,
         );
         assert_eq!(flag(&r, "--signal"), s("KILL"));
@@ -642,7 +672,7 @@ mod tests {
         // kubectl exec pod -c container -- ls -la
         let r = parse_args(
             &tv_args(&["pod", "-c", "container", "--", "ls", "-la"]),
-            &ArgSpec::gnu(&["-n", "-c", "--namespace", "--container"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "n:c:", &["namespace:", "container:"]),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("container"));
@@ -651,7 +681,7 @@ mod tests {
 
     #[test]
     fn gnu_bare_dash_is_operand() {
-        let r = parse_args(&tv_args(&["-v", "-", "file"]), &ArgSpec::gnu(&[]), true);
+        let r = parse_args(&tv_args(&["-v", "-", "file"]), &ArgSpec::gnu(""), true);
         assert_eq!(operands(&r), vec!["-", "file"]);
     }
 
@@ -660,7 +690,7 @@ mod tests {
         // GNU mode: -- is always recognized as separator, even after operands
         let r = parse_args(
             &tv_args(&["op", "--", "-a"]),
-            &ArgSpec::gnu(&[]),
+            &ArgSpec::gnu(""),
             true,
         );
         assert_eq!(operands(&r), vec!["op", "-a"]);
@@ -670,7 +700,7 @@ mod tests {
     fn gnu_double_dash_between_flags() {
         let r = parse_args(
             &tv_args(&["-a", "--", "-b"]),
-            &ArgSpec::gnu(&[]),
+            &ArgSpec::gnu(""),
             true,
         );
         // -a is a flag, -- ends options, -b is an operand
@@ -679,7 +709,7 @@ mod tests {
 
     #[test]
     fn gnu_missing_value() {
-        let r = parse_args(&tv_args(&["-u"]), &ArgSpec::gnu(&["-u"]), true);
+        let r = parse_args(&tv_args(&["-u"]), &ArgSpec::gnu("u:"), true);
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
     }
 
@@ -687,7 +717,7 @@ mod tests {
     fn gnu_missing_value_after_operand() {
         let r = parse_args(
             &tv_args(&["op", "-u"]),
-            &ArgSpec::gnu(&["-u"]),
+            &ArgSpec::gnu("u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
@@ -697,7 +727,7 @@ mod tests {
     fn gnu_attached_value() {
         let r = parse_args(
             &tv_args(&["op", "-fvalue", "op2"]),
-            &ArgSpec::gnu(&["-f"]),
+            &ArgSpec::gnu("f:"),
             true,
         );
         assert_eq!(flag(&r, "-f"), s("value"));
@@ -708,7 +738,7 @@ mod tests {
     fn gnu_grouped_attached() {
         let r = parse_args(
             &tv_args(&["op", "-aoarg", "op2"]),
-            &ArgSpec::gnu(&["-o"]),
+            &ArgSpec::gnu("o:"),
             true,
         );
         assert_eq!(flag(&r, "-o"), s("arg"));
@@ -719,10 +749,10 @@ mod tests {
     fn gnu_multi_char_single_dash() {
         let r = parse_args(
             &tv_args(&["op", "-name", "*.rs", "op2"]),
-            &ArgSpec::gnu(&["-name"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "", &["name:"]),
             true,
         );
-        assert_eq!(flag(&r, "-name"), s("*.rs"));
+        assert_eq!(flag(&r, "name"), s("*.rs"));
         assert_eq!(operands(&r), vec!["op", "op2"]);
     }
 
@@ -730,7 +760,7 @@ mod tests {
     fn gnu_multiple_valued_flags() {
         let r = parse_args(
             &tv_args(&["op1", "-u", "root", "op2", "-C", "3"]),
-            &ArgSpec::gnu(&["-u", "-C"]),
+            &ArgSpec::gnu("u:C:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -740,7 +770,7 @@ mod tests {
 
     #[test]
     fn gnu_absent_flag_is_null() {
-        let r = parse_args(&tv_args(&["op"]), &ArgSpec::gnu(&["-u"]), true);
+        let r = parse_args(&tv_args(&["op"]), &ArgSpec::gnu("u:"), true);
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
     }
 
@@ -748,7 +778,7 @@ mod tests {
     fn gnu_long_flag_separate_after_operand() {
         let r = parse_args(
             &tv_args(&["op", "--signal", "KILL", "op2"]),
-            &ArgSpec::gnu(&["--signal"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "", &["signal:"]),
             true,
         );
         assert_eq!(flag(&r, "--signal"), s("KILL"));
@@ -759,7 +789,7 @@ mod tests {
     fn gnu_long_flag_equals_after_operand() {
         let r = parse_args(
             &tv_args(&["op", "--signal=KILL", "op2"]),
-            &ArgSpec::gnu(&["--signal"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "", &["signal:"]),
             true,
         );
         assert_eq!(flag(&r, "--signal"), s("KILL"));
@@ -772,7 +802,7 @@ mod tests {
     fn gnu_exhaustive_all_known() {
         let r = parse_args(
             &tv_args(&["op", "-u", "root"]),
-            &ArgSpec::gnu(&["-u"]),
+            &ArgSpec::gnu("u:"),
             true,
         );
         assert!(r.exhaustive);
@@ -782,7 +812,7 @@ mod tests {
     fn gnu_exhaustive_unknown_flag_after_operand() {
         let r = parse_args(
             &tv_args(&["op", "-x", "op2"]),
-            &ArgSpec::gnu(&[]),
+            &ArgSpec::gnu(""),
             true,
         );
         assert!(!r.exhaustive);
@@ -792,7 +822,7 @@ mod tests {
     fn gnu_exhaustive_unknown_long_flag() {
         let r = parse_args(
             &tv_args(&["op", "--unknown", "op2"]),
-            &ArgSpec::gnu(&[]),
+            &ArgSpec::gnu(""),
             true,
         );
         assert!(!r.exhaustive);
@@ -802,7 +832,7 @@ mod tests {
     fn gnu_exhaustive_unknown_long_with_equals() {
         let r = parse_args(
             &tv_args(&["op", "--unknown=val", "op2"]),
-            &ArgSpec::gnu(&[]),
+            &ArgSpec::gnu(""),
             true,
         );
         assert!(r.exhaustive);
@@ -812,7 +842,7 @@ mod tests {
     fn gnu_exhaustive_absent_flag_unknown_when_non_exhaustive() {
         let r = parse_args(
             &tv_args(&["op", "-x"]),
-            &ArgSpec::gnu(&["-u"]),
+            &ArgSpec::gnu("u:"),
             true,
         );
         assert!(!r.exhaustive);
@@ -825,7 +855,7 @@ mod tests {
     fn gnu_expansion_flag_value() {
         let r = parse_args(
             &tv_args(&["op", "-u", "$(whoami)"]),
-            &ArgSpec::gnu(&["-u"]),
+            &ArgSpec::gnu("u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
@@ -835,7 +865,7 @@ mod tests {
     fn gnu_expansion_attached_value() {
         let r = parse_args(
             &tv_args(&["op", "-u$(id)"]),
-            &ArgSpec::gnu(&["-u"]),
+            &ArgSpec::gnu("u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
@@ -845,40 +875,12 @@ mod tests {
     fn gnu_expansion_long_equals() {
         let r = parse_args(
             &tv_args(&["op", "--user=$(id)"]),
-            &ArgSpec::gnu(&["--user"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "", &["user:"]),
             true,
         );
         assert!(matches!(flag(&r, "--user"), TriVal::Unknown));
     }
 
-    // GNU terminated flags
-
-    #[test]
-    fn gnu_terminated_after_operand() {
-        let mut spec = ArgSpec::gnu(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&["op", "-exec", "rm", "{}", ";"]),
-            &spec,
-            true,
-        );
-        assert_eq!(operands(&r), vec!["op"]);
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["rm", "{}"]]);
-    }
-
-    #[test]
-    fn gnu_terminated_mixed_with_flags() {
-        let mut spec = ArgSpec::gnu(&["-n"]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&["op", "-n", "5", "-exec", "ls", "{}", ";", "op2"]),
-            &spec,
-            true,
-        );
-        assert_eq!(flag(&r, "-n"), s("5"));
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["ls", "{}"]]);
-        assert_eq!(operands(&r), vec!["op", "op2"]);
-    }
 
     // GNU docker exec pattern (more realistic)
 
@@ -888,105 +890,13 @@ mod tests {
         // -i and -t are standalone flags (unknown but skipped), -u is valued
         let r = parse_args(
             &tv_args(&["-it", "mycontainer", "-u", "root", "bash"]),
-            &ArgSpec::gnu(&["-u", "--user", "-e", "--env", "-w", "--workdir"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "u:e:w:", &["user:", "env:", "workdir:"]),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
         assert_eq!(operands(&r), vec!["mycontainer", "bash"]);
         assert!(!r.exhaustive); // -i and -t are unknown flags
     }
-
-    // ========================================================================
-    // Terminated flags (both modes)
-    // ========================================================================
-
-    #[test]
-    fn terminated_single_block() {
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into(), "+".into()]);
-        let r = parse_args(
-            &tv_args(&[".", "-exec", "grep", "foo", "{}", ";"]),
-            &spec,
-            true,
-        );
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["grep", "foo", "{}"]]);
-        assert_eq!(operands(&r), vec!["."]);
-    }
-
-    #[test]
-    fn terminated_multiple_blocks() {
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&[".", "-exec", "grep", "{}", ";", "-exec", "rm", "{}", ";"]),
-            &spec,
-            true,
-        );
-        let blocks = terminated(&r, "-exec");
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0], vec!["grep", "{}"]);
-        assert_eq!(blocks[1], vec!["rm", "{}"]);
-    }
-
-    #[test]
-    fn terminated_after_operands() {
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&["/var", "/tmp", "-exec", "ls", "{}", ";"]),
-            &spec,
-            true,
-        );
-        assert_eq!(operands(&r), vec!["/var", "/tmp"]);
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["ls", "{}"]]);
-    }
-
-    #[test]
-    fn terminated_unterminated() {
-        // No sentinel — consumes rest of args
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&["-exec", "grep", "foo"]),
-            &spec,
-            true,
-        );
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["grep", "foo"]]);
-    }
-
-    #[test]
-    fn terminated_plus_terminator() {
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into(), "+".into()]);
-        let r = parse_args(
-            &tv_args(&["-exec", "rm", "{}", "+"]),
-            &spec,
-            true,
-        );
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["rm", "{}"]]);
-    }
-
-    #[test]
-    fn terminated_mixed_with_valued() {
-        let mut spec = ArgSpec::posix(&["-name"]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&["-name", "*.rs", "-exec", "wc", "-l", "{}", ";"]),
-            &spec,
-            true,
-        );
-        assert_eq!(flag(&r, "-name"), s("*.rs"));
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["wc", "-l", "{}"]]);
-    }
-
-    #[test]
-    fn terminated_absent_flag() {
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(&tv_args(&[".", "-name", "*.rs"]), &spec, true);
-        assert!(terminated(&r, "-exec").is_empty());
-    }
-
     // ========================================================================
     // Exhaustiveness / three-valued logic
     // ========================================================================
@@ -995,7 +905,7 @@ mod tests {
     fn exhaustive_all_known() {
         let r = parse_args(
             &tv_args(&["-u", "root", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert!(r.exhaustive);
@@ -1006,7 +916,7 @@ mod tests {
         // -x not in valued list — might consume next arg
         let r = parse_args(
             &tv_args(&["-x", "cmd"]),
-            &ArgSpec::posix(&[]),
+            &ArgSpec::posix(""),
             true,
         );
         assert!(!r.exhaustive);
@@ -1016,7 +926,7 @@ mod tests {
     fn exhaustive_unknown_long_flag() {
         let r = parse_args(
             &tv_args(&["--unknown", "cmd"]),
-            &ArgSpec::posix(&[]),
+            &ArgSpec::posix(""),
             true,
         );
         assert!(!r.exhaustive);
@@ -1027,7 +937,7 @@ mod tests {
         // --unknown=val is self-contained, doesn't affect boundaries
         let r = parse_args(
             &tv_args(&["--unknown=val", "cmd"]),
-            &ArgSpec::posix(&[]),
+            &ArgSpec::posix(""),
             true,
         );
         assert!(r.exhaustive);
@@ -1038,7 +948,7 @@ mod tests {
         let mut a = tv_args(&["-u", "root"]);
         a.push(TriVal::Unknown);
         a.push(s("cmd"));
-        let r = parse_args(&a, &ArgSpec::posix(&["-u"]), true);
+        let r = parse_args(&a, &ArgSpec::posix("u:"), true);
         assert!(!r.exhaustive);
     }
 
@@ -1046,7 +956,7 @@ mod tests {
     fn exhaustive_input_propagates() {
         let r = parse_args(
             &tv_args(&["-u", "root", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             false,
         );
         assert!(!r.exhaustive);
@@ -1056,7 +966,7 @@ mod tests {
     fn exhaustive_absent_flag_null() {
         let r = parse_args(
             &tv_args(&["cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert!(matches!(r.value("-u"), TriVal::Null));
@@ -1066,7 +976,7 @@ mod tests {
     fn exhaustive_absent_flag_unknown_when_non_exhaustive() {
         let r = parse_args(
             &tv_args(&["-x", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert!(!r.exhaustive);
@@ -1075,13 +985,13 @@ mod tests {
 
     #[test]
     fn exhaustive_absent_positional() {
-        let r = parse_args(&tv_args(&["a"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["a"]), &ArgSpec::posix(""), true);
         assert!(matches!(r.positional(5), TriVal::Null));
     }
 
     #[test]
     fn exhaustive_absent_positional_when_non_exhaustive() {
-        let r = parse_args(&tv_args(&["a"]), &ArgSpec::posix(&[]), false);
+        let r = parse_args(&tv_args(&["a"]), &ArgSpec::posix(""), false);
         assert!(matches!(r.positional(5), TriVal::Unknown));
     }
 
@@ -1093,7 +1003,7 @@ mod tests {
     fn expansion_flag_value_is_unknown() {
         let r = parse_args(
             &tv_args(&["-u", "$(whoami)", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
@@ -1102,7 +1012,7 @@ mod tests {
 
     #[test]
     fn expansion_operand_is_unknown() {
-        let r = parse_args(&tv_args(&["$HOME/file"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["$HOME/file"]), &ArgSpec::posix(""), true);
         assert!(matches!(r.operands[0], TriVal::Unknown));
     }
 
@@ -1110,7 +1020,7 @@ mod tests {
     fn expansion_attached_value() {
         let r = parse_args(
             &tv_args(&["-u$(id)", "cmd"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
@@ -1120,7 +1030,7 @@ mod tests {
     fn expansion_long_equals() {
         let r = parse_args(
             &tv_args(&["--signal=$(trap)", "cmd"]),
-            &ArgSpec::posix(&["--signal"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Posix, "", &["signal:"]),
             true,
         );
         assert!(matches!(flag(&r, "--signal"), TriVal::Unknown));
@@ -1135,13 +1045,13 @@ mod tests {
     #[test]
     fn pattern_command_builtin() {
         // command/builtin: all args are the inner command, no flag processing
-        let r = parse_args(&tv_args(&["ls", "-la", "/"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["ls", "-la", "/"]), &ArgSpec::posix(""), true);
         assert_eq!(operands(&r), vec!["ls", "-la", "/"]);
     }
 
     #[test]
     fn pattern_nohup() {
-        let r = parse_args(&tv_args(&["make", "-j4"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["make", "-j4"]), &ArgSpec::posix(""), true);
         assert_eq!(operands(&r), vec!["make", "-j4"]);
     }
 
@@ -1151,7 +1061,7 @@ mod tests {
     fn pattern_nice() {
         let r = parse_args(
             &tv_args(&["-n", "10", "cargo", "build"]),
-            &ArgSpec::posix(&["-n"]),
+            &ArgSpec::posix("n:"),
             true,
         );
         assert_eq!(flag(&r, "-n"), s("10"));
@@ -1162,7 +1072,7 @@ mod tests {
     fn pattern_strace() {
         let r = parse_args(
             &tv_args(&["-e", "trace=open", "-o", "/tmp/trace.log", "ls", "-la"]),
-            &ArgSpec::posix(&["-e", "-s", "-o", "-p"]),
+            &ArgSpec::posix("e:s:o:p:"),
             true,
         );
         assert_eq!(flag(&r, "-e"), s("trace=open"));
@@ -1174,7 +1084,7 @@ mod tests {
     fn pattern_watch() {
         let r = parse_args(
             &tv_args(&["-n", "2", "df", "-h"]),
-            &ArgSpec::posix(&["-n"]),
+            &ArgSpec::posix("n:"),
             true,
         );
         assert_eq!(flag(&r, "-n"), s("2"));
@@ -1185,7 +1095,7 @@ mod tests {
     fn pattern_timeout() {
         let r = parse_args(
             &tv_args(&["-s", "KILL", "30", "curl", "example.com"]),
-            &ArgSpec::posix(&["-s", "--signal", "-k", "--kill-after"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Posix, "s:k:", &["signal:", "kill-after:"]),
             true,
         );
         assert_eq!(flag(&r, "-s"), s("KILL"));
@@ -1197,7 +1107,7 @@ mod tests {
     fn pattern_timeout_long_flag() {
         let r = parse_args(
             &tv_args(&["--signal=KILL", "--kill-after", "5", "30", "cmd"]),
-            &ArgSpec::posix(&["-s", "--signal", "-k", "--kill-after"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Posix, "s:k:", &["signal:", "kill-after:"]),
             true,
         );
         assert_eq!(flag(&r, "--signal"), s("KILL"));
@@ -1209,7 +1119,7 @@ mod tests {
     fn pattern_sudo() {
         let r = parse_args(
             &tv_args(&["-C", "3", "-u", "root", "rm", "-rf", "/"]),
-            &ArgSpec::posix(&["-C", "-g", "-r", "-t", "-U", "-D", "-u"]),
+            &ArgSpec::posix("C:g:r:t:U:D:u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -1222,7 +1132,7 @@ mod tests {
         // sudo -iu root rm — common real-world pattern
         let r = parse_args(
             &tv_args(&["-iu", "root", "rm", "-rf", "/"]),
-            &ArgSpec::posix(&["-C", "-g", "-r", "-t", "-U", "-D", "-u"]),
+            &ArgSpec::posix("C:g:r:t:U:D:u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -1234,7 +1144,7 @@ mod tests {
         // sudo without -u defaults to root (handled by CEL, not getopt)
         let r = parse_args(
             &tv_args(&["rm", "-rf", "/"]),
-            &ArgSpec::posix(&["-C", "-g", "-r", "-t", "-U", "-D", "-u"]),
+            &ArgSpec::posix("C:g:r:t:U:D:u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
@@ -1245,7 +1155,7 @@ mod tests {
     fn pattern_doas() {
         let r = parse_args(
             &tv_args(&["-u", "www", "nginx", "-t"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("www"));
@@ -1256,7 +1166,7 @@ mod tests {
     fn pattern_doas_no_user() {
         let r = parse_args(
             &tv_args(&["reboot"]),
-            &ArgSpec::posix(&["-u"]),
+            &ArgSpec::posix("u:"),
             true,
         );
         assert!(matches!(flag(&r, "-u"), TriVal::Null));
@@ -1268,7 +1178,7 @@ mod tests {
         // su -c "cmd string" user — -c takes the command string
         let r = parse_args(
             &tv_args(&["-c", "echo hello", "root"]),
-            &ArgSpec::posix(&["-c"]),
+            &ArgSpec::posix("c:"),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("echo hello"));
@@ -1280,7 +1190,7 @@ mod tests {
         // su - root -c "cmd" — the - is a standalone flag (login shell)
         let r = parse_args(
             &tv_args(&["-", "root", "-c", "whoami"]),
-            &ArgSpec::posix(&["-c"]),
+            &ArgSpec::posix("c:"),
             true,
         );
         // "-" is an operand per POSIX, triggers POSIX stop
@@ -1292,8 +1202,7 @@ mod tests {
     fn pattern_ssh() {
         let r = parse_args(
             &tv_args(&["-p", "22", "-i", "key.pem", "user@host", "ls", "-la"]),
-            &ArgSpec::posix(&["-b","-c","-D","-E","-e","-F","-I","-i","-J","-L",
-                              "-l","-m","-O","-o","-p","-Q","-R","-S","-W","-w"]),
+            &ArgSpec::posix("b:c:D:E:e:F:I:i:J:L:l:m:O:o:p:Q:R:S:W:w:"),
             true,
         );
         assert_eq!(flag(&r, "-p"), s("22"));
@@ -1306,7 +1215,7 @@ mod tests {
     fn pattern_ssh_attached_port() {
         let r = parse_args(
             &tv_args(&["-p22", "-i", "key.pem", "host", "ls"]),
-            &ArgSpec::posix(&["-p", "-i"]),
+            &ArgSpec::posix("p:i:"),
             true,
         );
         assert_eq!(flag(&r, "-p"), s("22"));
@@ -1318,7 +1227,7 @@ mod tests {
         // ssh -vvv host cmd — -v -v -v grouped
         let r = parse_args(
             &tv_args(&["-vvv", "-p", "22", "host", "uptime"]),
-            &ArgSpec::posix(&["-p", "-i", "-o"]),
+            &ArgSpec::posix("p:i:o:"),
             true,
         );
         assert_eq!(flag(&r, "-p"), s("22"));
@@ -1333,7 +1242,7 @@ mod tests {
         // sh -c "echo hello" — -c takes the command string
         let r = parse_args(
             &tv_args(&["-c", "echo hello"]),
-            &ArgSpec::posix(&["-c"]),
+            &ArgSpec::posix("c:"),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("echo hello"));
@@ -1345,7 +1254,7 @@ mod tests {
         // bash -c 'echo $0 $1' arg0 arg1 — $0/$1 are expansions → Unknown
         let r = parse_args(
             &tv_args(&["-c", "echo $0 $1", "arg0", "arg1"]),
-            &ArgSpec::posix(&["-c"]),
+            &ArgSpec::posix("c:"),
             true,
         );
         assert!(matches!(flag(&r, "-c"), TriVal::Unknown));
@@ -1357,7 +1266,7 @@ mod tests {
         // bash -c 'echo hello' — no expansions
         let r = parse_args(
             &tv_args(&["-c", "echo hello"]),
-            &ArgSpec::posix(&["-c"]),
+            &ArgSpec::posix("c:"),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("echo hello"));
@@ -1369,7 +1278,7 @@ mod tests {
     fn pattern_xargs() {
         let r = parse_args(
             &tv_args(&["-n", "1", "-I", "{}", "rm", "-v"]),
-            &ArgSpec::posix(&["-d", "-I", "-L", "-n", "-P", "-s", "-E"]),
+            &ArgSpec::posix("d:I:L:n:P:s:E:"),
             true,
         );
         assert_eq!(flag(&r, "-n"), s("1"));
@@ -1381,56 +1290,12 @@ mod tests {
     fn pattern_xargs_no_flags() {
         let r = parse_args(
             &tv_args(&["rm", "-rf"]),
-            &ArgSpec::posix(&["-d", "-I", "-L", "-n", "-P", "-s", "-E"]),
+            &ArgSpec::posix("d:I:L:n:P:s:E:"),
             true,
         );
         assert_eq!(operands(&r), vec!["rm", "-rf"]);
     }
 
-    #[test]
-    fn pattern_find() {
-        let mut spec = ArgSpec::posix(&[]);
-        for f in ["-exec", "-execdir", "-ok", "-okdir"] {
-            spec.terminated.insert(f.into(), vec![";".into(), "+".into()]);
-        }
-        let r = parse_args(
-            &tv_args(&[".", "-name", "*.rs", "-exec", "grep", "TODO", "{}", ";"]),
-            &spec,
-            true,
-        );
-        assert_eq!(operands(&r), vec![".", "-name", "*.rs"]);
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["grep", "TODO", "{}"]]);
-    }
-
-    #[test]
-    fn pattern_find_multiple_exec() {
-        let mut spec = ArgSpec::posix(&[]);
-        for f in ["-exec", "-execdir", "-ok", "-okdir"] {
-            spec.terminated.insert(f.into(), vec![";".into(), "+".into()]);
-        }
-        let r = parse_args(
-            &tv_args(&[".", "-exec", "chmod", "644", "{}", ";", "-exec", "chown", "root", "{}", "+"]),
-            &spec,
-            true,
-        );
-        let blocks = terminated(&r, "-exec");
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0], vec!["chmod", "644", "{}"]);
-        assert_eq!(blocks[1], vec!["chown", "root", "{}"]);
-    }
-
-    #[test]
-    fn pattern_find_exec_shell() {
-        // find -exec sh -c 'echo {}' ; — common pattern
-        let mut spec = ArgSpec::posix(&[]);
-        spec.terminated.insert("-exec".into(), vec![";".into()]);
-        let r = parse_args(
-            &tv_args(&[".", "-exec", "sh", "-c", "echo {}", ";"]),
-            &spec,
-            true,
-        );
-        assert_eq!(terminated(&r, "-exec"), vec![vec!["sh", "-c", "echo {}"]]);
-    }
 
     // --- Environment ---
 
@@ -1438,7 +1303,7 @@ mod tests {
     fn pattern_env() {
         let r = parse_args(
             &tv_args(&["-u", "FOO", "cmd", "arg"]),
-            &ArgSpec::posix(&["-u", "-S"]),
+            &ArgSpec::posix("u:S:"),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("FOO"));
@@ -1449,7 +1314,7 @@ mod tests {
     fn pattern_env_no_flags() {
         let r = parse_args(
             &tv_args(&["cmd", "arg"]),
-            &ArgSpec::posix(&["-u", "-S"]),
+            &ArgSpec::posix("u:S:"),
             true,
         );
         assert_eq!(operands(&r), vec!["cmd", "arg"]);
@@ -1462,7 +1327,7 @@ mod tests {
         // kubectl exec pod -c container -- ls -la
         let r = parse_args(
             &tv_args(&["pod", "-c", "container", "--", "ls", "-la"]),
-            &ArgSpec::gnu(&["-n", "-c", "--namespace", "--container"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "n:c:", &["namespace:", "container:"]),
             true,
         );
         assert_eq!(flag(&r, "-c"), s("container"));
@@ -1474,7 +1339,7 @@ mod tests {
         // kubectl exec -n kube-system pod -- cmd
         let r = parse_args(
             &tv_args(&["-n", "kube-system", "pod", "--", "cmd"]),
-            &ArgSpec::gnu(&["-n", "-c", "--namespace", "--container"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "n:c:", &["namespace:", "container:"]),
             true,
         );
         assert_eq!(flag(&r, "-n"), s("kube-system"));
@@ -1485,7 +1350,7 @@ mod tests {
     fn pattern_docker_exec() {
         let r = parse_args(
             &tv_args(&["-u", "root", "-w", "/app", "mycontainer", "bash"]),
-            &ArgSpec::gnu(&["-e", "--env", "-u", "--user", "-w", "--workdir"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "e:u:w:", &["env:", "user:", "workdir:"]),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -1498,7 +1363,7 @@ mod tests {
         // podman exec mycontainer -u root bash — flag after operand (GNU)
         let r = parse_args(
             &tv_args(&["mycontainer", "-u", "root", "bash"]),
-            &ArgSpec::gnu(&["-e", "--env", "-u", "--user", "-w", "--workdir"]),
+            &ArgSpec::from_optstring_long(ArgStyle::Gnu, "e:u:w:", &["env:", "user:", "workdir:"]),
             true,
         );
         assert_eq!(flag(&r, "-u"), s("root"));
@@ -1513,7 +1378,7 @@ mod tests {
     fn operands_from_skips() {
         let r = parse_args(
             &tv_args(&["host", "ls", "-la"]),
-            &ArgSpec::posix(&[]),
+            &ArgSpec::posix(""),
             true,
         );
         let from1: Vec<String> = r.operands_from(1).iter().filter_map(|e| {
@@ -1524,7 +1389,7 @@ mod tests {
 
     #[test]
     fn operands_from_beyond_length() {
-        let r = parse_args(&tv_args(&["a"]), &ArgSpec::posix(&[]), true);
+        let r = parse_args(&tv_args(&["a"]), &ArgSpec::posix(""), true);
         assert!(r.operands_from(5).is_empty());
     }
 
@@ -1532,7 +1397,7 @@ mod tests {
     fn positional_access() {
         let r = parse_args(
             &tv_args(&["host", "cmd"]),
-            &ArgSpec::posix(&[]),
+            &ArgSpec::posix(""),
             true,
         );
         assert_eq!(r.positional(0), s("host"));

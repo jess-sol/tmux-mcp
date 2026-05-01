@@ -208,19 +208,19 @@ inner = 'command.args'
 [[wrappers]]
 name = "nice"
 when = 'command.name == "nice"'
-getopt = ["-n"]
+getopt = "n:"
 inner = 'command.getopt.operands'
 
 [[wrappers]]
 name = "strace"
 when = 'command.name == "strace"'
-getopt = ["-e","-s","-o","-p"]
+getopt = "e:s:o:p:"
 inner = 'command.getopt.operands'
 
 [[wrappers]]
 name = "watch"
 when = 'command.name == "watch"'
-getopt = ["-n"]
+getopt = "n:"
 inner = 'command.getopt.operands'
 
 # Skip-flags + skip positionals
@@ -228,7 +228,7 @@ inner = 'command.getopt.operands'
 [[wrappers]]
 name = "timeout"
 when = 'command.name == "timeout"'
-getopt = ["-s","--signal","-k","--kill-after"]
+getopt = { short = "s:k:", long = ["signal:", "kill-after:"] }
 inner = 'command.getopt.operands_from(1)'
 
 # Privilege escalation
@@ -236,21 +236,21 @@ inner = 'command.getopt.operands_from(1)'
 [[wrappers]]
 name = "sudo"
 when = 'command.name == "sudo"'
-getopt = ["-C","-g","-r","-t","-U","-D","-u"]
+getopt = "isC:D:g:r:t:U:u:"
 inner = 'command.getopt.operands'
 capture_user = 'or(command.getopt.value("-u"), "root")'
 
 [[wrappers]]
 name = "doas"
 when = 'command.name == "doas"'
-getopt = ["-u"]
+getopt = "u:"
 inner = 'command.getopt.operands'
 capture_user = 'or(command.getopt.value("-u"), "root")'
 
 [[wrappers]]
 name = "su"
 when = 'command.name == "su" && command.args.exists(a, a == "-c")'
-getopt = ["-c"]
+getopt = "c:"
 inner = 'command.getopt.value("-c")'
 capture_user = 'or(command.getopt.positional(0), "root")'
 
@@ -259,50 +259,45 @@ capture_user = 'or(command.getopt.positional(0), "root")'
 [[wrappers]]
 name = "ssh"
 when = 'command.name == "ssh"'
-getopt = ["-b","-c","-D","-E","-e","-F","-I","-i","-J","-L","-l","-m","-O","-o","-p","-Q","-R","-S","-W","-w"]
+getopt = "b:c:D:E:e:F:I:i:J:L:l:m:O:o:p:Q:R:S:W:w:"
 inner = 'command.getopt.operands_from(1)'
 capture_host = 'rsplit(command.getopt.positional(0), "@", 2)[1]'
 capture_user = 'rsplit(command.getopt.positional(0), "@", 2)[0]'
 
-# Container exec (getopt function — operates on subset of args)
+# Container/kubectl exec — GNU mode (pflag/cobra)
+# "exec" is an operand: operands = [exec, container/pod, cmd...]
 
 [[wrappers]]
 name = "container exec"
 when = 'command.name in ["podman","docker"] && command.args.exists(a, a == "exec")'
-inner = 'getopt(after(command.args, "exec"), ["-e","--env","-u","--user","-w","--workdir"]).operands_from(1)'
-capture_host = 'getopt(after(command.args, "exec"), ["-e","--env","-u","--user","-w","--workdir"]).positional(0)'
+getopt_gnu = { short = "e:u:w:", long = ["env:", "user:", "workdir:"] }
+inner = 'command.getopt.operands_from(2)'
+capture_host = 'command.getopt.positional(1)'
 
 [[wrappers]]
 name = "kubectl exec"
 when = 'command.name == "kubectl" && command.args.exists(a, a == "exec")'
-inner = 'after(command.args, "--")'
-capture_host = 'getopt(after(command.args, "exec"), ["-n","-c","--namespace","--container"]).positional(0)'
-
-# TODO: container exec and kubectl use Go pflag (GNU-style interspersed).
-# The getopt() CEL function currently defaults to POSIX. These wrappers use
-# after() as a workaround. When we add style support to the CEL getopt()
-# function, convert these to use getopt field with style = "gnu".
+getopt_gnu = { short = "n:c:", long = ["namespace:", "container:"] }
+inner = 'command.getopt.operands_from(2)'
+capture_host = 'command.getopt.positional(1)'
 
 # Shell eval (inner is String -> engine reparses)
 
 [[wrappers]]
 name = "shell eval"
 when = 'command.name in ["sh","bash","zsh","dash"] && command.args.exists(a, a == "-c")'
-getopt = ["-c"]
+getopt = "c:"
 inner = 'command.getopt.value("-c")'
 
 # Delegating (args_complete=false)
 
-[[wrappers]]
-name = "find exec"
-when = 'command.name == "find" && command.args.exists(a, a in ["-exec","-execdir","-ok","-okdir"])'
-args_complete = false
-inner = 'getopt(command.args, [], {"-exec": [";","+"], "-execdir": [";","+"], "-ok": [";","+"], "-okdir": [";","+"]}).values("-exec")'
+# find exec: TODO — needs dedicated terminated block extraction, not getopt
+# find -exec is already covered by the policy rule (action = "ask")
 
 [[wrappers]]
 name = "xargs"
 when = 'command.name == "xargs"'
-getopt = ["-d","-I","-L","-n","-P","-s","-E"]
+getopt = "d:I:L:n:P:s:E:"
 inner = 'command.getopt.operands'
 args_complete = false
 
@@ -312,6 +307,6 @@ args_complete = false
 [[wrappers]]
 name = "env"
 when = 'command.name == "env"'
-getopt = ["-u","-S"]
+getopt = "u:S:"
 inner = 'command.getopt.operands'
 skip_wrapper = false

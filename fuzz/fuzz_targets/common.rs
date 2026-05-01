@@ -156,24 +156,18 @@ pub fn compare_structured(style: ArgStyle, input: &FuzzInput) {
     if input.opts.len() > 16 { return; }
 
     let optstring = input.optstring();
-    let mut valued = input.valued_flags();
     let argv = input.argv_strings();
     let long_opts = input.long_options();
 
-    // Add long options with values to our valued list
-    for (name, has_val) in &long_opts {
-        if *has_val {
-            valued.push(format!("--{}", name));
-        }
-    }
+    // Build ArgSpec from optstring + long options
+    let long_strs: Vec<String> = long_opts.iter().map(|(name, has_val)| {
+        if *has_val { format!("{}:", name) } else { name.clone() }
+    }).collect();
+    let long_refs: Vec<&str> = long_strs.iter().map(|s| s.as_str()).collect();
+    let spec = ArgSpec::from_optstring_long(style, &optstring, &long_refs);
 
     // Run our implementation
     let trivals: Vec<TriVal> = argv.iter().map(|a| TriVal::String(a.clone())).collect();
-    let spec = ArgSpec {
-        style,
-        valued,
-        terminated: HashMap::new(),
-    };
     let our = args::parse_args(&trivals, &spec, true);
 
     // Run C reference

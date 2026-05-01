@@ -5,7 +5,6 @@
 //! - Home: ~/.claude/tmux-mcp.toml
 //! - Project: .claude/tmux-mcp.toml (relative to pane CWD)
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::SystemTime;
@@ -43,8 +42,12 @@ pub struct RuleConfig {
 pub struct WrapperConfig {
     pub name: String,
     pub when: String,
+    /// POSIX getopt: stop at first non-option. `getopt = "u:C:"` or `getopt = { short = "s:k:", long = ["signal:"] }`
     #[serde(default)]
     pub getopt: Option<GetoptConfig>,
+    /// GNU getopt: flags anywhere before `--`. Same format as `getopt`.
+    #[serde(default)]
+    pub getopt_gnu: Option<GetoptConfig>,
     pub inner: String,
     #[serde(default)]
     pub capture_user: Option<String>,
@@ -60,47 +63,34 @@ pub struct WrapperConfig {
 
 fn default_true() -> bool { true }
 
-/// Getopt configuration: either a plain list of valued flags or a full table.
+/// Getopt configuration from TOML. Two forms:
+/// - String: just short options optstring `"isC:D:u:"`
+/// - Table: `{ short = "s:k:", long = ["signal:", "kill-after:"] }`
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum GetoptConfig {
-    /// Sugar: just valued flags — `getopt = ["-n", "-u"]`
-    Short(Vec<String>),
-    /// Full form: `getopt = { valued = [...], terminated = {...}, style = "gnu" }`
+    /// Optstring: `getopt = "isC:D:u:"`
+    Short(String),
+    /// With long options: `getopt = { short = "s:k:", long = ["signal:"] }`
     Full {
         #[serde(default)]
-        valued: Vec<String>,
+        short: String,
         #[serde(default)]
-        terminated: HashMap<String, Vec<String>>,
-        #[serde(default)]
-        style: Option<String>,
+        long: Vec<String>,
     },
 }
 
 impl GetoptConfig {
-    pub fn valued(&self) -> &[String] {
+    /// Convert to ArgSpec with the given style.
+    pub fn to_arg_spec(&self, style: super::args::ArgStyle) -> super::args::ArgSpec {
         match self {
-            GetoptConfig::Short(v) => v,
-            GetoptConfig::Full { valued, .. } => valued,
-        }
-    }
-
-    pub fn terminated(&self) -> Option<&HashMap<String, Vec<String>>> {
-        match self {
-            GetoptConfig::Short(_) => None,
-            GetoptConfig::Full { terminated, .. } => {
-                if terminated.is_empty() { None } else { Some(terminated) }
+            GetoptConfig::Short(optstring) => {
+                super::args::ArgSpec::from_optstring(style, optstring)
             }
-        }
-    }
-
-    pub fn style(&self) -> super::args::ArgStyle {
-        match self {
-            GetoptConfig::Short(_) => super::args::ArgStyle::Posix,
-            GetoptConfig::Full { style, .. } => match style.as_deref() {
-                Some("gnu") => super::args::ArgStyle::Gnu,
-                _ => super::args::ArgStyle::Posix,
-            },
+            GetoptConfig::Full { short, long } => {
+                let long_refs: Vec<&str> = long.iter().map(|s| s.as_str()).collect();
+                super::args::ArgSpec::from_optstring_long(style, short, &long_refs)
+            }
         }
     }
 }
