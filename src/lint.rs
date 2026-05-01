@@ -160,6 +160,40 @@ fn lint_background_job(command: &str) -> Option<LintError> {
     })
 }
 
+/// Lint: reject `cd <path> && ...` when `<path>` resolves to the pane's cwd.
+///
+/// Catches the common AI pattern of prefixing commands with a redundant cd
+/// to the directory the pane is already in, which just triggers a needless
+/// policy prompt.
+pub fn lint_cd_to_cwd(command: &str, cwd: &str) -> Result<(), LintError> {
+    static RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^cd\s+(\S+)\s*(?:&&|;)\s*(.+)$").unwrap()
+    });
+    let Some(caps) = RE.captures(command) else {
+        return Ok(());
+    };
+    let cd_target = caps.get(1).unwrap().as_str().trim_end_matches('/');
+    let rest = caps.get(2).unwrap().as_str();
+    let cwd_clean = cwd.trim_end_matches('/');
+
+    let is_cwd = cd_target == "." || cd_target == cwd_clean;
+
+    if is_cwd {
+        Err(LintError {
+            message: format!(
+                "Redundant cd — the pane is already in that directory.\n\
+                 \n\
+                 Instead of:  command_run(command=\"{command}\")\n\
+                 Try:         command_run(command=\"{rest}\")\n\
+                 \n\
+                 The pane's working directory is already {cwd}."
+            ),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Extract line count from tail/head args like "-5", "-n 10", "-n10".
 fn extract_line_count(args: &str) -> Option<u64> {
     static RE: LazyLock<Regex> =
@@ -319,6 +353,51 @@ mod tests {
         assert!(lint_command_run("cargo build").is_ok());
         assert!(lint_command_run("git status").is_ok());
         assert!(lint_command_run("make -j8").is_ok());
+    }
+
+    // --- Helpers ---
+
+    // --- cd to cwd ---
+
+    #[test]
+    fn cd_to_cwd_absolute_rejected() {
+        let err = lint_cd_to_cwd("cd /home/user/project && cargo test", "/home/user/project").unwrap_err();
+        assert!(err.message.contains("command_run(command=\"cargo test\")"), "{}", err);
+    }
+
+    #[test]
+    fn cd_to_cwd_trailing_slash_rejected() {
+        assert!(lint_cd_to_cwd("cd /home/user/project/ && cargo test", "/home/user/project").is_err());
+    }
+
+    #[test]
+    fn cd_to_cwd_dot_rejected() {
+        assert!(lint_cd_to_cwd("cd . && make", "/any/dir").is_err());
+    }
+
+    #[test]
+    fn cd_to_cwd_semicolon_rejected() {
+        assert!(lint_cd_to_cwd("cd /proj && make", "/proj").is_err());
+    }
+
+    #[test]
+    fn cd_to_different_dir_allowed() {
+        assert!(lint_cd_to_cwd("cd /tmp && ls", "/home/user/project").is_ok());
+    }
+
+    #[test]
+    fn cd_to_subdir_allowed() {
+        assert!(lint_cd_to_cwd("cd src && cargo test", "/home/user/project").is_ok());
+    }
+
+    #[test]
+    fn cd_standalone_allowed() {
+        assert!(lint_cd_to_cwd("cd /home/user/project", "/home/user/project").is_ok());
+    }
+
+    #[test]
+    fn cd_cwd_trailing_slash_normalized() {
+        assert!(lint_cd_to_cwd("cd /proj && ls", "/proj/").is_err());
     }
 
     // --- Helpers ---

@@ -713,6 +713,14 @@ async fn handle_command_run(
     // --- Policy check ---
     {
         let ctx = read_pane_context(state, pane_id).await?;
+
+        // Lint: reject "cd <cwd> && ..." where the cd is a no-op
+        if let Some(cwd) = &ctx.cwd {
+            if let Err(err) = crate::lint::lint_cd_to_cwd(command, cwd) {
+                return Err(RpcError::invalid_params(err.to_string()));
+            }
+        }
+
         let result = policy::evaluate(command, &ctx, &state.policy);
         match result.decision {
             policy::Decision::Allow => { /* proceed */ }
