@@ -748,38 +748,55 @@ async fn handle_command_run(
     // --- Pre-execution guards ---
     // Check for conditions that would cause the OSC 133 probe to timeout
     // with a misleading error. Catch them early with specific messages.
+    // Briefly wait for a busy pane to become idle (handles probe `:` in flight
+    // from a prior call completing within milliseconds).
     {
-        let tp = pane_handle.lock().await;
+        let guard_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+        let mut rx = pane_handle.subscribe_state();
+        loop {
+            {
+                let tp = pane_handle.lock().await;
 
-        // Guard 1: Command already running
-        if tp.processor.state().active_command().is_some()
-            || tp.processor.state().activity == Activity::Busy
-            || matches!(tp.processor.osc133_phase(), Osc133Phase::Executing { .. })
-        {
-            let cmd_text = tp
-                .processor
-                .osc133_phase()
-                .executing_command()
-                .or_else(|| {
-                    tp.processor
-                        .state()
-                        .active_command()
-                        .map(|c| c.command.as_str())
-                })
-                .unwrap_or("(unknown command)");
-            let screen = capture_screen(&tp, 20);
-            return Err(RpcError::internal(format!(
-                "Pane {} is busy running '{}'. Use command_read to check status or wait.\n\nScreen:\n{}",
-                pane_id, cmd_text, screen
-            )));
-        }
-        // Guard 2: User is typing
-        if tp.processor.has_input_content() {
-            let screen = capture_screen(&tp, 20);
-            return Err(RpcError::internal(format!(
-                "User is typing in pane {}. Wait for them to finish or use a different pane.\n\nScreen:\n{}",
-                pane_id, screen
-            )));
+                let is_busy = tp.processor.state().active_command().is_some()
+                    || tp.processor.state().activity == Activity::Busy
+                    || matches!(tp.processor.osc133_phase(), Osc133Phase::Executing { .. });
+
+                if !is_busy {
+                    // Guard 2: User is typing
+                    if tp.processor.has_input_content() {
+                        let screen = capture_screen(&tp, 20);
+                        return Err(RpcError::internal(format!(
+                            "User is typing in pane {}. Wait for them to finish or use a different pane.\n\nScreen:\n{}",
+                            pane_id, screen
+                        )));
+                    }
+                    break;
+                }
+
+                if tokio::time::Instant::now() >= guard_deadline {
+                    let cmd_text = tp
+                        .processor
+                        .osc133_phase()
+                        .executing_command()
+                        .or_else(|| {
+                            tp.processor
+                                .state()
+                                .active_command()
+                                .map(|c| c.command.as_str())
+                        })
+                        .unwrap_or("(unknown command)");
+                    let screen = capture_screen(&tp, 20);
+                    return Err(RpcError::internal(format!(
+                        "Pane {} is busy running '{}'. Use command_read to check status or wait.\n\nScreen:\n{}",
+                        pane_id, cmd_text, screen
+                    )));
+                }
+            }
+
+            tokio::select! {
+                _ = rx.changed() => {}
+                _ = tokio::time::sleep_until(guard_deadline) => {}
+            }
         }
     }
 
