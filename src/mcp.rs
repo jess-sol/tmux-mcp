@@ -38,13 +38,13 @@ pub struct CommandRunParams {
     #[schemars(description = "Shell command to execute")]
     pub command: String,
     #[schemars(description = "Timeout in seconds (default 30)")]
-    pub timeout_secs: Option<u64>,
+    pub timeout_secs: Option<i64>,
     #[schemars(description = "Show next N lines from cursor (advances cursor). Mutually exclusive with head/tail.")]
-    pub next: Option<u64>,
+    pub next: Option<i64>,
     #[schemars(description = "Show first N lines. Mutually exclusive with next/tail.")]
-    pub head: Option<u64>,
+    pub head: Option<i64>,
     #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
-    pub tail: Option<u64>,
+    pub tail: Option<i64>,
     #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
     pub search: Option<String>,
 }
@@ -54,15 +54,15 @@ pub struct CommandReadParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
     #[schemars(description = "Command ID to read (default: current/last command)")]
-    pub command_id: Option<u64>,
+    pub command_id: Option<i64>,
     #[schemars(description = "Timeout in seconds — how long to wait for new output (default 5)")]
-    pub timeout_secs: Option<u64>,
+    pub timeout_secs: Option<i64>,
     #[schemars(description = "Show next N lines from cursor (advances cursor). Mutually exclusive with head/tail.")]
-    pub next: Option<u64>,
+    pub next: Option<i64>,
     #[schemars(description = "Show first N lines. Mutually exclusive with next/tail.")]
-    pub head: Option<u64>,
+    pub head: Option<i64>,
     #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
-    pub tail: Option<u64>,
+    pub tail: Option<i64>,
     #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
     pub search: Option<String>,
 }
@@ -72,7 +72,7 @@ pub struct CommandHistoryParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
     #[schemars(description = "Number of history entries (default 10)")]
-    pub count: Option<u64>,
+    pub count: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -80,7 +80,7 @@ pub struct DebugPaneParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
     #[schemars(description = "Number of lines from bottom of screen (default 50, max 1000)")]
-    pub lines: Option<u64>,
+    pub lines: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
