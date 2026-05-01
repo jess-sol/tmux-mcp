@@ -279,6 +279,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "rsplit" => eval_rsplit(&call.args, ctx),
         "slice" => eval_slice(&call.args, ctx),
         "take_until" => eval_take_until(&call.args, ctx),
+        "split_at" => eval_split_at(&call.args, ctx),
         "_[_]" => eval_index(&call.args, ctx),
         "_+_" => eval_add(&call.args, ctx),
         "_?_:_" => eval_ternary(&call.args, ctx),
@@ -654,6 +655,47 @@ fn eval_add(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
             let mut result = a.clone();
             result.extend(b.iter().cloned());
             TriVal::List { elements: result, exhaustive: true }
+        }
+        (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
+        _ => TriVal::Unknown,
+    }
+}
+
+/// `split_at(list, markers)` — split list into groups, starting new group at each marker.
+fn eval_split_at(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
+    if args.len() != 2 { return TriVal::Unknown; }
+    let list = eval_expr(&args[0].expr, ctx);
+    let markers = eval_expr(&args[1].expr, ctx);
+    match (&list, &markers) {
+        (TriVal::List { elements, .. }, TriVal::List { elements: marker_list, .. }) => {
+            let marker_strings: Vec<&str> = marker_list.iter().filter_map(|m| {
+                if let TriVal::String(s) = m { Some(s.as_str()) } else { None }
+            }).collect();
+
+            if elements.is_empty() {
+                return TriVal::List { elements: Vec::new(), exhaustive: true };
+            }
+
+            let mut groups: Vec<TriVal> = Vec::new();
+            let mut current: Vec<TriVal> = Vec::new();
+
+            for el in elements {
+                let is_marker = if let TriVal::String(s) = el {
+                    marker_strings.contains(&s.as_str())
+                } else {
+                    false
+                };
+
+                if is_marker {
+                    groups.push(TriVal::List { elements: current, exhaustive: true });
+                    current = vec![el.clone()];
+                } else {
+                    current.push(el.clone());
+                }
+            }
+            groups.push(TriVal::List { elements: current, exhaustive: true });
+
+            TriVal::List { elements: groups, exhaustive: true }
         }
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
         _ => TriVal::Unknown,
@@ -1941,7 +1983,68 @@ mod tests {
     }
 
     // --- CEL function: split_at(list, markers) ---
-    // (commit 5)
+
+    #[test]
+    fn cel_split_at_basic() {
+        let r = eval_cel(r#"split_at(["a","b","|","c","d"], ["|"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 2);
+            // First group: ["a","b"]
+            if let TriVal::List { elements: g0, .. } = &elements[0] {
+                assert_eq!(g0.len(), 2);
+                assert_eq!(g0[0], TriVal::String("a".into()));
+            } else { panic!("expected list for group 0"); }
+            // Second group: ["|","c","d"]
+            if let TriVal::List { elements: g1, .. } = &elements[1] {
+                assert_eq!(g1.len(), 3);
+                assert_eq!(g1[0], TriVal::String("|".into()));
+            } else { panic!("expected list for group 1"); }
+        } else { panic!("expected list, got {:?}", r); }
+    }
+
+    #[test]
+    fn cel_split_at_no_marker() {
+        let r = eval_cel(r#"split_at(["a","b","c"], ["|"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 1); // one group = whole list
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_split_at_marker_at_start() {
+        let r = eval_cel(r#"split_at(["|","a","|","b"], ["|"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 3); // [], ["|","a"], ["|","b"]
+            if let TriVal::List { elements: g0, .. } = &elements[0] {
+                assert!(g0.is_empty());
+            } else { panic!("expected empty list for group 0"); }
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_split_at_multiple_markers() {
+        let r = eval_cel(r#"split_at(["a","-exec","b",";","-ok","c","+"], ["-exec","-ok"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 3);
+            // ["a"], ["-exec","b",";"], ["-ok","c","+"]
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_split_at_empty() {
+        let r = eval_cel(r#"split_at([], ["|"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert!(elements.is_empty());
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_split_at_marker_at_end() {
+        let r = eval_cel(r#"split_at(["a","|"], ["|"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 2); // ["a"], ["|"]
+        } else { panic!("expected list"); }
+    }
 
     #[test]
     fn cel_filter_comprehension() {
