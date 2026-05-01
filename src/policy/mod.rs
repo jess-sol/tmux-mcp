@@ -53,8 +53,14 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         };
     }
 
-    // Parse with brush-parser
-    let commands = match parse::parse_command(command) {
+    // Check for config file changes before parsing/evaluating
+    engine.check_reload(ctx.cwd.as_deref());
+
+    // Single lock for both wrappers (parse) and rules (evaluate)
+    let compiled = engine.compiled();
+
+    // Parse with brush-parser + wrapper registry
+    let commands = match parse::parse_command_with_registry(command, &compiled.wrappers) {
         Ok(cmds) if cmds.is_empty() => {
             return PolicyResult {
                 decision: Decision::Ask,
@@ -75,12 +81,8 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         return result;
     }
 
-    // Check for config file changes before evaluating
-    engine.check_reload(ctx.cwd.as_deref());
-
     // CEL rules: evaluate every command in flat list, most restrictive wins
-    let ruleset = engine.rules();
-    evaluate_all(&commands, ctx, &ruleset)
+    evaluate_all(&commands, ctx, &compiled.rules)
 }
 
 // --- Internal ---

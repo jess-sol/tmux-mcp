@@ -5,6 +5,7 @@
 //! - Home: ~/.claude/tmux-mcp.toml
 //! - Project: .claude/tmux-mcp.toml (relative to pane CWD)
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::SystemTime;
@@ -12,6 +13,7 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use super::Decision;
+use super::parse::{self, WrapperRegistry};
 use super::rules::{self, RuleSet};
 
 // --- Types ---
@@ -22,6 +24,8 @@ pub struct PolicyConfig {
     pub default: Option<String>,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+    #[serde(default)]
+    pub wrappers: Vec<WrapperConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,9 +39,70 @@ pub struct RuleConfig {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct WrapperConfig {
+    pub name: String,
+    pub when: String,
+    #[serde(default)]
+    pub getopt: Option<GetoptConfig>,
+    pub inner: String,
+    #[serde(default)]
+    pub capture_user: Option<String>,
+    #[serde(default)]
+    pub capture_host: Option<String>,
+    #[serde(default = "default_true")]
+    pub skip_wrapper: bool,
+    #[serde(default = "default_true")]
+    pub args_complete: bool,
+    #[serde(default)]
+    pub order: i32,
+}
+
+fn default_true() -> bool { true }
+
+/// Getopt configuration: either a plain list of valued flags or a full table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum GetoptConfig {
+    /// Sugar: just valued flags — `getopt = ["-n", "-u"]`
+    Short(Vec<String>),
+    /// Full form: `getopt = { valued = [...], terminated = {...} }`
+    Full {
+        #[serde(default)]
+        valued: Vec<String>,
+        #[serde(default)]
+        terminated: HashMap<String, Vec<String>>,
+    },
+}
+
+impl GetoptConfig {
+    pub fn valued(&self) -> &[String] {
+        match self {
+            GetoptConfig::Short(v) => v,
+            GetoptConfig::Full { valued, .. } => valued,
+        }
+    }
+
+    pub fn terminated(&self) -> Option<&HashMap<String, Vec<String>>> {
+        match self {
+            GetoptConfig::Short(_) => None,
+            GetoptConfig::Full { terminated, .. } => {
+                if terminated.is_empty() { None } else { Some(terminated) }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TaggedRule {
     pub config: RuleConfig,
+    pub source: RuleSource,
+    pub source_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaggedWrapper {
+    pub config: WrapperConfig,
     pub source: RuleSource,
     pub source_index: usize,
 }
@@ -53,28 +118,36 @@ const BUILTIN_TOML: &str = include_str!("builtin_rules.toml");
 
 // --- PolicyEngine: manages compiled rules with live reload ---
 
-/// Thread-safe policy engine that holds compiled rules and watches config files.
-/// The daemon holds one of these in its shared state.
+/// Rules + wrappers compiled from the same config snapshot.
+pub struct CompiledPolicy {
+    pub rules: RuleSet,
+    pub wrappers: WrapperRegistry,
+}
+
+/// Thread-safe policy engine that holds compiled policy and watches config files.
 pub struct PolicyEngine {
-    compiled: RwLock<RuleSet>,
+    compiled: RwLock<CompiledPolicy>,
     home_path: PathBuf,
-    /// Last known mtime of home config (None if file didn't exist)
     home_mtime: RwLock<Option<SystemTime>>,
-    /// Last known mtime of project config, keyed by path
     project_mtime: RwLock<Option<(PathBuf, SystemTime)>>,
 }
 
+fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
+    let (default, tagged, tagged_wrappers) = load_merged_config(project_cwd);
+    let rules = match rules::compile(&tagged, default) {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!("Failed to compile policy rules: {}", e);
+            RuleSet { rules: Vec::new(), default: Decision::Ask }
+        }
+    };
+    let wrappers = parse::compile_wrappers(&tagged_wrappers);
+    CompiledPolicy { rules, wrappers }
+}
+
 impl PolicyEngine {
-    /// Create a new engine, loading rules from all sources.
     pub fn new(project_cwd: Option<&str>) -> Self {
-        let (default, tagged) = load_merged_rules(project_cwd);
-        let compiled = match rules::compile(&tagged, default) {
-            Ok(rs) => rs,
-            Err(e) => {
-                tracing::error!("Failed to compile policy rules: {}", e);
-                RuleSet { rules: Vec::new(), default: Decision::Ask }
-            }
-        };
+        let compiled = compile_config(project_cwd);
 
         let home_path = home_config_path_always();
         let home_mtime = file_mtime(&home_path);
@@ -92,17 +165,15 @@ impl PolicyEngine {
         }
     }
 
-    /// Get a read reference to the compiled rules.
-    pub fn rules(&self) -> std::sync::RwLockReadGuard<'_, RuleSet> {
+    /// Get a read reference to the compiled policy (rules + wrappers).
+    pub fn compiled(&self) -> std::sync::RwLockReadGuard<'_, CompiledPolicy> {
         self.compiled.read().unwrap()
     }
 
     /// Check if config files have changed and reload if needed.
-    /// Called periodically or before evaluate.
     pub fn check_reload(&self, project_cwd: Option<&str>) {
         let mut changed = false;
 
-        // Check home config mtime
         let current_home_mtime = file_mtime(&self.home_path);
         {
             let prev = self.home_mtime.read().unwrap();
@@ -111,7 +182,6 @@ impl PolicyEngine {
             }
         }
 
-        // Check project config mtime
         if let Some(cwd) = project_cwd {
             let project_path = project_config_path_always(cwd);
             let current_mtime = file_mtime(&project_path);
@@ -129,21 +199,14 @@ impl PolicyEngine {
         }
 
         tracing::info!("Policy config changed, reloading...");
-        let (default, tagged) = load_merged_rules(project_cwd);
-        match rules::compile(&tagged, default) {
-            Ok(new_rules) => {
-                *self.compiled.write().unwrap() = new_rules;
-                *self.home_mtime.write().unwrap() = file_mtime(&self.home_path);
-                if let Some(cwd) = project_cwd {
-                    let p = project_config_path_always(cwd);
-                    *self.project_mtime.write().unwrap() = file_mtime(&p).map(|m| (p, m));
-                }
-                tracing::info!("Policy rules reloaded successfully");
-            }
-            Err(e) => {
-                tracing::warn!("Failed to compile reloaded rules, keeping previous: {}", e);
-            }
+        let new = compile_config(project_cwd);
+        *self.compiled.write().unwrap() = new;
+        *self.home_mtime.write().unwrap() = file_mtime(&self.home_path);
+        if let Some(cwd) = project_cwd {
+            let p = project_config_path_always(cwd);
+            *self.project_mtime.write().unwrap() = file_mtime(&p).map(|m| (p, m));
         }
+        tracing::info!("Policy config reloaded successfully");
     }
 
     /// Start a background file watcher that calls check_reload on changes.
@@ -192,8 +255,10 @@ impl PolicyEngine {
 
 // --- Public helpers ---
 
-/// Load and merge rules from all three sources. Returns (default_decision, sorted_rules).
-pub fn load_merged_rules(project_cwd: Option<&str>) -> (Decision, Vec<TaggedRule>) {
+/// Load and merge config from all three sources.
+pub fn load_merged_config(
+    project_cwd: Option<&str>,
+) -> (Decision, Vec<TaggedRule>, Vec<TaggedWrapper>) {
     let builtin = parse_config(BUILTIN_TOML).expect("built-in rules TOML is invalid");
     let home = load_config_file(&home_config_path_always());
     let project = project_cwd.and_then(|cwd| load_config_file(&project_config_path_always(cwd)));
@@ -217,18 +282,6 @@ fn project_config_path_always(cwd: &str) -> PathBuf {
     PathBuf::from(cwd).join(".claude").join("tmux-mcp.toml")
 }
 
-/// Home config path (only if file exists).
-pub fn home_config_path() -> Option<PathBuf> {
-    let p = home_config_path_always();
-    if p.exists() { Some(p) } else { None }
-}
-
-/// Project config path (only if file exists).
-pub fn project_config_path(cwd: &str) -> Option<PathBuf> {
-    let p = project_config_path_always(cwd);
-    if p.exists() { Some(p) } else { None }
-}
-
 // --- Internal ---
 
 fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
@@ -250,7 +303,7 @@ fn merge(
     builtin: PolicyConfig,
     home: Option<PolicyConfig>,
     project: Option<PolicyConfig>,
-) -> (Decision, Vec<TaggedRule>) {
+) -> (Decision, Vec<TaggedRule>, Vec<TaggedWrapper>) {
     let default = project.as_ref()
         .and_then(|c| c.default.as_ref())
         .or_else(|| home.as_ref().and_then(|c| c.default.as_ref()))
@@ -263,13 +316,13 @@ fn merge(
     for (i, rule) in builtin.rules.into_iter().enumerate() {
         tagged.push(TaggedRule { config: rule, source: RuleSource::Builtin, source_index: i });
     }
-    if let Some(home) = home {
-        for (i, rule) in home.rules.into_iter().enumerate() {
+    if let Some(ref home) = home {
+        for (i, rule) in home.rules.iter().cloned().enumerate() {
             tagged.push(TaggedRule { config: rule, source: RuleSource::Home, source_index: i });
         }
     }
-    if let Some(project) = project {
-        for (i, rule) in project.rules.into_iter().enumerate() {
+    if let Some(ref project) = project {
+        for (i, rule) in project.rules.iter().cloned().enumerate() {
             tagged.push(TaggedRule { config: rule, source: RuleSource::Project, source_index: i });
         }
     }
@@ -280,7 +333,30 @@ fn merge(
             .then(a.source_index.cmp(&b.source_index))
     });
 
-    (default, tagged)
+    // Merge wrappers — same ordering as rules (order → source → file index)
+    let mut tagged_wrappers = Vec::new();
+
+    for (i, w) in builtin.wrappers.into_iter().enumerate() {
+        tagged_wrappers.push(TaggedWrapper { config: w, source: RuleSource::Builtin, source_index: i });
+    }
+    if let Some(home) = home {
+        for (i, w) in home.wrappers.into_iter().enumerate() {
+            tagged_wrappers.push(TaggedWrapper { config: w, source: RuleSource::Home, source_index: i });
+        }
+    }
+    if let Some(project) = project {
+        for (i, w) in project.wrappers.into_iter().enumerate() {
+            tagged_wrappers.push(TaggedWrapper { config: w, source: RuleSource::Project, source_index: i });
+        }
+    }
+
+    tagged_wrappers.sort_by(|a, b| {
+        a.config.order.cmp(&b.config.order)
+            .then(a.source.cmp(&b.source))
+            .then(a.source_index.cmp(&b.source_index))
+    });
+
+    (default, tagged, tagged_wrappers)
 }
 
 fn parse_decision(s: &str) -> Decision {
@@ -358,7 +434,7 @@ mod tests {
 
     #[test]
     fn builtin_default_is_ask() {
-        let (default, _) = load_merged_rules(None);
+        let (default, _, _) = load_merged_config(None);
         assert_eq!(default, Decision::Ask);
     }
 
@@ -366,7 +442,7 @@ mod tests {
     fn home_overrides_default() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let home = parse_config("default = \"deny\"").unwrap();
-        let (default, _) = merge(builtin, Some(home), None);
+        let (default, _, _) = merge(builtin, Some(home), None);
         assert_eq!(default, Decision::Deny);
     }
 
@@ -375,7 +451,7 @@ mod tests {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let home = parse_config("default = \"deny\"").unwrap();
         let project = parse_config("default = \"allow\"").unwrap();
-        let (default, _) = merge(builtin, Some(home), Some(project));
+        let (default, _, _) = merge(builtin, Some(home), Some(project));
         assert_eq!(default, Decision::Allow);
     }
 
@@ -389,7 +465,7 @@ mod tests {
             action = "allow"
             order = -1
         "#).unwrap();
-        let (_, rules) = merge(builtin, Some(home), None);
+        let (_, rules, _) = merge(builtin, Some(home), None);
         // The early rule should be before any order-0 rules
         let early_pos = rules.iter().position(|r| r.config.description == "early rule").unwrap();
         let first_order0 = rules.iter().position(|r| r.config.order == 0).unwrap();
@@ -406,7 +482,7 @@ mod tests {
             action = "allow"
             order = 1
         "#).unwrap();
-        let (_, rules) = merge(builtin, Some(home), None);
+        let (_, rules, _) = merge(builtin, Some(home), None);
         assert_eq!(rules.last().unwrap().config.description, "late rule");
     }
 
@@ -424,7 +500,7 @@ mod tests {
             when = 'command.name == "ls"'
             action = "deny"
         "#).unwrap();
-        let (_, rules) = merge(builtin, Some(home), None);
+        let (_, rules, _) = merge(builtin, Some(home), None);
         assert_eq!(rules[0].source, RuleSource::Builtin);
         assert_eq!(rules[1].source, RuleSource::Home);
     }
@@ -444,7 +520,7 @@ mod tests {
             when = 'true'
             action = "deny"
         "#).unwrap();
-        let (_, rules) = merge(builtin, Some(home), Some(project));
+        let (_, rules, _) = merge(builtin, Some(home), Some(project));
         assert_eq!(rules[0].config.description, "home");
         assert_eq!(rules[1].config.description, "project");
     }
@@ -461,14 +537,14 @@ mod tests {
             when = 'true'
             action = "deny"
         "#).unwrap();
-        let (_, rules) = merge(builtin, None, None);
+        let (_, rules, _) = merge(builtin, None, None);
         assert_eq!(rules[0].config.description, "first");
         assert_eq!(rules[1].config.description, "second");
     }
 
     #[test]
     fn no_config_files_uses_builtin_only() {
-        let (default, rules) = load_merged_rules(None);
+        let (default, rules, _) = load_merged_config(None);
         assert_eq!(default, Decision::Ask);
         assert!(rules.iter().all(|r| r.source == RuleSource::Builtin));
     }
@@ -477,7 +553,7 @@ mod tests {
     fn empty_config_file_uses_builtin() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let empty = parse_config("").unwrap();
-        let (_, rules) = merge(builtin, Some(empty), None);
+        let (_, rules, _) = merge(builtin, Some(empty), None);
         assert!(rules.iter().all(|r| r.source == RuleSource::Builtin));
     }
 

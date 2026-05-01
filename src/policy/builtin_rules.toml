@@ -186,3 +186,127 @@ action = "allow"
 description = "git write"
 when = 'command.name == "git"'
 action = "ask"
+
+# --- Wrapper definitions ---
+# These drive the generic extraction engine in parse.rs.
+# First matching wrapper wins (ordered by order → source → file position).
+
+# Transparent passthrough (no getopt needed)
+
+[[wrappers]]
+name = "command/builtin"
+when = 'command.name in ["command","builtin"]'
+inner = 'command.args'
+
+[[wrappers]]
+name = "nohup"
+when = 'command.name == "nohup"'
+inner = 'command.args'
+
+# Skip-flags (getopt field, inner = operands)
+
+[[wrappers]]
+name = "nice"
+when = 'command.name == "nice"'
+getopt = ["-n"]
+inner = 'command.getopt.operands'
+
+[[wrappers]]
+name = "strace"
+when = 'command.name == "strace"'
+getopt = ["-e","-s","-o","-p"]
+inner = 'command.getopt.operands'
+
+[[wrappers]]
+name = "watch"
+when = 'command.name == "watch"'
+getopt = ["-n"]
+inner = 'command.getopt.operands'
+
+# Skip-flags + skip positionals
+
+[[wrappers]]
+name = "timeout"
+when = 'command.name == "timeout"'
+getopt = ["-s","--signal","-k","--kill-after"]
+inner = 'command.getopt.operands_from(1)'
+
+# Privilege escalation
+
+[[wrappers]]
+name = "sudo"
+when = 'command.name == "sudo"'
+getopt = ["-C","-g","-r","-t","-U","-D","-u"]
+inner = 'command.getopt.operands'
+capture_user = 'or(command.getopt.value("-u"), "root")'
+
+[[wrappers]]
+name = "doas"
+when = 'command.name == "doas"'
+getopt = ["-u"]
+inner = 'command.getopt.operands'
+capture_user = 'or(command.getopt.value("-u"), "root")'
+
+[[wrappers]]
+name = "su"
+when = 'command.name == "su" && command.args.exists(a, a == "-c")'
+getopt = ["-c"]
+inner = 'command.getopt.value("-c")'
+capture_user = 'or(command.getopt.positional(0), "root")'
+
+# Remote execution
+
+[[wrappers]]
+name = "ssh"
+when = 'command.name == "ssh"'
+getopt = ["-b","-c","-D","-E","-e","-F","-I","-i","-J","-L","-l","-m","-O","-o","-p","-Q","-R","-S","-W","-w"]
+inner = 'command.getopt.operands_from(1)'
+capture_host = 'rsplit(command.getopt.positional(0), "@", 2)[1]'
+capture_user = 'rsplit(command.getopt.positional(0), "@", 2)[0]'
+
+# Container exec (getopt function — operates on subset of args)
+
+[[wrappers]]
+name = "container exec"
+when = 'command.name in ["podman","docker"] && command.args.exists(a, a == "exec")'
+inner = 'getopt(after(command.args, "exec"), ["-e","--env","-u","--user","-w","--workdir"]).operands_from(1)'
+capture_host = 'getopt(after(command.args, "exec"), ["-e","--env","-u","--user","-w","--workdir"]).positional(0)'
+
+[[wrappers]]
+name = "kubectl exec"
+when = 'command.name == "kubectl" && command.args.exists(a, a == "exec")'
+inner = 'after(command.args, "--")'
+capture_host = 'getopt(after(command.args, "exec"), ["-n","-c","--namespace","--container"]).positional(0)'
+
+# Shell eval (inner is String -> engine reparses)
+
+[[wrappers]]
+name = "shell eval"
+when = 'command.name in ["sh","bash","zsh","dash"] && command.args.exists(a, a == "-c")'
+getopt = ["-c"]
+inner = 'command.getopt.value("-c")'
+
+# Delegating (args_complete=false)
+
+[[wrappers]]
+name = "find exec"
+when = 'command.name == "find" && command.args.exists(a, a in ["-exec","-execdir","-ok","-okdir"])'
+args_complete = false
+inner = 'getopt(command.args, [], {"-exec": [";","+"], "-execdir": [";","+"], "-ok": [";","+"], "-okdir": [";","+"]}).values("-exec")'
+
+[[wrappers]]
+name = "xargs"
+when = 'command.name == "xargs"'
+getopt = ["-d","-I","-L","-n","-P","-s","-E"]
+inner = 'command.getopt.operands'
+args_complete = false
+
+# Environment — shell puts FOO=bar in prefix, not args, so we can't distinguish
+# env-with-vars from bare env via args alone. Always evaluate both.
+
+[[wrappers]]
+name = "env"
+when = 'command.name == "env"'
+getopt = ["-u","-S"]
+inner = 'command.getopt.operands'
+skip_wrapper = false

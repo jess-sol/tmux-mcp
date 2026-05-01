@@ -99,12 +99,19 @@ pub struct ParseError {
 
 // --- Public API ---
 
-/// Parse a command string into a flat list of all commands that will execute.
-/// Each command has a `parent` reference to its wrapper (if any).
+/// Parse a command string using the default builtin wrapper registry.
 pub fn parse_command(command: &str) -> Result<Vec<CommandInfo>, ParseError> {
+    parse_command_with_registry(command, default_registry())
+}
+
+/// Parse a command string with a specific wrapper registry.
+pub fn parse_command_with_registry(
+    command: &str,
+    registry: &WrapperRegistry,
+) -> Result<Vec<CommandInfo>, ParseError> {
     let program = parse_with_brush(command)?;
     let mut commands = Vec::new();
-    extract_from_program(&program, &mut commands);
+    extract_from_program(&program, registry, &mut commands);
     Ok(commands)
 }
 
@@ -125,42 +132,42 @@ fn parse_with_brush(command: &str) -> Result<ast::Program, ParseError> {
 
 // --- AST walking ---
 
-fn extract_from_program(program: &ast::Program, out: &mut Vec<CommandInfo>) {
+fn extract_from_program(program: &ast::Program, reg: &WrapperRegistry, out: &mut Vec<CommandInfo>) {
     for cc in &program.complete_commands {
-        extract_from_compound_list(cc, out);
+        extract_from_compound_list(cc, reg, out);
     }
 }
 
-fn extract_from_compound_list(list: &ast::CompoundList, out: &mut Vec<CommandInfo>) {
+fn extract_from_compound_list(list: &ast::CompoundList, reg: &WrapperRegistry, out: &mut Vec<CommandInfo>) {
     for item in &list.0 {
-        extract_from_and_or_list(&item.0, out);
+        extract_from_and_or_list(&item.0, reg, out);
     }
 }
 
-fn extract_from_and_or_list(and_or: &ast::AndOrList, out: &mut Vec<CommandInfo>) {
-    extract_from_pipeline(&and_or.first, out);
+fn extract_from_and_or_list(and_or: &ast::AndOrList, reg: &WrapperRegistry, out: &mut Vec<CommandInfo>) {
+    extract_from_pipeline(&and_or.first, reg, out);
     for additional in &and_or.additional {
         let pipeline = match additional {
             ast::AndOr::And(p) | ast::AndOr::Or(p) => p,
         };
-        extract_from_pipeline(pipeline, out);
+        extract_from_pipeline(pipeline, reg, out);
     }
 }
 
-fn extract_from_pipeline(pipeline: &ast::Pipeline, out: &mut Vec<CommandInfo>) {
+fn extract_from_pipeline(pipeline: &ast::Pipeline, reg: &WrapperRegistry, out: &mut Vec<CommandInfo>) {
     for (i, command) in pipeline.seq.iter().enumerate() {
         let is_pipe_target = i > 0;
-        extract_from_command(command, is_pipe_target, out);
+        extract_from_command(command, is_pipe_target, reg, out);
     }
 }
 
-fn extract_from_command(command: &ast::Command, is_pipe_target: bool, out: &mut Vec<CommandInfo>) {
+fn extract_from_command(command: &ast::Command, is_pipe_target: bool, reg: &WrapperRegistry, out: &mut Vec<CommandInfo>) {
     match command {
         ast::Command::Simple(simple) => {
-            extract_from_simple_command(simple, is_pipe_target, None, out);
+            extract_from_simple_command(simple, is_pipe_target, None, reg, out);
         }
         ast::Command::Compound(compound, _) => {
-            extract_from_compound_command(compound, out);
+            extract_from_compound_command(compound, reg, out);
         }
         ast::Command::Function(_) | ast::Command::ExtendedTest(_) => {}
     }
@@ -172,6 +179,7 @@ fn extract_from_simple_command(
     simple: &ast::SimpleCommand,
     is_pipe_target: bool,
     parent: Option<Arc<CommandInfo>>,
+    reg: &WrapperRegistry,
     out: &mut Vec<CommandInfo>,
 ) {
     let name_word = match &simple.word_or_name {
@@ -195,7 +203,7 @@ fn extract_from_simple_command(
                     extract_command_subs_from_word(&word.value, &mut cmd_sub_commands);
                 }
                 ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
-                    extract_from_compound_list(&subshell.list, &mut cmd_sub_commands);
+                    extract_from_compound_list(&subshell.list, reg, &mut cmd_sub_commands);
                     args_complete = false;
                 }
                 _ => {}
@@ -208,7 +216,7 @@ fn extract_from_simple_command(
         for item in &prefix.0 {
             match item {
                 ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
-                    extract_from_compound_list(&subshell.list, &mut cmd_sub_commands);
+                    extract_from_compound_list(&subshell.list, reg, &mut cmd_sub_commands);
                     args_complete = false;
                 }
                 ast::CommandPrefixOrSuffixItem::Word(word) => {
@@ -252,7 +260,7 @@ fn extract_from_simple_command(
     };
 
     // Try wrapper extraction — produces inner commands with this as parent
-    info.inner = extract_wrapper_children(&info, out);
+    info.inner = extract_wrapper_children(&info, reg, out);
 
     // Add this command to the output
     out.push(info);
@@ -261,31 +269,31 @@ fn extract_from_simple_command(
     out.extend(cmd_sub_commands);
 }
 
-fn extract_from_compound_command(compound: &ast::CompoundCommand, out: &mut Vec<CommandInfo>) {
+fn extract_from_compound_command(compound: &ast::CompoundCommand, reg: &WrapperRegistry, out: &mut Vec<CommandInfo>) {
     match compound {
-        ast::CompoundCommand::Subshell(s) => extract_from_compound_list(&s.list, out),
-        ast::CompoundCommand::BraceGroup(g) => extract_from_compound_list(&g.list, out),
+        ast::CompoundCommand::Subshell(s) => extract_from_compound_list(&s.list, reg, out),
+        ast::CompoundCommand::BraceGroup(g) => extract_from_compound_list(&g.list, reg, out),
         ast::CompoundCommand::IfClause(c) => {
-            extract_from_compound_list(&c.condition, out);
-            extract_from_compound_list(&c.then, out);
+            extract_from_compound_list(&c.condition, reg, out);
+            extract_from_compound_list(&c.then, reg, out);
             if let Some(elses) = &c.elses {
                 for el in elses {
-                    if let Some(cond) = &el.condition { extract_from_compound_list(cond, out); }
-                    extract_from_compound_list(&el.body, out);
+                    if let Some(cond) = &el.condition { extract_from_compound_list(cond, reg, out); }
+                    extract_from_compound_list(&el.body, reg, out);
                 }
             }
         }
         ast::CompoundCommand::WhileClause(c) | ast::CompoundCommand::UntilClause(c) => {
-            extract_from_compound_list(&c.0, out);
-            extract_from_compound_list(&c.1.list, out);
+            extract_from_compound_list(&c.0, reg, out);
+            extract_from_compound_list(&c.1.list, reg, out);
         }
-        ast::CompoundCommand::ForClause(c) => extract_from_compound_list(&c.body.list, out),
+        ast::CompoundCommand::ForClause(c) => extract_from_compound_list(&c.body.list, reg, out),
         ast::CompoundCommand::CaseClause(c) => {
             for item in &c.cases {
-                if let Some(cmd) = &item.cmd { extract_from_compound_list(cmd, out); }
+                if let Some(cmd) = &item.cmd { extract_from_compound_list(cmd, reg, out); }
             }
         }
-        ast::CompoundCommand::ArithmeticForClause(c) => extract_from_compound_list(&c.body.list, out),
+        ast::CompoundCommand::ArithmeticForClause(c) => extract_from_compound_list(&c.body.list, reg, out),
         ast::CompoundCommand::Arithmetic(_) => {}
     }
 }
@@ -380,60 +388,271 @@ fn extract_command_subs_from_piece(piece: &WordPiece, out: &mut Vec<CommandInfo>
     }
 }
 
-// --- Wrapper inner extraction ---
+// --- Wrapper extraction engine ---
 //
-// Wrappers produce both themselves (added by caller) and their inner commands.
-// Inner commands get `parent` set to the wrapper and inherit context
-// (effective_user, effective_host).
+// Declarative wrapper rules (defined in TOML) drive extraction.
+// Each rule has a CEL `when` expression to match, a `getopt` field for
+// arg parsing, and CEL expressions for `inner`, `capture_user`, `capture_host`.
 //
-// Returns the extraction result:
-// - Transparent: inner extracted, wrapper effects fully captured (user/host).
-//   Engine skips this wrapper during evaluation.
-// - Evaluated: inner extracted, but wrapper modifies uncaptured state (env vars).
-//   Both wrapper and inner are evaluated.
-// - None: not a wrapper, or extraction failed.
+// The engine iterates the registry (first match wins), evaluates the `when`
+// expression, runs getopt if configured, evaluates `inner` to produce inner
+// commands, and applies capture expressions for effective_user/host.
 
-fn extract_wrapper_children(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> InnerExtraction {
-    let extracted = match wrapper.name.as_str() {
-        // Noop wrappers — change nothing security-relevant
-        "command" | "builtin" | "nohup" => extract_transparent(wrapper, out),
-        "nice" => extract_skip_flags(wrapper, &["-n"], out),
-        "timeout" => extract_timeout(wrapper, out),
-        "strace" => extract_skip_flags(wrapper, &["-e", "-s", "-o", "-p"], out),
-        "watch" => extract_skip_flags(wrapper, &["-n"], out),
-        // Context-changing — modify user/host (captured via effective_user/host)
-        "sudo" => extract_sudo(wrapper, out),
-        "su" => extract_su(wrapper, out),
-        "doas" => extract_doas(wrapper, out),
-        "ssh" => extract_ssh(wrapper, out),
-        "podman" | "docker" => extract_subcommand_exec(wrapper, out),
-        "kubectl" => extract_kubectl(wrapper, out),
-        // Shell eval — inner command fully extracted
-        "sh" | "bash" | "zsh" | "dash" => extract_string_eval(wrapper, out),
-        // Delegating — inner command extracted with args_complete=false
-        "find" => extract_find(wrapper, out),
-        "xargs" => extract_xargs(wrapper, out),
-        // Environment — modifies env vars we don't capture
-        "env" => {
-            return if extract_env(wrapper, out) {
-                InnerExtraction::Evaluated
-            } else {
-                InnerExtraction::None
-            };
+use std::collections::HashMap;
+use cel_parser::ast as cel;
+use super::config::TaggedWrapper;
+
+/// Parsed getopt config for a wrapper rule.
+pub struct GetoptSpec {
+    pub valued: Vec<String>,
+    pub terminated: HashMap<String, Vec<String>>,
+}
+
+/// A compiled wrapper rule, ready for matching and extraction.
+pub struct CompiledWrapper {
+    pub name: String,
+    pub when: cel::Expr,
+    pub getopt: Option<GetoptSpec>,
+    pub inner: cel::Expr,
+    pub capture_user: Option<cel::Expr>,
+    pub capture_host: Option<cel::Expr>,
+    pub skip_wrapper: bool,
+    pub args_complete: bool,
+}
+
+/// Ordered list of compiled wrapper rules. First match wins.
+pub struct WrapperRegistry {
+    pub wrappers: Vec<CompiledWrapper>,
+}
+
+impl WrapperRegistry {
+    pub fn empty() -> Self {
+        Self { wrappers: Vec::new() }
+    }
+}
+
+fn parse_cel(expr: &str) -> Result<cel::Expr, String> {
+    let parser = cel_parser::Parser::new();
+    parser.parse(expr)
+        .map(|e| e.expr)
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// Compile wrapper configs into a registry. Logs and skips invalid entries.
+pub fn compile_wrappers(tagged: &[TaggedWrapper]) -> WrapperRegistry {
+    let mut wrappers = Vec::new();
+
+    for tw in tagged {
+        let w = &tw.config;
+        let when = match parse_cel(&w.when) {
+            Ok(expr) => expr,
+            Err(e) => {
+                tracing::warn!("Wrapper '{}': invalid `when` CEL: {}", w.name, e);
+                continue;
+            }
+        };
+        let inner = match parse_cel(&w.inner) {
+            Ok(expr) => expr,
+            Err(e) => {
+                tracing::warn!("Wrapper '{}': invalid `inner` CEL: {}", w.name, e);
+                continue;
+            }
+        };
+        let capture_user = match &w.capture_user {
+            Some(expr) => match parse_cel(expr) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    tracing::warn!("Wrapper '{}': invalid `capture_user` CEL: {}", w.name, e);
+                    None
+                }
+            },
+            None => None,
+        };
+        let capture_host = match &w.capture_host {
+            Some(expr) => match parse_cel(expr) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    tracing::warn!("Wrapper '{}': invalid `capture_host` CEL: {}", w.name, e);
+                    None
+                }
+            },
+            None => None,
+        };
+        let getopt = w.getopt.as_ref().map(|g| GetoptSpec {
+            valued: g.valued().to_vec(),
+            terminated: g.terminated().cloned().unwrap_or_default(),
+        });
+
+        wrappers.push(CompiledWrapper {
+            name: w.name.clone(),
+            when,
+            getopt,
+            inner,
+            capture_user,
+            capture_host,
+            skip_wrapper: w.skip_wrapper,
+            args_complete: w.args_complete,
+        });
+    }
+
+    WrapperRegistry { wrappers }
+}
+
+/// Default wrapper registry from built-in TOML. Used by `parse_command()`.
+fn default_registry() -> &'static WrapperRegistry {
+    use std::sync::LazyLock;
+    static DEFAULT: LazyLock<WrapperRegistry> = LazyLock::new(|| {
+        let config = super::config::parse_config(
+            include_str!("builtin_rules.toml")
+        ).expect("built-in TOML invalid");
+        let tagged: Vec<TaggedWrapper> = config.wrappers.into_iter().enumerate()
+            .map(|(i, w)| TaggedWrapper {
+                config: w,
+                source: super::config::RuleSource::Builtin,
+                source_index: i,
+            })
+            .collect();
+        compile_wrappers(&tagged)
+    });
+    &DEFAULT
+}
+
+fn extract_wrapper_children(
+    wrapper: &CommandInfo,
+    registry: &WrapperRegistry,
+    out: &mut Vec<CommandInfo>,
+) -> InnerExtraction {
+    use super::rules::{self, TriVal, TriBool};
+
+    for cw in &registry.wrappers {
+        // Build evaluation context: command.name, command.args
+        let mut cmd_map = HashMap::new();
+        cmd_map.insert("name".into(), TriVal::String(wrapper.name.clone()));
+        let args: Vec<TriVal> = wrapper.args.iter()
+            .map(|a| TriVal::String(a.clone()))
+            .collect();
+        cmd_map.insert("args".into(), TriVal::List {
+            elements: args.clone(),
+            exhaustive: wrapper.args_complete,
+        });
+
+        // Pre-run getopt if configured, inject as command.getopt
+        if let Some(ref spec) = cw.getopt {
+            let args_trivals: Vec<TriVal> = wrapper.args.iter()
+                .map(|a| TriVal::String(a.clone()))
+                .collect();
+            let getopt_result = rules::run_getopt(&args_trivals, &spec.valued, &spec.terminated, wrapper.args_complete);
+            cmd_map.insert("getopt".into(), getopt_result);
         }
-        _ => return InnerExtraction::None,
-    };
-    if extracted { InnerExtraction::Transparent } else { InnerExtraction::None }
+
+        let mut ctx = HashMap::new();
+        ctx.insert("command".into(), TriVal::Map(cmd_map));
+
+        // Evaluate `when` expression
+        let when_result = rules::eval_expr(&cw.when, &ctx);
+        if when_result.is_truthy() != TriBool::True {
+            continue;
+        }
+
+        // Evaluate `inner` expression
+        let inner_result = rules::eval_expr(&cw.inner, &ctx);
+
+        // Evaluate capture expressions
+        let effective_user = match &cw.capture_user {
+            Some(expr) => trival_to_effective(rules::eval_expr(expr, &ctx)),
+            None => wrapper.effective_user.clone(),
+        };
+        let effective_host = match &cw.capture_host {
+            Some(expr) => trival_to_effective(rules::eval_expr(expr, &ctx)),
+            None => wrapper.effective_host.clone(),
+        };
+
+        // Interpret inner result type
+        let extracted = match inner_result {
+            // List[String] → single inner command
+            TriVal::List { ref elements, .. } if !elements.is_empty() => {
+                // Check if it's a list-of-lists (List[List[String]]) for find -exec
+                if matches!(&elements[0], TriVal::List { .. }) {
+                    // Multiple inner commands
+                    let mut found = false;
+                    for block in elements {
+                        if let TriVal::List { elements: block_args, .. } = block {
+                            let str_args: Vec<String> = block_args.iter().filter_map(|a| {
+                                if let TriVal::String(s) = a { Some(s.clone()) } else { None }
+                            }).collect();
+                            if !str_args.is_empty() {
+                                push_inner(wrapper, &str_args, effective_user.clone(),
+                                    effective_host.clone(), cw.args_complete, registry, out);
+                                found = true;
+                            }
+                        }
+                    }
+                    found
+                } else {
+                    // Single inner command
+                    let str_args: Vec<String> = elements.iter().filter_map(|a| {
+                        if let TriVal::String(s) = a { Some(s.clone()) } else { None }
+                    }).collect();
+                    if str_args.is_empty() {
+                        false
+                    } else {
+                        push_inner(wrapper, &str_args, effective_user, effective_host,
+                            cw.args_complete, registry, out)
+                    }
+                }
+            }
+            // String → reparse as command string (su -c, bash -c)
+            TriVal::String(ref cmd_str) => {
+                let unquoted = brush_parser::unquote_str(cmd_str);
+                if word_has_expansion(&unquoted) {
+                    false
+                } else if let Ok(mut inner_cmds) = parse_command_with_registry(&unquoted, registry) {
+                    let parent_arc = Arc::new(wrapper.clone());
+                    for c in &mut inner_cmds {
+                        c.effective_user = effective_user.clone();
+                        c.effective_host = effective_host.clone();
+                        c.parent = Some(parent_arc.clone());
+                    }
+                    let found = !inner_cmds.is_empty();
+                    out.extend(inner_cmds);
+                    found
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        if !extracted {
+            return InnerExtraction::None;
+        }
+        return if cw.skip_wrapper {
+            InnerExtraction::Transparent
+        } else {
+            InnerExtraction::Evaluated
+        };
+    }
+
+    InnerExtraction::None
+}
+
+fn trival_to_effective(val: super::rules::TriVal) -> Effective {
+    use super::rules::TriVal;
+    match val {
+        TriVal::String(s) => Effective::Known(s),
+        TriVal::Unknown => Effective::Unknown,
+        _ => Effective::Unchanged,
+    }
 }
 
 /// Create an inner CommandInfo and add it (and any recursive inner commands) to out.
-/// Returns true if an inner command was produced.
 fn push_inner(
     parent: &CommandInfo,
     inner_args: &[String],
     user: Effective,
     host: Effective,
     args_complete: bool,
+    registry: &WrapperRegistry,
     out: &mut Vec<CommandInfo>,
 ) -> bool {
     let (cmd_name, cmd_args) = match inner_args.split_first() {
@@ -449,258 +668,14 @@ fn push_inner(
         effective_user: user,
         effective_host: host,
         is_pipe_target: false,
-        redirects: Vec::new(), // inner commands from wrappers don't carry redirects
+        redirects: Vec::new(),
         parent: Some(parent_arc),
         inner: InnerExtraction::None,
     };
 
-    // Recursively extract if inner is also a wrapper
-    inner.inner = extract_wrapper_children(&inner, out);
+    inner.inner = extract_wrapper_children(&inner, registry, out);
     out.push(inner);
     true
-}
-
-fn skip_flags(args: &[String], flags_with_arg: &[&str]) -> usize {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i].starts_with('-') {
-            if flags_with_arg.iter().any(|f| args[i] == *f) { i += 2; } else { i += 1; }
-        } else {
-            break;
-        }
-    }
-    i
-}
-
-fn extract_transparent(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    if wrapper.args.is_empty() { return false; }
-    push_inner(wrapper, &wrapper.args, wrapper.effective_user.clone(), wrapper.effective_host.clone(), true, out)
-}
-
-fn extract_skip_flags(wrapper: &CommandInfo, flags_with_arg: &[&str], out: &mut Vec<CommandInfo>) -> bool {
-    let start = skip_flags(&wrapper.args, flags_with_arg);
-    if start >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[start..], wrapper.effective_user.clone(), wrapper.effective_host.clone(), true, out)
-}
-
-fn extract_timeout(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        if wrapper.args[i].starts_with('-') {
-            if ["-s", "--signal", "-k", "--kill-after"].contains(&wrapper.args[i].as_str()) { i += 2; } else { i += 1; }
-        } else {
-            i += 1; // skip duration
-            break;
-        }
-    }
-    if i >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[i..], wrapper.effective_user.clone(), wrapper.effective_host.clone(), true, out)
-}
-
-fn extract_sudo(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let mut effective_user = Effective::Known("root".to_string());
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        match wrapper.args[i].as_str() {
-            "-u" => {
-                if i + 1 < wrapper.args.len() {
-                    let u = &wrapper.args[i + 1];
-                    effective_user = if word_has_expansion(u) { Effective::Unknown } else { Effective::Known(u.clone()) };
-                    i += 2;
-                } else { i += 1; }
-            }
-            "-i" | "-s" => { i += 1; }
-            a if a.starts_with('-') => {
-                if ["-C", "-g", "-r", "-t", "-U", "-D"].contains(&a) { i += 2; } else { i += 1; }
-            }
-            _ => break,
-        }
-    }
-    if i >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[i..], effective_user, wrapper.effective_host.clone(), true, out)
-}
-
-fn extract_su(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let mut effective_user = Effective::Known("root".to_string());
-    let mut command_str: Option<String> = None;
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        match wrapper.args[i].as_str() {
-            "-c" => {
-                if i + 1 < wrapper.args.len() { command_str = Some(wrapper.args[i + 1].clone()); }
-                i += 2;
-            }
-            "-" | "-l" | "--login" => { i += 1; }
-            a if a.starts_with('-') => { i += 1; }
-            _ => {
-                let u = &wrapper.args[i];
-                effective_user = if word_has_expansion(u) { Effective::Unknown } else { Effective::Known(u.clone()) };
-                i += 1;
-            }
-        }
-    }
-    if let Some(cmd) = command_str {
-        let cmd_str = brush_parser::unquote_str(&cmd);
-        if let Ok(mut inner_cmds) = parse_command(&cmd_str) {
-            let parent_arc = Arc::new(wrapper.clone());
-            for c in &mut inner_cmds {
-                c.effective_user = effective_user.clone();
-                c.parent = Some(parent_arc.clone());
-            }
-            out.extend(inner_cmds);
-            return true;
-        }
-    }
-    false
-}
-
-fn extract_doas(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let mut effective_user = Effective::Known("root".to_string());
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        match wrapper.args[i].as_str() {
-            "-u" => {
-                if i + 1 < wrapper.args.len() {
-                    let u = &wrapper.args[i + 1];
-                    effective_user = if word_has_expansion(u) { Effective::Unknown } else { Effective::Known(u.clone()) };
-                    i += 2;
-                } else { i += 1; }
-            }
-            a if a.starts_with('-') => { i += 1; }
-            _ => break,
-        }
-    }
-    if i >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[i..], effective_user, wrapper.effective_host.clone(), true, out)
-}
-
-fn extract_env(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        let a = &wrapper.args[i];
-        if a.starts_with('-') {
-            if a == "-u" || a == "-S" { i += 2; } else { i += 1; }
-        } else if a.contains('=') {
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if i >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[i..], wrapper.effective_user.clone(), wrapper.effective_host.clone(), true, out)
-}
-
-fn extract_string_eval(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let c_pos = match wrapper.args.iter().position(|a| a == "-c") {
-        Some(p) => p,
-        None => return false,
-    };
-    if c_pos + 1 >= wrapper.args.len() { return false; }
-    let cmd_str = brush_parser::unquote_str(&wrapper.args[c_pos + 1]);
-    if word_has_expansion(&cmd_str) { return false; }
-    if let Ok(mut inner_cmds) = parse_command(&cmd_str) {
-        let parent_arc = Arc::new(wrapper.clone());
-        for c in &mut inner_cmds {
-            c.parent = Some(parent_arc.clone());
-        }
-        out.extend(inner_cmds);
-        return true;
-    }
-    false
-}
-
-fn extract_find(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let exec_flags = ["-exec", "-execdir", "-ok", "-okdir"];
-    let mut found = false;
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        if exec_flags.contains(&wrapper.args[i].as_str()) {
-            let start = i + 1;
-            let mut end = start;
-            while end < wrapper.args.len() && wrapper.args[end] != ";" && wrapper.args[end] != "+" {
-                end += 1;
-            }
-            if start < end {
-                push_inner(wrapper, &wrapper.args[start..end], wrapper.effective_user.clone(), wrapper.effective_host.clone(), false, out);
-                found = true;
-            }
-            i = end + 1;
-        } else {
-            i += 1;
-        }
-    }
-    found
-}
-
-fn extract_xargs(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let start = skip_flags(&wrapper.args, &["-d", "-I", "-L", "-n", "-P", "-s", "-E"]);
-    if start >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[start..], wrapper.effective_user.clone(), wrapper.effective_host.clone(), false, out)
-}
-
-fn extract_ssh(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    let mut effective_host = Effective::Unchanged;
-    let mut i = 0;
-    while i < wrapper.args.len() {
-        let a = &wrapper.args[i];
-        if a.starts_with('-') {
-            if ["-b","-c","-D","-E","-e","-F","-I","-i","-J","-L","-l","-m","-O","-o","-p","-Q","-R","-S","-W","-w"].contains(&a.as_str()) {
-                i += 2;
-            } else { i += 1; }
-        } else if matches!(effective_host, Effective::Unchanged) {
-            let h = &wrapper.args[i];
-            effective_host = if word_has_expansion(h) {
-                Effective::Unknown
-            } else {
-                let host = h.find('@').map(|p| &h[p + 1..]).unwrap_or(h.as_str());
-                Effective::Known(host.to_string())
-            };
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if i >= wrapper.args.len() { return false; }
-    push_inner(wrapper, &wrapper.args[i..], wrapper.effective_user.clone(), effective_host, true, out)
-}
-
-fn extract_subcommand_exec(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    if wrapper.args.first().map(|s| s.as_str()) != Some("exec") { return false; }
-    let args = &wrapper.args[1..];
-    let mut effective_host = Effective::Unchanged;
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if a.starts_with('-') {
-            if ["-e","--env","-u","--user","-w","--workdir"].contains(&a.as_str()) { i += 2; } else { i += 1; }
-        } else if matches!(effective_host, Effective::Unchanged) {
-            effective_host = if word_has_expansion(a) { Effective::Unknown } else { Effective::Known(a.clone()) };
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if i >= args.len() { return false; }
-    push_inner(wrapper, &args[i..], wrapper.effective_user.clone(), effective_host, true, out)
-}
-
-fn extract_kubectl(wrapper: &CommandInfo, out: &mut Vec<CommandInfo>) -> bool {
-    if wrapper.args.first().map(|s| s.as_str()) != Some("exec") { return false; }
-    let args = &wrapper.args[1..];
-    let mut effective_host = Effective::Unchanged;
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--" { i += 1; break; }
-        else if a.starts_with('-') {
-            if ["-n","-c","--namespace","--container"].contains(&a.as_str()) { i += 2; } else { i += 1; }
-        } else if matches!(effective_host, Effective::Unchanged) {
-            effective_host = if word_has_expansion(a) { Effective::Unknown } else { Effective::Known(a.clone()) };
-            i += 1;
-        } else { i += 1; }
-    }
-    if i >= args.len() { return false; }
-    push_inner(wrapper, &args[i..], wrapper.effective_user.clone(), effective_host, true, out)
 }
 
 // --- Tests ---
