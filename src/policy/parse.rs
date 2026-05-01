@@ -400,13 +400,14 @@ fn extract_command_subs_from_piece(piece: &WordPiece, out: &mut Vec<CommandInfo>
 
 use std::collections::HashMap;
 use cel_parser::ast as cel;
+use super::args::ArgSpec;
 use super::config::TaggedWrapper;
 
 /// A compiled wrapper rule, ready for matching and extraction.
 pub struct CompiledWrapper {
     pub name: String,
     pub when: cel::Expr,
-    pub getopt: Option<()>,  // TODO(args.rs): replace with args::ArgSpec
+    pub getopt: Option<ArgSpec>,
     pub inner: cel::Expr,
     pub capture_user: Option<cel::Expr>,
     pub capture_host: Option<cel::Expr>,
@@ -472,8 +473,11 @@ pub fn compile_wrappers(tagged: &[TaggedWrapper]) -> WrapperRegistry {
             },
             None => None,
         };
-        // TODO(args.rs): compile getopt config into args::ArgSpec
-        let getopt = w.getopt.as_ref().map(|_| ());
+        let getopt = w.getopt.as_ref().map(|g| ArgSpec {
+            style: g.style(),
+            valued: g.valued().to_vec(),
+            terminated: g.terminated().cloned().unwrap_or_default(),
+        });
 
         wrappers.push(CompiledWrapper {
             name: w.name.clone(),
@@ -528,9 +532,13 @@ fn extract_wrapper_children(
             exhaustive: wrapper.args_complete,
         });
 
-        // TODO(args.rs): pre-run getopt if configured, inject as command.getopt
-        if cw.getopt.is_some() {
-            todo!("args::parse_args pre-run for command.getopt");
+        // Pre-run getopt if configured, inject result as command.getopt
+        if let Some(ref spec) = cw.getopt {
+            let args_trivals: Vec<TriVal> = wrapper.args.iter()
+                .map(|a| TriVal::String(a.clone()))
+                .collect();
+            let parsed = super::args::parse_args(&args_trivals, spec, wrapper.args_complete);
+            cmd_map.insert("getopt".into(), parsed_args_to_trival(&parsed));
         }
 
         let mut ctx = HashMap::new();
@@ -622,6 +630,29 @@ fn extract_wrapper_children(
     }
 
     InnerExtraction::None
+}
+
+/// Convert ParsedArgs into a TriVal::Map for use in CEL expressions.
+pub(super) fn parsed_args_to_trival(parsed: &super::args::ParsedArgs) -> super::rules::TriVal {
+    use super::rules::TriVal;
+    let mut map = HashMap::new();
+    map.insert("operands".into(), TriVal::List {
+        elements: parsed.operands.clone(),
+        exhaustive: parsed.exhaustive,
+    });
+    map.insert("flags".into(), TriVal::Map(parsed.flags.clone()));
+    map.insert("exhaustive".into(), TriVal::Bool(parsed.exhaustive));
+
+    let mut tvals = HashMap::new();
+    for (flag, blocks) in &parsed.terminated_blocks {
+        let block_vals: Vec<TriVal> = blocks.iter()
+            .map(|block| TriVal::List { elements: block.clone(), exhaustive: true })
+            .collect();
+        tvals.insert(flag.clone(), TriVal::List { elements: block_vals, exhaustive: true });
+    }
+    map.insert("terminated".into(), TriVal::Map(tvals));
+
+    TriVal::Map(map)
 }
 
 fn trival_to_effective(val: super::rules::TriVal) -> Effective {

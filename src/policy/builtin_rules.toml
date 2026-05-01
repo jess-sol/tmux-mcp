@@ -278,6 +278,11 @@ when = 'command.name == "kubectl" && command.args.exists(a, a == "exec")'
 inner = 'after(command.args, "--")'
 capture_host = 'getopt(after(command.args, "exec"), ["-n","-c","--namespace","--container"]).positional(0)'
 
+# TODO: container exec and kubectl use Go pflag (GNU-style interspersed).
+# The getopt() CEL function currently defaults to POSIX. These wrappers use
+# after() as a workaround. When we add style support to the CEL getopt()
+# function, convert these to use getopt field with style = "gnu".
+
 # Shell eval (inner is String -> engine reparses)
 
 [[wrappers]]

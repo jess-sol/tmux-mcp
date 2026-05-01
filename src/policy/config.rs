@@ -66,12 +66,14 @@ fn default_true() -> bool { true }
 pub enum GetoptConfig {
     /// Sugar: just valued flags — `getopt = ["-n", "-u"]`
     Short(Vec<String>),
-    /// Full form: `getopt = { valued = [...], terminated = {...} }`
+    /// Full form: `getopt = { valued = [...], terminated = {...}, style = "gnu" }`
     Full {
         #[serde(default)]
         valued: Vec<String>,
         #[serde(default)]
         terminated: HashMap<String, Vec<String>>,
+        #[serde(default)]
+        style: Option<String>,
     },
 }
 
@@ -89,6 +91,16 @@ impl GetoptConfig {
             GetoptConfig::Full { terminated, .. } => {
                 if terminated.is_empty() { None } else { Some(terminated) }
             }
+        }
+    }
+
+    pub fn style(&self) -> super::args::ArgStyle {
+        match self {
+            GetoptConfig::Short(_) => super::args::ArgStyle::Posix,
+            GetoptConfig::Full { style, .. } => match style.as_deref() {
+                Some("gnu") => super::args::ArgStyle::Gnu,
+                _ => super::args::ArgStyle::Posix,
+            },
         }
     }
 }
