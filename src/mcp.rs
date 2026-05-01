@@ -410,7 +410,10 @@ impl ServerHandler for TmuxMcp {
                  (builds, tests, installs). Use search to filter verbose output \
                  (e.g. search=\"error|fail|warn\" on test runs). Use head or next when \
                  exploring unknown output. On timeout, returns partial output — use \
-                 command_read(command_id=N) to continue reading. \
+                 command_read(command_id=N) to continue reading. For long-running \
+                 servers, use command_read(command_id=N, search=\"listen|ready|serving\", \
+                 timeout_secs=30) to wait for the ready signal before running dependent \
+                 commands — never sleep. \
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit).\n\n\
                  command_read: Use next to stream new output from a running command, \
