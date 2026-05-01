@@ -278,6 +278,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "or" => eval_or_func(&call.args, ctx),
         "rsplit" => eval_rsplit(&call.args, ctx),
         "_[_]" => eval_index(&call.args, ctx),
+        "_+_" => eval_add(&call.args, ctx),
         _ => {
             // Member calls: obj.method(args)
             if let Some(target) = &call.target {
@@ -626,7 +627,24 @@ fn resolve_path(arg: &str, cwd: &str, user: Option<&str>) -> Option<String> {
     }
 }
 
-// --- CEL functions for wrapper extraction ---
+// --- CEL operators and functions ---
+
+/// `a + b` — integer addition or list concatenation
+fn eval_add(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
+    if args.len() != 2 { return TriVal::Unknown; }
+    let a = eval_expr(&args[0].expr, ctx);
+    let b = eval_expr(&args[1].expr, ctx);
+    match (&a, &b) {
+        (TriVal::Int(a), TriVal::Int(b)) => TriVal::Int(a + b),
+        (TriVal::List { elements: a, .. }, TriVal::List { elements: b, .. }) => {
+            let mut result = a.clone();
+            result.extend(b.iter().cloned());
+            TriVal::List { elements: result, exhaustive: true }
+        }
+        (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
+        _ => TriVal::Unknown,
+    }
+}
 
 /// `list[index]`
 fn eval_index(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
@@ -1657,5 +1675,93 @@ mod tests {
         let mut c = cmd("eval");
         c.effective_user = Effective::Known("root".into());
         assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+    }
+
+    // --- CEL expression evaluator helper ---
+
+    /// Evaluate a CEL expression with an optional context.
+    fn eval_cel(expr: &str) -> TriVal {
+        eval_cel_with(expr, &HashMap::new())
+    }
+
+    fn eval_cel_with(expr: &str, ctx: &HashMap<String, TriVal>) -> TriVal {
+        let parser = cel_parser::Parser::new();
+        let ast = parser.parse(expr).unwrap_or_else(|e| panic!("CEL parse error: {:?}", e));
+        eval_expr(&ast.expr, ctx)
+    }
+
+    fn eval_cel_args(expr: &str, args: &[&str]) -> TriVal {
+        let mut cmd_map = HashMap::new();
+        let args_trival: Vec<TriVal> = args.iter()
+            .map(|a| TriVal::String(a.to_string()))
+            .collect();
+        cmd_map.insert("args".into(), TriVal::List { elements: args_trival, exhaustive: true });
+        let mut ctx = HashMap::new();
+        ctx.insert("command".into(), TriVal::Map(cmd_map));
+        eval_cel_with(expr, &ctx)
+    }
+
+    // --- CEL operator: _+_ (int add + list concat) ---
+
+    #[test]
+    fn cel_add_integers() {
+        assert_eq!(eval_cel("1 + 2"), TriVal::Int(3));
+        assert_eq!(eval_cel("0 + 0"), TriVal::Int(0));
+    }
+
+    #[test]
+    fn cel_add_lists() {
+        let r = eval_cel(r#"["a"] + ["b", "c"]"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 3);
+            assert_eq!(elements[0], TriVal::String("a".into()));
+            assert_eq!(elements[2], TriVal::String("c".into()));
+        } else {
+            panic!("expected list, got {:?}", r);
+        }
+    }
+
+    #[test]
+    fn cel_add_empty_lists() {
+        let r = eval_cel(r#"[] + ["a"]"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 1);
+        } else {
+            panic!("expected list");
+        }
+    }
+
+    #[test]
+    fn cel_add_type_mismatch() {
+        assert!(matches!(eval_cel(r#""a" + 1"#), TriVal::Unknown));
+    }
+
+    #[test]
+    fn cel_map_comprehension() {
+        // .map(a, a) is identity — this tests that _+_ list concat works internally
+        let r = eval_cel_args(r#"command.args.map(a, a)"#, &["ls", "-la"]);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 2);
+            assert_eq!(elements[0], TriVal::String("ls".into()));
+            assert_eq!(elements[1], TriVal::String("-la".into()));
+        } else {
+            panic!("expected list, got {:?}", r);
+        }
+    }
+
+    #[test]
+    #[ignore] // needs _?_:_ ternary (commit 2)
+    fn cel_filter_comprehension() {
+        let r = eval_cel_args(
+            r#"command.args.filter(a, a != "-la")"#,
+            &["ls", "-la", "/"],
+        );
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 2);
+            assert_eq!(elements[0], TriVal::String("ls".into()));
+            assert_eq!(elements[1], TriVal::String("/".into()));
+        } else {
+            panic!("expected list, got {:?}", r);
+        }
     }
 }
