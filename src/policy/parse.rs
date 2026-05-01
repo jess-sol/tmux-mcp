@@ -1050,6 +1050,65 @@ mod tests {
         assert!(!grep.args_complete);
     }
 
+    #[test]
+    fn find_exec_extracts_args() {
+        let cmds = parse_command("find . -exec grep -r TODO {} ;").unwrap();
+        let grep = find_cmd(&cmds, "grep");
+        assert_eq!(grep.args, vec!["-r", "TODO", "{}"]);
+    }
+
+    #[test]
+    fn find_multiple_exec_blocks() {
+        // \; is needed — bare ; is a shell command separator
+        let cmds = parse_command("find . -exec chmod 644 {} \\; -exec chown root {} \\;").unwrap();
+        let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+        assert!(cmds.iter().any(|c| c.name == "chmod"), "chmod not found in {:?}", names);
+        assert!(cmds.iter().any(|c| c.name == "chown"), "chown not found in {:?}", names);
+        let chmod = find_cmd(&cmds, "chmod");
+        assert!(chmod.args.contains(&"644".to_string()));
+        let chown = find_cmd(&cmds, "chown");
+        assert!(chown.args.contains(&"root".to_string()));
+    }
+
+    #[test]
+    fn find_exec_with_plus_terminator() {
+        let cmds = parse_command("find . -exec rm {} +").unwrap();
+        let rm = find_cmd(&cmds, "rm");
+        assert_eq!(rm.args, vec!["{}"]);
+        assert!(!rm.args_complete);
+    }
+
+    #[test]
+    fn find_execdir_extracts() {
+        let cmds = parse_command("find /tmp -execdir rm {} ;").unwrap();
+        let rm = find_cmd(&cmds, "rm");
+        assert_eq!(rm.parent.as_ref().unwrap().name, "find");
+    }
+
+    #[test]
+    fn find_exec_sh_c_recursive() {
+        // -exec sh -c '...' should recursively extract via shell-eval wrapper
+        let cmds = parse_command("find . -exec sh -c 'echo hello' ;").unwrap();
+        assert!(cmds.iter().any(|c| c.name == "sh"));
+        assert!(cmds.iter().any(|c| c.name == "echo"));
+    }
+
+    #[test]
+    fn find_exec_with_predicates() {
+        // Predicates before -exec shouldn't interfere
+        let cmds = parse_command("find /var -name '*.log' -mtime +30 -exec rm {} ;").unwrap();
+        let rm = find_cmd(&cmds, "rm");
+        assert_eq!(rm.parent.as_ref().unwrap().name, "find");
+    }
+
+    #[test]
+    fn find_without_exec_no_extraction() {
+        let cmds = parse_command("find . -name '*.rs' -type f").unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].name, "find");
+        assert_eq!(cmds[0].inner, InnerExtraction::None);
+    }
+
     // --- Flag-skip wrappers ---
 
     #[test]
