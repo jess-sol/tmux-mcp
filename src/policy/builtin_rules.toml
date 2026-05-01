@@ -291,8 +291,11 @@ inner = 'command.getopt.value("-c")'
 
 # Delegating (args_complete=false)
 
-# find exec: TODO — needs dedicated terminated block extraction, not getopt
-# find -exec is already covered by the policy rule (action = "ask")
+[[wrappers]]
+name = "find exec"
+when = 'command.name == "find" && command.args.exists(a, a in ["-exec","-execdir","-ok","-okdir"])'
+inner = 'split_at(command.args, ["-exec","-execdir","-ok","-okdir"]).filter(g, g[0] in ["-exec","-execdir","-ok","-okdir"]).map(g, take_until(slice(g, 1), [";","+"]))'
+args_complete = false
 
 [[wrappers]]
 name = "xargs"

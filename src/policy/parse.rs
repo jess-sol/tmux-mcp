@@ -1042,7 +1042,6 @@ mod tests {
     // --- find -exec ---
 
     #[test]
-    #[ignore] // TODO: find needs dedicated terminated block extraction, not getopt
     fn find_exec_extracts_command() {
         let cmds = parse_command("find . -exec grep foo {} ;").unwrap();
         assert!(cmds.iter().any(|c| c.name == "find"));
