@@ -402,17 +402,11 @@ use std::collections::HashMap;
 use cel_parser::ast as cel;
 use super::config::TaggedWrapper;
 
-/// Parsed getopt config for a wrapper rule.
-pub struct GetoptSpec {
-    pub valued: Vec<String>,
-    pub terminated: HashMap<String, Vec<String>>,
-}
-
 /// A compiled wrapper rule, ready for matching and extraction.
 pub struct CompiledWrapper {
     pub name: String,
     pub when: cel::Expr,
-    pub getopt: Option<GetoptSpec>,
+    pub getopt: Option<()>,  // TODO(args.rs): replace with args::ArgSpec
     pub inner: cel::Expr,
     pub capture_user: Option<cel::Expr>,
     pub capture_host: Option<cel::Expr>,
@@ -478,10 +472,8 @@ pub fn compile_wrappers(tagged: &[TaggedWrapper]) -> WrapperRegistry {
             },
             None => None,
         };
-        let getopt = w.getopt.as_ref().map(|g| GetoptSpec {
-            valued: g.valued().to_vec(),
-            terminated: g.terminated().cloned().unwrap_or_default(),
-        });
+        // TODO(args.rs): compile getopt config into args::ArgSpec
+        let getopt = w.getopt.as_ref().map(|_| ());
 
         wrappers.push(CompiledWrapper {
             name: w.name.clone(),
@@ -536,13 +528,9 @@ fn extract_wrapper_children(
             exhaustive: wrapper.args_complete,
         });
 
-        // Pre-run getopt if configured, inject as command.getopt
-        if let Some(ref spec) = cw.getopt {
-            let args_trivals: Vec<TriVal> = wrapper.args.iter()
-                .map(|a| TriVal::String(a.clone()))
-                .collect();
-            let getopt_result = rules::run_getopt(&args_trivals, &spec.valued, &spec.terminated, wrapper.args_complete);
-            cmd_map.insert("getopt".into(), getopt_result);
+        // TODO(args.rs): pre-run getopt if configured, inject as command.getopt
+        if cw.getopt.is_some() {
+            todo!("args::parse_args pre-run for command.getopt");
         }
 
         let mut ctx = HashMap::new();
