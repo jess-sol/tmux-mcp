@@ -1114,3 +1114,221 @@ async fn test_command_run_succeeds_after_backspace_clears_input() {
     })
     .await;
 }
+
+// --- command_read wait semantics (running commands) ---
+
+/// Helper: start a command with a short timeout so we get control back while it runs.
+/// Returns the command_id.
+async fn start_bg_command(td: &mut TestDaemon, command: &str) -> u64 {
+    // Approve first
+    let _ = td
+        .rpc(
+            "request_approval",
+            json!({"pane_id": td.origin_pane.clone(), "command": command}),
+        )
+        .await;
+
+    let result = td
+        .rpc(
+            "command_run",
+            json!({
+                "pane_id": td.origin_pane.clone(),
+                "command": command,
+                "timeout_secs": 1,
+                "tail": 3,
+            }),
+        )
+        .await;
+    result["command_id"].as_u64().expect("should have command_id")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_read_next_waits_for_n_lines() {
+    // next=3 on a running command should wait until 3 lines are available.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut td = TestDaemon::start().await;
+        let cmd_id = start_bg_command(&mut td, "sleep 2; seq 1 5").await;
+
+        let before = tokio::time::Instant::now();
+        let result = td
+            .rpc(
+                "command_read",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command_id": cmd_id,
+                    "next": 3,
+                    "timeout_secs": 10,
+                }),
+            )
+            .await;
+        let elapsed = before.elapsed();
+
+        let output = result["output"].as_str().unwrap_or("");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "next=3 should return 3 lines, got: {:?}", lines);
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "should have waited for delayed output, returned in {:?}",
+            elapsed
+        );
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        td.cleanup().await;
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_read_next_search_scans_forward() {
+    // next=1 + search should scan past non-matching lines until a match is found.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut td = TestDaemon::start().await;
+        let cmd_id = start_bg_command(&mut td, "echo noise; sleep 2; echo MARK_HIT").await;
+
+        let before = tokio::time::Instant::now();
+        let result = td
+            .rpc(
+                "command_read",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command_id": cmd_id,
+                    "next": 1,
+                    "search": "MARK",
+                    "timeout_secs": 10,
+                }),
+            )
+            .await;
+        let elapsed = before.elapsed();
+
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(
+            output.contains("MARK_HIT"),
+            "should have scanned past noise and found MARK_HIT, got: {:?}",
+            output
+        );
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "should have waited for delayed match, returned in {:?}",
+            elapsed
+        );
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        td.cleanup().await;
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_read_head_search_waits() {
+    // head=2 + search on a running command should wait until 2 matches accumulate.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut td = TestDaemon::start().await;
+        let cmd_id = start_bg_command(&mut td, "echo miss; echo HIT_1; sleep 2; echo HIT_2").await;
+
+        let before = tokio::time::Instant::now();
+        let result = td
+            .rpc(
+                "command_read",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command_id": cmd_id,
+                    "head": 2,
+                    "search": "HIT",
+                    "timeout_secs": 10,
+                }),
+            )
+            .await;
+        let elapsed = before.elapsed();
+
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("HIT_1"), "should contain HIT_1: {:?}", output);
+        assert!(output.contains("HIT_2"), "should contain HIT_2: {:?}", output);
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "should have waited for second match, returned in {:?}",
+            elapsed
+        );
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        td.cleanup().await;
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_read_tail_timeout_empty() {
+    // tail on a running command must wait for completion. On timeout, returns empty.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut td = TestDaemon::start().await;
+        let cmd_id = start_bg_command(&mut td, "sleep 10").await;
+
+        let before = tokio::time::Instant::now();
+        let result = td
+            .rpc(
+                "command_read",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command_id": cmd_id,
+                    "tail": 3,
+                    "timeout_secs": 2,
+                }),
+            )
+            .await;
+        let elapsed = before.elapsed();
+
+        let output = result["output"].as_str().unwrap_or("");
+        let visible: String = output.chars().filter(|c| !c.is_control()).collect();
+        assert!(visible.trim().is_empty(), "tail on timeout should be empty, got: {:?}", output);
+        assert!(
+            elapsed >= Duration::from_millis(1500),
+            "should have waited near timeout (2s), returned in {:?}",
+            elapsed
+        );
+
+        // Clean up long-running command
+        td.rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-c"})).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        td.cleanup().await;
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_read_bare_returns_immediately() {
+    // Bare read (no next/head/tail) on a running command returns immediately.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut td = TestDaemon::start().await;
+        let cmd_id = start_bg_command(&mut td, "echo line1; sleep 10").await;
+
+        let before = tokio::time::Instant::now();
+        let result = td
+            .rpc(
+                "command_read",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command_id": cmd_id,
+                    "timeout_secs": 10,
+                }),
+            )
+            .await;
+        let elapsed = before.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "bare read should return immediately, took {:?}",
+            elapsed
+        );
+        assert_eq!(result["status"].as_str(), Some("running"));
+
+        // Clean up
+        td.rpc("send_keys", json!({"pane_id": td.origin_pane.clone(), "keys": "C-c"})).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        td.cleanup().await;
+    })
+    .await
+    .expect("test timed out");
+}

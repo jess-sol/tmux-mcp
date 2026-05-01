@@ -148,7 +148,11 @@ struct ReadResult {
 }
 
 /// Apply read params (next/head/tail/search) to a command record.
-/// Returns the selected lines and updates the cursor if `next` was used.
+/// Advances cursor for `next` and bare reads. Returns selected lines.
+///
+/// When `search` is present, windowing (next/head/tail) limits the number
+/// of *matches*, not raw lines. `next+search` scans forward from cursor,
+/// consuming non-matching lines along the way.
 fn apply_read_params(
     output: &str,
     cursor: &mut usize,
@@ -161,40 +165,64 @@ fn apply_read_params(
     };
     let total_lines = all_lines.len();
 
-    // Select range
-    let (selected, skipped) = if let Some(n) = params.next {
-        let start = *cursor;
-        let end = total_lines.min(start + n);
-        let lines = all_lines.get(start..end).unwrap_or(&[]).to_vec();
-        let skipped = start;
-        *cursor = end; // advance cursor
-        (lines, skipped)
-    } else if let Some(n) = params.head {
-        let end = total_lines.min(n);
-        (all_lines[..end].to_vec(), 0)
-    } else if let Some(n) = params.tail {
-        let start = total_lines.saturating_sub(n);
-        (all_lines[start..].to_vec(), start)
-    } else {
-        // All output
-        (all_lines, 0)
-    };
-
-    // Apply search filter
     if let Some(re) = &params.search {
-        let matched_lines: Vec<String> = selected
-            .iter()
-            .filter(|l| re.is_match(l))
-            .map(|l| l.to_string())
-            .collect();
-        let matched = matched_lines.len();
-        ReadResult {
-            lines: matched_lines,
-            total_lines,
-            skipped,
-            matched: Some(matched),
+        // Search mode: find matches first, then apply windowing to matches.
+        if let Some(n) = params.next {
+            // Scan from cursor, collect up to N matches, advance cursor past all scanned.
+            let start = (*cursor).min(total_lines);
+            let mut matches = Vec::new();
+            let mut scanned = 0;
+            for line in &all_lines[start..] {
+                scanned += 1;
+                if re.is_match(line) {
+                    matches.push(line.to_string());
+                    if matches.len() >= n {
+                        break;
+                    }
+                }
+            }
+            let matched = matches.len();
+            *cursor = start + scanned;
+            ReadResult { lines: matches, total_lines, skipped: start, matched: Some(matched) }
+        } else {
+            // head/tail/bare: collect all matches, then window.
+            let all_matches: Vec<String> = all_lines.iter()
+                .filter(|l| re.is_match(l))
+                .map(|l| l.to_string())
+                .collect();
+            let total_matches = all_matches.len();
+            let (selected, skipped) = if let Some(n) = params.head {
+                let end = total_matches.min(n);
+                (all_matches[..end].to_vec(), 0)
+            } else if let Some(n) = params.tail {
+                let start = total_matches.saturating_sub(n);
+                (all_matches[start..].to_vec(), start)
+            } else {
+                // bare + search: all matches, advance cursor
+                *cursor = total_lines;
+                (all_matches, 0)
+            };
+            ReadResult { lines: selected, total_lines, skipped, matched: Some(total_matches) }
         }
     } else {
+        // No search: window raw lines.
+        let (selected, skipped) = if let Some(n) = params.next {
+            let start = *cursor;
+            let end = total_lines.min(start + n);
+            let lines = all_lines.get(start..end).unwrap_or(&[]).to_vec();
+            *cursor = end;
+            (lines, start)
+        } else if let Some(n) = params.head {
+            let end = total_lines.min(n);
+            (all_lines[..end].to_vec(), 0)
+        } else if let Some(n) = params.tail {
+            let start = total_lines.saturating_sub(n);
+            (all_lines[start..].to_vec(), start)
+        } else {
+            // bare: all output, advance cursor
+            *cursor = total_lines;
+            (all_lines, 0)
+        };
         ReadResult {
             lines: selected.into_iter().map(|s| s.to_string()).collect(),
             total_lines,
@@ -421,6 +449,16 @@ async fn handle_command_read(
     // Find the target command
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
 
+    // Determine how many result lines constitute "enough" to return early.
+    let required_lines = if let Some(n) = read_params.next {
+        Some(n)
+    } else if let Some(n) = read_params.head {
+        Some(n)
+    } else {
+        None // tail waits for completion; bare returns immediately
+    };
+    let is_tail = read_params.tail.is_some();
+
     loop {
         {
             let mut tp = pane_handle.lock().await;
@@ -428,19 +466,17 @@ async fn handle_command_read(
             let cmd = if let Some(id) = command_id {
                 pane_state.command_by_id_mut(id)
             } else {
-                // Default: most recent command
                 pane_state.commands.front_mut()
             };
 
             if let Some(cmd) = cmd {
-                // For completed commands or non-next reads, return immediately
-                let is_next = read_params.next.is_some();
-                if cmd.completed || !is_next {
+                // Completed commands: always return immediately
+                if cmd.completed {
                     let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
                     return Ok(json!({
                         "command_id": cmd.id,
                         "command": cmd.command,
-                        "status": if cmd.completed { "completed" } else { "running" },
+                        "status": "completed",
                         "exit_code": cmd.exit_code,
                         "output": result.lines.join("\n"),
                         "total_lines": result.total_lines,
@@ -449,20 +485,30 @@ async fn handle_command_read(
                     }));
                 }
 
-                // next on active command — check if there's new output
-                let cursor = cmd.read_cursor;
-                let line_count = if cmd.output.is_empty() { 0 } else { cmd.output.lines().count() };
-                if line_count > cursor {
-                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                    if !result.lines.is_empty() {
-                        return Ok(json!({
-                            "command_id": cmd.id,
-                            "command": cmd.command,
-                            "status": "running",
-                            "output": result.lines.join("\n"),
-                            "total_lines": result.total_lines,
-                        }));
-                    }
+                // Running command: peek without mutating cursor
+                let mut peek_cursor = cmd.read_cursor;
+                let peeked = apply_read_params(&cmd.output, &mut peek_cursor, &read_params);
+
+                let has_enough = if let Some(n) = required_lines {
+                    peeked.lines.len() >= n
+                } else if is_tail {
+                    false // tail must wait for completion
+                } else {
+                    true // bare: return immediately
+                };
+
+                if has_enough {
+                    // Commit cursor and return
+                    cmd.read_cursor = peek_cursor;
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "running",
+                        "output": peeked.lines.join("\n"),
+                        "total_lines": peeked.total_lines,
+                        "lines_skipped": peeked.skipped,
+                        "search_matches": peeked.matched,
+                    }));
                 }
             } else if command_id.is_some() {
                 return Err(RpcError::invalid_params(format!(
@@ -474,7 +520,28 @@ async fn handle_command_read(
         }
 
         if tokio::time::Instant::now() >= deadline {
-            // Timeout — return whatever we have
+            // Timeout: tail returns empty, others return partial results
+            if is_tail {
+                // Re-read command metadata for the response
+                let tp = pane_handle.lock().await;
+                let pane_state = tp.processor.state();
+                let cmd = if let Some(id) = command_id {
+                    pane_state.command_by_id(id)
+                } else {
+                    pane_state.commands.front()
+                };
+                if let Some(cmd) = cmd {
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "running",
+                        "output": "",
+                        "total_lines": 0,
+                    }));
+                }
+                return Err(RpcError::internal("No command found"));
+            }
+
             let mut tp = pane_handle.lock().await;
             let pane_state = tp.processor.state_mut();
             let cmd = if let Some(id) = command_id {
@@ -482,16 +549,17 @@ async fn handle_command_read(
             } else {
                 pane_state.commands.front_mut()
             };
-
             if let Some(cmd) = cmd {
                 let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
                 return Ok(json!({
                     "command_id": cmd.id,
                     "command": cmd.command,
-                    "status": if cmd.completed { "completed" } else { "running" },
+                    "status": "running",
                     "exit_code": cmd.exit_code,
                     "output": result.lines.join("\n"),
                     "total_lines": result.total_lines,
+                    "lines_skipped": result.skipped,
+                    "search_matches": result.matched,
                 }));
             }
             return Err(RpcError::internal("No command found"));
