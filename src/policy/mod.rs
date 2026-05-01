@@ -1126,4 +1126,27 @@ mod tests {
     fn gawk_system_asks() {
         assert_eq!(evaluate_test("gawk 'BEGIN{system(\"id\")}'", &local_ctx()).decision, Decision::Ask);
     }
+
+    // --- Write redirects to device files ---
+
+    #[test]
+    fn write_redirect_to_dev_null_allowed() {
+        assert_eq!(evaluate_test("echo foo > /dev/null", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn write_redirect_stderr_to_dev_null_allowed() {
+        assert_eq!(evaluate_test("cargo build > /dev/null", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn write_redirect_to_dev_fd_allowed() {
+        assert_eq!(evaluate_test("echo foo > /dev/fd/2", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn write_redirect_to_dev_null_and_out_of_project_asks() {
+        // Mixed: one safe device target + one out-of-project target → ask
+        assert_eq!(evaluate_test("echo foo > /dev/null > /tmp/evil", &local_ctx()).decision, Decision::Ask);
+    }
 }

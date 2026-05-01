@@ -265,6 +265,10 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
     match call.func_name.as_str() {
         "_==_" => eval_eq(&call.args, ctx),
         "_!=_" => eval_ne(&call.args, ctx),
+        "_>_" => eval_cmp(&call.args, ctx, |a, b| a > b),
+        "_>=_" => eval_cmp(&call.args, ctx, |a, b| a >= b),
+        "_<_" => eval_cmp(&call.args, ctx, |a, b| a < b),
+        "_<=_" => eval_cmp(&call.args, ctx, |a, b| a <= b),
         "_&&_" => eval_and(&call.args, ctx),
         "_||_" => eval_or(&call.args, ctx),
         "!_" => eval_not(&call.args, ctx),
@@ -283,6 +287,25 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "_[_]" => eval_index(&call.args, ctx),
         "_+_" => eval_add(&call.args, ctx),
         "_?_:_" => eval_ternary(&call.args, ctx),
+        "size" => {
+            // list.size() → Int(len) or Unknown for non-exhaustive lists
+            if let Some(target) = &call.target {
+                match eval_expr(&target.expr, ctx) {
+                    TriVal::List { elements, exhaustive } => {
+                        if exhaustive {
+                            TriVal::Int(elements.len() as i64)
+                        } else {
+                            TriVal::Unknown
+                        }
+                    }
+                    TriVal::String(s) => TriVal::Int(s.len() as i64),
+                    TriVal::Unknown => TriVal::Unknown,
+                    _ => TriVal::Unknown,
+                }
+            } else {
+                TriVal::Unknown
+            }
+        }
         _ => {
             // Member calls: obj.method(args)
             if let Some(target) = &call.target {
@@ -329,6 +352,17 @@ fn eval_ne(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
     let a = eval_expr(&args[0].expr, ctx);
     let b = eval_expr(&args[1].expr, ctx);
     tri_eq(&a, &b).not().to_trival()
+}
+
+fn eval_cmp(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>, op: fn(i64, i64) -> bool) -> TriVal {
+    if args.len() != 2 { return TriVal::Unknown; }
+    let a = eval_expr(&args[0].expr, ctx);
+    let b = eval_expr(&args[1].expr, ctx);
+    match (&a, &b) {
+        (TriVal::Int(a), TriVal::Int(b)) => TriVal::Bool(op(*a, *b)),
+        (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
+        _ => TriVal::Unknown,
+    }
 }
 
 // --- Boolean operators ---
@@ -2059,5 +2093,46 @@ mod tests {
         } else {
             panic!("expected list, got {:?}", r);
         }
+    }
+
+    #[test]
+    fn size_on_list() {
+        let rules = compile_rules(&[(
+            "has writes",
+            r#"command.write_targets.size() > 0"#,
+            "allow",
+        )]);
+        let mut c = cmd("echo");
+        c.redirects.push(crate::policy::parse::RedirectInfo {
+            target: "/dev/null".into(),
+            is_write: true,
+            has_expansion: false,
+        });
+        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        // No redirects → size() == 0 → no match
+        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn size_on_string() {
+        let rules = compile_rules(&[(
+            "long name",
+            r#"command.name.size() > 3"#,
+            "allow",
+        )]);
+        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn comparison_operators() {
+        let rules = compile_rules(&[
+            ("gt", r#"command.args.size() > 1"#, "deny"),
+            ("eq", r#"command.args.size() >= 1"#, "ask"),
+            ("fallback", r#"true"#, "allow"),
+        ]);
+        assert_eq!(evaluate(&cmd_with_args("x", &["a", "b"]), &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&cmd_with_args("x", &["a"]), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("x"), &local_pane(), &rules).decision, Decision::Allow);
     }
 }

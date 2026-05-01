@@ -116,6 +116,12 @@ message = "cargo install downloads and compiles arbitrary code from crates.io"
 # --- Write redirect protection (runs before safe commands) ---
 
 [[rules]]
+description = "allow write redirects to device files"
+when = 'command.write_targets.size() > 0 && command.write_targets.all(t, t in ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/stdin", "/dev/stdout", "/dev/stderr"] || startsWith(t, "/dev/fd/"))'
+action = "allow"
+order = -1
+
+[[rules]]
 description = "write redirect out-of-project"
 when = 'command.write_targets.exists(t, !startsWith(path(t), pane.cwd))'
 action = "ask"
