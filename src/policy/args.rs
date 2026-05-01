@@ -10,7 +10,7 @@
 //! - Go pflag (cobra): https://pkg.go.dev/github.com/spf13/pflag
 
 use std::collections::HashMap;
-use super::rules::TriVal;
+pub use super::rules::TriVal;
 
 /// Argument parsing style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,6 +649,253 @@ mod tests {
         assert_eq!(operands(&r), vec!["pod", "ls", "-la"]);
     }
 
+    #[test]
+    fn gnu_bare_dash_is_operand() {
+        let r = parse_args(&tv_args(&["-v", "-", "file"]), &ArgSpec::gnu(&[]), true);
+        assert_eq!(operands(&r), vec!["-", "file"]);
+    }
+
+    #[test]
+    fn gnu_double_dash_after_operand_still_separates() {
+        // GNU mode: -- is always recognized as separator, even after operands
+        let r = parse_args(
+            &tv_args(&["op", "--", "-a"]),
+            &ArgSpec::gnu(&[]),
+            true,
+        );
+        assert_eq!(operands(&r), vec!["op", "-a"]);
+    }
+
+    #[test]
+    fn gnu_double_dash_between_flags() {
+        let r = parse_args(
+            &tv_args(&["-a", "--", "-b"]),
+            &ArgSpec::gnu(&[]),
+            true,
+        );
+        // -a is a flag, -- ends options, -b is an operand
+        assert_eq!(operands(&r), vec!["-b"]);
+    }
+
+    #[test]
+    fn gnu_missing_value() {
+        let r = parse_args(&tv_args(&["-u"]), &ArgSpec::gnu(&["-u"]), true);
+        assert!(matches!(flag(&r, "-u"), TriVal::Null));
+    }
+
+    #[test]
+    fn gnu_missing_value_after_operand() {
+        let r = parse_args(
+            &tv_args(&["op", "-u"]),
+            &ArgSpec::gnu(&["-u"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "-u"), TriVal::Null));
+    }
+
+    #[test]
+    fn gnu_attached_value() {
+        let r = parse_args(
+            &tv_args(&["op", "-fvalue", "op2"]),
+            &ArgSpec::gnu(&["-f"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-f"), s("value"));
+        assert_eq!(operands(&r), vec!["op", "op2"]);
+    }
+
+    #[test]
+    fn gnu_grouped_attached() {
+        let r = parse_args(
+            &tv_args(&["op", "-aoarg", "op2"]),
+            &ArgSpec::gnu(&["-o"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-o"), s("arg"));
+        assert_eq!(operands(&r), vec!["op", "op2"]);
+    }
+
+    #[test]
+    fn gnu_multi_char_single_dash() {
+        let r = parse_args(
+            &tv_args(&["op", "-name", "*.rs", "op2"]),
+            &ArgSpec::gnu(&["-name"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-name"), s("*.rs"));
+        assert_eq!(operands(&r), vec!["op", "op2"]);
+    }
+
+    #[test]
+    fn gnu_multiple_valued_flags() {
+        let r = parse_args(
+            &tv_args(&["op1", "-u", "root", "op2", "-C", "3"]),
+            &ArgSpec::gnu(&["-u", "-C"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-u"), s("root"));
+        assert_eq!(flag(&r, "-C"), s("3"));
+        assert_eq!(operands(&r), vec!["op1", "op2"]);
+    }
+
+    #[test]
+    fn gnu_absent_flag_is_null() {
+        let r = parse_args(&tv_args(&["op"]), &ArgSpec::gnu(&["-u"]), true);
+        assert!(matches!(flag(&r, "-u"), TriVal::Null));
+    }
+
+    #[test]
+    fn gnu_long_flag_separate_after_operand() {
+        let r = parse_args(
+            &tv_args(&["op", "--signal", "KILL", "op2"]),
+            &ArgSpec::gnu(&["--signal"]),
+            true,
+        );
+        assert_eq!(flag(&r, "--signal"), s("KILL"));
+        assert_eq!(operands(&r), vec!["op", "op2"]);
+    }
+
+    #[test]
+    fn gnu_long_flag_equals_after_operand() {
+        let r = parse_args(
+            &tv_args(&["op", "--signal=KILL", "op2"]),
+            &ArgSpec::gnu(&["--signal"]),
+            true,
+        );
+        assert_eq!(flag(&r, "--signal"), s("KILL"));
+        assert_eq!(operands(&r), vec!["op", "op2"]);
+    }
+
+    // GNU exhaustiveness
+
+    #[test]
+    fn gnu_exhaustive_all_known() {
+        let r = parse_args(
+            &tv_args(&["op", "-u", "root"]),
+            &ArgSpec::gnu(&["-u"]),
+            true,
+        );
+        assert!(r.exhaustive);
+    }
+
+    #[test]
+    fn gnu_exhaustive_unknown_flag_after_operand() {
+        let r = parse_args(
+            &tv_args(&["op", "-x", "op2"]),
+            &ArgSpec::gnu(&[]),
+            true,
+        );
+        assert!(!r.exhaustive);
+    }
+
+    #[test]
+    fn gnu_exhaustive_unknown_long_flag() {
+        let r = parse_args(
+            &tv_args(&["op", "--unknown", "op2"]),
+            &ArgSpec::gnu(&[]),
+            true,
+        );
+        assert!(!r.exhaustive);
+    }
+
+    #[test]
+    fn gnu_exhaustive_unknown_long_with_equals() {
+        let r = parse_args(
+            &tv_args(&["op", "--unknown=val", "op2"]),
+            &ArgSpec::gnu(&[]),
+            true,
+        );
+        assert!(r.exhaustive);
+    }
+
+    #[test]
+    fn gnu_exhaustive_absent_flag_unknown_when_non_exhaustive() {
+        let r = parse_args(
+            &tv_args(&["op", "-x"]),
+            &ArgSpec::gnu(&["-u"]),
+            true,
+        );
+        assert!(!r.exhaustive);
+        assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
+    }
+
+    // GNU expansion detection
+
+    #[test]
+    fn gnu_expansion_flag_value() {
+        let r = parse_args(
+            &tv_args(&["op", "-u", "$(whoami)"]),
+            &ArgSpec::gnu(&["-u"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
+    }
+
+    #[test]
+    fn gnu_expansion_attached_value() {
+        let r = parse_args(
+            &tv_args(&["op", "-u$(id)"]),
+            &ArgSpec::gnu(&["-u"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "-u"), TriVal::Unknown));
+    }
+
+    #[test]
+    fn gnu_expansion_long_equals() {
+        let r = parse_args(
+            &tv_args(&["op", "--user=$(id)"]),
+            &ArgSpec::gnu(&["--user"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "--user"), TriVal::Unknown));
+    }
+
+    // GNU terminated flags
+
+    #[test]
+    fn gnu_terminated_after_operand() {
+        let mut spec = ArgSpec::gnu(&[]);
+        spec.terminated.insert("-exec".into(), vec![";".into()]);
+        let r = parse_args(
+            &tv_args(&["op", "-exec", "rm", "{}", ";"]),
+            &spec,
+            true,
+        );
+        assert_eq!(operands(&r), vec!["op"]);
+        assert_eq!(terminated(&r, "-exec"), vec![vec!["rm", "{}"]]);
+    }
+
+    #[test]
+    fn gnu_terminated_mixed_with_flags() {
+        let mut spec = ArgSpec::gnu(&["-n"]);
+        spec.terminated.insert("-exec".into(), vec![";".into()]);
+        let r = parse_args(
+            &tv_args(&["op", "-n", "5", "-exec", "ls", "{}", ";", "op2"]),
+            &spec,
+            true,
+        );
+        assert_eq!(flag(&r, "-n"), s("5"));
+        assert_eq!(terminated(&r, "-exec"), vec![vec!["ls", "{}"]]);
+        assert_eq!(operands(&r), vec!["op", "op2"]);
+    }
+
+    // GNU docker exec pattern (more realistic)
+
+    #[test]
+    fn gnu_docker_exec_flags_interspersed() {
+        // docker exec -it mycontainer -u root bash
+        // -i and -t are standalone flags (unknown but skipped), -u is valued
+        let r = parse_args(
+            &tv_args(&["-it", "mycontainer", "-u", "root", "bash"]),
+            &ArgSpec::gnu(&["-u", "--user", "-e", "--env", "-w", "--workdir"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-u"), s("root"));
+        assert_eq!(operands(&r), vec!["mycontainer", "bash"]);
+        assert!(!r.exhaustive); // -i and -t are unknown flags
+    }
+
     // ========================================================================
     // Terminated flags (both modes)
     // ========================================================================
@@ -880,8 +1127,83 @@ mod tests {
     }
 
     // ========================================================================
-    // Real command patterns
+    // Real command patterns — one for every wrapper we support
     // ========================================================================
+
+    // --- Transparent (no getopt, all args are inner command) ---
+
+    #[test]
+    fn pattern_command_builtin() {
+        // command/builtin: all args are the inner command, no flag processing
+        let r = parse_args(&tv_args(&["ls", "-la", "/"]), &ArgSpec::posix(&[]), true);
+        assert_eq!(operands(&r), vec!["ls", "-la", "/"]);
+    }
+
+    #[test]
+    fn pattern_nohup() {
+        let r = parse_args(&tv_args(&["make", "-j4"]), &ArgSpec::posix(&[]), true);
+        assert_eq!(operands(&r), vec!["make", "-j4"]);
+    }
+
+    // --- POSIX wrappers ---
+
+    #[test]
+    fn pattern_nice() {
+        let r = parse_args(
+            &tv_args(&["-n", "10", "cargo", "build"]),
+            &ArgSpec::posix(&["-n"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-n"), s("10"));
+        assert_eq!(operands(&r), vec!["cargo", "build"]);
+    }
+
+    #[test]
+    fn pattern_strace() {
+        let r = parse_args(
+            &tv_args(&["-e", "trace=open", "-o", "/tmp/trace.log", "ls", "-la"]),
+            &ArgSpec::posix(&["-e", "-s", "-o", "-p"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-e"), s("trace=open"));
+        assert_eq!(flag(&r, "-o"), s("/tmp/trace.log"));
+        assert_eq!(operands(&r), vec!["ls", "-la"]);
+    }
+
+    #[test]
+    fn pattern_watch() {
+        let r = parse_args(
+            &tv_args(&["-n", "2", "df", "-h"]),
+            &ArgSpec::posix(&["-n"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-n"), s("2"));
+        assert_eq!(operands(&r), vec!["df", "-h"]);
+    }
+
+    #[test]
+    fn pattern_timeout() {
+        let r = parse_args(
+            &tv_args(&["-s", "KILL", "30", "curl", "example.com"]),
+            &ArgSpec::posix(&["-s", "--signal", "-k", "--kill-after"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-s"), s("KILL"));
+        // 30 is first operand (duration), then inner command
+        assert_eq!(operands(&r), vec!["30", "curl", "example.com"]);
+    }
+
+    #[test]
+    fn pattern_timeout_long_flag() {
+        let r = parse_args(
+            &tv_args(&["--signal=KILL", "--kill-after", "5", "30", "cmd"]),
+            &ArgSpec::posix(&["-s", "--signal", "-k", "--kill-after"]),
+            true,
+        );
+        assert_eq!(flag(&r, "--signal"), s("KILL"));
+        assert_eq!(flag(&r, "--kill-after"), s("5"));
+        assert_eq!(operands(&r), vec!["30", "cmd"]);
+    }
 
     #[test]
     fn pattern_sudo() {
@@ -897,7 +1219,7 @@ mod tests {
 
     #[test]
     fn pattern_sudo_grouped() {
-        // sudo -iu root rm
+        // sudo -iu root rm — common real-world pattern
         let r = parse_args(
             &tv_args(&["-iu", "root", "rm", "-rf", "/"]),
             &ArgSpec::posix(&["-C", "-g", "-r", "-t", "-U", "-D", "-u"]),
@@ -905,6 +1227,65 @@ mod tests {
         );
         assert_eq!(flag(&r, "-u"), s("root"));
         assert_eq!(operands(&r), vec!["rm", "-rf", "/"]);
+    }
+
+    #[test]
+    fn pattern_sudo_no_user() {
+        // sudo without -u defaults to root (handled by CEL, not getopt)
+        let r = parse_args(
+            &tv_args(&["rm", "-rf", "/"]),
+            &ArgSpec::posix(&["-C", "-g", "-r", "-t", "-U", "-D", "-u"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "-u"), TriVal::Null));
+        assert_eq!(operands(&r), vec!["rm", "-rf", "/"]);
+    }
+
+    #[test]
+    fn pattern_doas() {
+        let r = parse_args(
+            &tv_args(&["-u", "www", "nginx", "-t"]),
+            &ArgSpec::posix(&["-u"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-u"), s("www"));
+        assert_eq!(operands(&r), vec!["nginx", "-t"]);
+    }
+
+    #[test]
+    fn pattern_doas_no_user() {
+        let r = parse_args(
+            &tv_args(&["reboot"]),
+            &ArgSpec::posix(&["-u"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "-u"), TriVal::Null));
+        assert_eq!(operands(&r), vec!["reboot"]);
+    }
+
+    #[test]
+    fn pattern_su() {
+        // su -c "cmd string" user — -c takes the command string
+        let r = parse_args(
+            &tv_args(&["-c", "echo hello", "root"]),
+            &ArgSpec::posix(&["-c"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-c"), s("echo hello"));
+        assert_eq!(operands(&r), vec!["root"]);
+    }
+
+    #[test]
+    fn pattern_su_login() {
+        // su - root -c "cmd" — the - is a standalone flag (login shell)
+        let r = parse_args(
+            &tv_args(&["-", "root", "-c", "whoami"]),
+            &ArgSpec::posix(&["-c"]),
+            true,
+        );
+        // "-" is an operand per POSIX, triggers POSIX stop
+        // Everything after it is operands
+        assert_eq!(operands(&r), vec!["-", "root", "-c", "whoami"]);
     }
 
     #[test]
@@ -917,6 +1298,7 @@ mod tests {
         );
         assert_eq!(flag(&r, "-p"), s("22"));
         assert_eq!(flag(&r, "-i"), s("key.pem"));
+        // First operand is host, rest is inner command
         assert_eq!(operands(&r), vec!["user@host", "ls", "-la"]);
     }
 
@@ -928,20 +1310,60 @@ mod tests {
             true,
         );
         assert_eq!(flag(&r, "-p"), s("22"));
-        assert_eq!(flag(&r, "-i"), s("key.pem"));
         assert_eq!(operands(&r), vec!["host", "ls"]);
     }
 
     #[test]
-    fn pattern_timeout() {
+    fn pattern_ssh_verbose() {
+        // ssh -vvv host cmd — -v -v -v grouped
         let r = parse_args(
-            &tv_args(&["-s", "KILL", "30", "curl", "example.com"]),
-            &ArgSpec::posix(&["-s", "--signal", "-k", "--kill-after"]),
+            &tv_args(&["-vvv", "-p", "22", "host", "uptime"]),
+            &ArgSpec::posix(&["-p", "-i", "-o"]),
             true,
         );
-        assert_eq!(flag(&r, "-s"), s("KILL"));
-        assert_eq!(operands(&r), vec!["30", "curl", "example.com"]);
+        assert_eq!(flag(&r, "-p"), s("22"));
+        assert_eq!(operands(&r), vec!["host", "uptime"]);
+        assert!(!r.exhaustive); // -v is unknown
     }
+
+    // --- Shell eval ---
+
+    #[test]
+    fn pattern_shell_eval() {
+        // sh -c "echo hello" — -c takes the command string
+        let r = parse_args(
+            &tv_args(&["-c", "echo hello"]),
+            &ArgSpec::posix(&["-c"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-c"), s("echo hello"));
+        assert!(operands(&r).is_empty());
+    }
+
+    #[test]
+    fn pattern_bash_c_with_args() {
+        // bash -c 'echo $0 $1' arg0 arg1 — $0/$1 are expansions → Unknown
+        let r = parse_args(
+            &tv_args(&["-c", "echo $0 $1", "arg0", "arg1"]),
+            &ArgSpec::posix(&["-c"]),
+            true,
+        );
+        assert!(matches!(flag(&r, "-c"), TriVal::Unknown));
+        assert_eq!(operands(&r), vec!["arg0", "arg1"]);
+    }
+
+    #[test]
+    fn pattern_bash_c_literal() {
+        // bash -c 'echo hello' — no expansions
+        let r = parse_args(
+            &tv_args(&["-c", "echo hello"]),
+            &ArgSpec::posix(&["-c"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-c"), s("echo hello"));
+    }
+
+    // --- Delegating wrappers (args_complete=false) ---
 
     #[test]
     fn pattern_xargs() {
@@ -956,10 +1378,20 @@ mod tests {
     }
 
     #[test]
+    fn pattern_xargs_no_flags() {
+        let r = parse_args(
+            &tv_args(&["rm", "-rf"]),
+            &ArgSpec::posix(&["-d", "-I", "-L", "-n", "-P", "-s", "-E"]),
+            true,
+        );
+        assert_eq!(operands(&r), vec!["rm", "-rf"]);
+    }
+
+    #[test]
     fn pattern_find() {
         let mut spec = ArgSpec::posix(&[]);
-        for flag in ["-exec", "-execdir", "-ok", "-okdir"] {
-            spec.terminated.insert(flag.into(), vec![";".into(), "+".into()]);
+        for f in ["-exec", "-execdir", "-ok", "-okdir"] {
+            spec.terminated.insert(f.into(), vec![";".into(), "+".into()]);
         }
         let r = parse_args(
             &tv_args(&[".", "-name", "*.rs", "-exec", "grep", "TODO", "{}", ";"]),
@@ -971,7 +1403,63 @@ mod tests {
     }
 
     #[test]
+    fn pattern_find_multiple_exec() {
+        let mut spec = ArgSpec::posix(&[]);
+        for f in ["-exec", "-execdir", "-ok", "-okdir"] {
+            spec.terminated.insert(f.into(), vec![";".into(), "+".into()]);
+        }
+        let r = parse_args(
+            &tv_args(&[".", "-exec", "chmod", "644", "{}", ";", "-exec", "chown", "root", "{}", "+"]),
+            &spec,
+            true,
+        );
+        let blocks = terminated(&r, "-exec");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], vec!["chmod", "644", "{}"]);
+        assert_eq!(blocks[1], vec!["chown", "root", "{}"]);
+    }
+
+    #[test]
+    fn pattern_find_exec_shell() {
+        // find -exec sh -c 'echo {}' ; — common pattern
+        let mut spec = ArgSpec::posix(&[]);
+        spec.terminated.insert("-exec".into(), vec![";".into()]);
+        let r = parse_args(
+            &tv_args(&[".", "-exec", "sh", "-c", "echo {}", ";"]),
+            &spec,
+            true,
+        );
+        assert_eq!(terminated(&r, "-exec"), vec![vec!["sh", "-c", "echo {}"]]);
+    }
+
+    // --- Environment ---
+
+    #[test]
+    fn pattern_env() {
+        let r = parse_args(
+            &tv_args(&["-u", "FOO", "cmd", "arg"]),
+            &ArgSpec::posix(&["-u", "-S"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-u"), s("FOO"));
+        assert_eq!(operands(&r), vec!["cmd", "arg"]);
+    }
+
+    #[test]
+    fn pattern_env_no_flags() {
+        let r = parse_args(
+            &tv_args(&["cmd", "arg"]),
+            &ArgSpec::posix(&["-u", "-S"]),
+            true,
+        );
+        assert_eq!(operands(&r), vec!["cmd", "arg"]);
+    }
+
+    // --- GNU mode wrappers ---
+
+    #[test]
     fn pattern_kubectl() {
+        // kubectl exec pod -c container -- ls -la
         let r = parse_args(
             &tv_args(&["pod", "-c", "container", "--", "ls", "-la"]),
             &ArgSpec::gnu(&["-n", "-c", "--namespace", "--container"]),
@@ -979,6 +1467,18 @@ mod tests {
         );
         assert_eq!(flag(&r, "-c"), s("container"));
         assert_eq!(operands(&r), vec!["pod", "ls", "-la"]);
+    }
+
+    #[test]
+    fn pattern_kubectl_namespace() {
+        // kubectl exec -n kube-system pod -- cmd
+        let r = parse_args(
+            &tv_args(&["-n", "kube-system", "pod", "--", "cmd"]),
+            &ArgSpec::gnu(&["-n", "-c", "--namespace", "--container"]),
+            true,
+        );
+        assert_eq!(flag(&r, "-n"), s("kube-system"));
+        assert_eq!(operands(&r), vec!["pod", "cmd"]);
     }
 
     #[test]
@@ -994,14 +1494,15 @@ mod tests {
     }
 
     #[test]
-    fn pattern_env() {
+    fn pattern_podman_exec() {
+        // podman exec mycontainer -u root bash — flag after operand (GNU)
         let r = parse_args(
-            &tv_args(&["-u", "FOO", "cmd", "arg"]),
-            &ArgSpec::posix(&["-u", "-S"]),
+            &tv_args(&["mycontainer", "-u", "root", "bash"]),
+            &ArgSpec::gnu(&["-e", "--env", "-u", "--user", "-w", "--workdir"]),
             true,
         );
-        assert_eq!(flag(&r, "-u"), s("FOO"));
-        assert_eq!(operands(&r), vec!["cmd", "arg"]);
+        assert_eq!(flag(&r, "-u"), s("root"));
+        assert_eq!(operands(&r), vec!["mycontainer", "bash"]);
     }
 
     // ========================================================================
@@ -1039,306 +1540,4 @@ mod tests {
         assert!(matches!(r.positional(2), TriVal::Null));
     }
 
-    // ========================================================================
-    // Fuzzer: compare against C getopt
-    // ========================================================================
-
-    fn compile_getopt_ref() -> std::path::PathBuf {
-        use std::sync::Once;
-        static COMPILE: Once = Once::new();
-        let bin = std::env::temp_dir().join("tmux_mcp_getopt_ref");
-        COMPILE.call_once(|| {
-            let _ = std::fs::remove_file(&bin);
-            let src = r#"
-#include <stdio.h>
-#include <unistd.h>
-#include <string.h>
-
-// Usage: getopt_ref <mode> <optstring> -- <args...>
-// mode: "posix" or "gnu"
-int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: getopt_ref <mode> <optstring> -- <args...>\n");
-        return 1;
-    }
-    char *mode = argv[1];
-    char optstring[256];
-    // Prefix with '+' for POSIX mode
-    if (strcmp(mode, "posix") == 0) {
-        optstring[0] = '+';
-        strncpy(optstring + 1, argv[2], sizeof(optstring) - 2);
-    } else {
-        strncpy(optstring, argv[2], sizeof(optstring) - 1);
-    }
-    optstring[sizeof(optstring) - 1] = '\0';
-
-    // Find the -- separator
-    int sep = -1;
-    for (int i = 3; i < argc; i++) {
-        if (strcmp(argv[i], "--") == 0) { sep = i; break; }
-    }
-    if (sep < 0) { fprintf(stderr, "missing -- separator\n"); return 1; }
-
-    int fake_argc = argc - sep;
-    char *fake_argv[256];
-    fake_argv[0] = "cmd";
-    for (int i = sep + 1; i < argc; i++) {
-        fake_argv[i - sep] = argv[i];
-    }
-
-    optind = 1;
-    opterr = 0;
-    int c;
-    while ((c = getopt(fake_argc, fake_argv, optstring)) != -1) {
-        if (c == '?') {
-            printf("UNKNOWN=%c\n", optopt);
-        } else {
-            printf("FLAG=%c", c);
-            if (optarg) printf(" VALUE=%s", optarg);
-            printf("\n");
-        }
-    }
-    for (int i = optind; i < fake_argc; i++) {
-        printf("OPERAND=%s\n", fake_argv[i]);
-    }
-    return 0;
-}
-"#;
-            let src_path = std::env::temp_dir().join("tmux_mcp_getopt_ref.c");
-            std::fs::write(&src_path, src).expect("write C source");
-            let status = std::process::Command::new("cc")
-                .args(["-o", bin.to_str().unwrap(), src_path.to_str().unwrap()])
-                .status()
-                .expect("cc failed");
-            assert!(status.success(), "failed to compile getopt reference");
-        });
-        bin
-    }
-
-    struct RefResult {
-        flags: Vec<(char, Option<String>)>,
-        operands: Vec<String>,
-    }
-
-    fn run_ref(mode: &str, optstring: &str, argv: &[&str]) -> RefResult {
-        let bin = compile_getopt_ref();
-        let mut cmd = std::process::Command::new(&bin);
-        cmd.arg(mode).arg(optstring).arg("--");
-        for a in argv { cmd.arg(a); }
-        let output = cmd.output().expect("run getopt_ref");
-        assert!(output.status.success(), "getopt_ref failed: {}",
-            String::from_utf8_lossy(&output.stderr));
-
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        let mut flags = Vec::new();
-        let mut operands = Vec::new();
-        for line in stdout.lines() {
-            if let Some(rest) = line.strip_prefix("FLAG=") {
-                let mut parts = rest.splitn(2, " VALUE=");
-                let ch = parts.next().unwrap().chars().next().unwrap();
-                let val = parts.next().map(|s| s.to_string());
-                flags.push((ch, val));
-            } else if let Some(rest) = line.strip_prefix("OPERAND=") {
-                operands.push(rest.to_string());
-            }
-        }
-        RefResult { flags, operands }
-    }
-
-    fn optstring_to_valued(optstring: &str) -> Vec<String> {
-        let mut valued = Vec::new();
-        let chars: Vec<char> = optstring.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if i + 1 < chars.len() && chars[i + 1] == ':' {
-                valued.push(format!("-{}", chars[i]));
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-        valued
-    }
-
-    fn compare(mode: &str, optstring: &str, argv: &[&str]) {
-        let ref_result = run_ref(mode, optstring, argv);
-        let valued = optstring_to_valued(optstring);
-        let style = if mode == "posix" { ArgStyle::Posix } else { ArgStyle::Gnu };
-        let spec = ArgSpec { style, valued, terminated: HashMap::new() };
-        let our = parse_args(&tv_args(argv), &spec, true);
-
-        let our_ops = operands(&our);
-        assert_eq!(
-            our_ops, ref_result.operands,
-            "OPERANDS differ for mode={} optstring={:?} argv={:?}\n  ours: {:?}\n  ref:  {:?}",
-            mode, optstring, argv, our_ops, ref_result.operands,
-        );
-
-        // Track how many times each flag appears in C output.
-        // We keep first occurrence; C keeps last. Only compare non-repeated flags.
-        let mut flag_counts: HashMap<char, usize> = HashMap::new();
-        for (ch, _) in &ref_result.flags {
-            *flag_counts.entry(*ch).or_insert(0) += 1;
-        }
-
-        for (ch, ref_val) in &ref_result.flags {
-            if flag_counts[ch] > 1 {
-                continue; // Skip repeated flags — we intentionally keep first, C keeps last
-            }
-            let flag_name = format!("-{}", ch);
-            let our_val = flag(&our, &flag_name);
-            if let Some(rv) = ref_val {
-                assert_eq!(
-                    our_val, s(rv),
-                    "FLAG -{} value differs for mode={} optstring={:?} argv={:?}",
-                    ch, mode, optstring, argv,
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn fuzz_posix_predefined() {
-        let cases: Vec<(&str, Vec<&str>)> = vec![
-            ("ab:c:", vec!["-a", "-b", "val", "-c", "val2", "op1", "op2"]),
-            ("ab:c", vec!["-ac", "-b", "val", "op"]),
-            ("f:", vec!["-fvalue", "op"]),
-            ("ab:", vec!["-abval", "op"]),
-            ("a", vec!["-a", "--", "-a", "op"]),
-            ("a", vec!["-a", "-", "op"]),
-            ("a", vec!["-x", "op"]),
-            ("f:", vec!["-f", "-x", "op"]),
-            ("", vec!["op1", "op2"]),
-            ("abc", vec!["-a", "-b", "-c"]),
-            ("a", vec!["op", "-a"]),
-            ("ab:c", vec!["-ab", "val", "-c", "op"]),
-            ("a:b:", vec!["-ab", "val", "op"]),
-            ("p:", vec!["-p22", "host"]),
-            ("abc:", vec![]),
-            ("a", vec!["--"]),
-            ("ab", vec!["--", "-a", "-b"]),
-            ("f:", vec!["-f"]),
-            ("a", vec!["-a"]),
-        ];
-        for (optstring, argv) in &cases {
-            compare("posix", optstring, argv);
-        }
-    }
-
-    #[test]
-    fn fuzz_gnu_predefined() {
-        let cases: Vec<(&str, Vec<&str>)> = vec![
-            ("a", vec!["op", "-a"]),
-            ("a:b", vec!["op1", "-a", "val", "-b", "op2"]),
-            ("a", vec!["-a", "op", "--", "-a"]),
-            ("f:", vec!["op", "-f", "val", "op2"]),
-        ];
-        for (optstring, argv) in &cases {
-            compare("gnu", optstring, argv);
-        }
-    }
-
-    #[test]
-    fn fuzz_posix_random() {
-        let flag_chars: Vec<char> = "abcdefghijklnoprstuvwxyz".chars().collect();
-        let mut state: u32 = 0xDEAD_BEEF;
-        let mut rand = || -> u32 {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            state
-        };
-
-        for _ in 0..200 {
-            let n_opts = (rand() % 5 + 2) as usize;
-            let mut optstring = String::new();
-            let mut used = std::collections::HashSet::new();
-            for _ in 0..n_opts {
-                let ch = flag_chars[rand() as usize % flag_chars.len()];
-                if used.contains(&ch) { continue; }
-                used.insert(ch);
-                optstring.push(ch);
-                if rand() % 3 == 0 { optstring.push(':'); }
-            }
-
-            let n_args = (rand() % 8 + 1) as usize;
-            let mut argv: Vec<String> = Vec::new();
-            for _ in 0..n_args {
-                match rand() % 10 {
-                    0..=2 => {
-                        let ch = flag_chars[rand() as usize % flag_chars.len()];
-                        argv.push(format!("-{}", ch));
-                    }
-                    3 => {
-                        let n = (rand() % 2 + 2) as usize;
-                        let mut group = String::from("-");
-                        for _ in 0..n { group.push(flag_chars[rand() as usize % flag_chars.len()]); }
-                        argv.push(group);
-                    }
-                    4 => argv.push("--".into()),
-                    5 => argv.push("-".into()),
-                    6 => {
-                        let ch = flag_chars[rand() as usize % flag_chars.len()];
-                        argv.push(format!("-{}val{}", ch, rand() % 100));
-                    }
-                    _ => argv.push(format!("op{}", rand() % 100)),
-                }
-            }
-
-            let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-            compare("posix", &optstring, &argv_refs);
-        }
-    }
-
-    #[test]
-    fn fuzz_gnu_random() {
-        let flag_chars: Vec<char> = "abcdefghijklnoprstuvwxyz".chars().collect();
-        let mut state: u32 = 0xBEEF_CAFE;
-        let mut rand = || -> u32 {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            state
-        };
-
-        for _ in 0..200 {
-            let n_opts = (rand() % 5 + 2) as usize;
-            let mut optstring = String::new();
-            let mut used = std::collections::HashSet::new();
-            for _ in 0..n_opts {
-                let ch = flag_chars[rand() as usize % flag_chars.len()];
-                if used.contains(&ch) { continue; }
-                used.insert(ch);
-                optstring.push(ch);
-                if rand() % 3 == 0 { optstring.push(':'); }
-            }
-
-            let n_args = (rand() % 8 + 1) as usize;
-            let mut argv: Vec<String> = Vec::new();
-            for _ in 0..n_args {
-                match rand() % 10 {
-                    0..=2 => {
-                        let ch = flag_chars[rand() as usize % flag_chars.len()];
-                        argv.push(format!("-{}", ch));
-                    }
-                    3 => {
-                        let n = (rand() % 2 + 2) as usize;
-                        let mut group = String::from("-");
-                        for _ in 0..n { group.push(flag_chars[rand() as usize % flag_chars.len()]); }
-                        argv.push(group);
-                    }
-                    4 => argv.push("--".into()),
-                    5 => argv.push("-".into()),
-                    6 => {
-                        let ch = flag_chars[rand() as usize % flag_chars.len()];
-                        argv.push(format!("-{}val{}", ch, rand() % 100));
-                    }
-                    _ => argv.push(format!("op{}", rand() % 100)),
-                }
-            }
-
-            let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-            compare("gnu", &optstring, &argv_refs);
-        }
-    }
 }

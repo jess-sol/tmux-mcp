@@ -1,0 +1,29 @@
+[package]
+name = "tmux-mcp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+arbitrary = { version = "1", features = ["derive"] }
+tmux-mcp = { path = ".." }
+
+[workspace]
+
+# Prevent this from interfering with the parent workspace
+[patch.crates-io]
+
+[[bin]]
+name = "args_posix"
+path = "fuzz_targets/args_posix.rs"
+doc = false
+
+[[bin]]
+name = "args_gnu"
+path = "fuzz_targets/args_gnu.rs"
+doc = false
+
