@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use super::PaneContext;
 
-const APPROVAL_TTL_SECS: u64 = 30;
+const APPROVAL_TTL_SECS: u64 = 1800;
 
 struct PendingApproval {
     command: String,
