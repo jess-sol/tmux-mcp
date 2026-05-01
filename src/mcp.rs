@@ -109,118 +109,79 @@ pub struct PressKeyParams {
 
 // --- Response formatting ---
 
-/// Format list_panes result as a compact aligned table.
+/// Format list_panes result as clean JSON with relative coordinates and short keys.
 fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
+    use serde_json::{Map, Value};
+
     let panes = match result["panes"].as_array() {
         Some(arr) => arr,
         None => return "(no panes)".to_string(),
     };
 
-    // Format seconds compactly: "0.3s", "55.9s", or "-" for null
-    fn fmt_secs(v: &serde_json::Value) -> String {
-        match v.as_f64() {
-            Some(s) => format!("{:.1}s", s),
-            None => "-".to_string(),
-        }
-    }
+    // Origin pane position used as coordinate reference point.
+    let (ox, oy) = panes
+        .iter()
+        .find(|p| p["pane_id"].as_str() == Some(origin_pane))
+        .map(|p| (p["x"].as_i64().unwrap_or(0), p["y"].as_i64().unwrap_or(0)))
+        .unwrap_or((0, 0));
 
-    // Build row data
-    struct Row {
-        pane: String,
-        pid: String,
-        geometry: String,
-        cwd: String,
-        foreground: String,
-        activity: String,
-        osc133: String,
-        osc133_marker: String,
-        last_data: String,
-    }
-    let rows: Vec<Row> = panes
+    let pane_values: Vec<Value> = panes
         .iter()
         .map(|p| {
             let pane_id = p["pane_id"].as_str().unwrap_or("?");
-            let pane = if pane_id == origin_pane {
-                format!("{} (us)", pane_id)
-            } else {
-                pane_id.to_string()
-            };
-
-            let x = p["x"].as_u64().unwrap_or(0);
-            let y = p["y"].as_u64().unwrap_or(0);
-            let w = p["width"].as_u64().unwrap_or(0);
-            let h = p["height"].as_u64().unwrap_or(0);
-            let geometry = format!("{},{} {}x{}", x, y, w, h);
 
             // Merge cwd: prefer osc_cwd (works across SSH), fall back to process_cwd
-            let base_cwd = p["osc_cwd"]
+            let cwd = p["osc_cwd"]
                 .as_str()
                 .or_else(|| p["process_cwd"].as_str())
-                .unwrap_or("-");
-            let cwd = match (p["osc_user"].as_str(), p["osc_hostname"].as_str()) {
-                (Some(user), Some(host)) => format!("{}@{}:{}", user, host, base_cwd),
-                (None, Some(host)) => format!("{}:{}", host, base_cwd),
-                _ => base_cwd.to_string(),
-            };
+                .map(|path| match (p["osc_user"].as_str(), p["osc_hostname"].as_str()) {
+                    (Some(user), Some(host)) => format!("{}@{}:{}", user, host, path),
+                    (None, Some(host)) => format!("{}:{}", host, path),
+                    _ => path.to_string(),
+                });
 
-            Row {
-                pane,
-                pid: p["pid"].as_u64().map(|v| v.to_string()).unwrap_or("-".into()),
-                geometry,
-                cwd,
-                foreground: p["foreground"].as_str().unwrap_or("-").to_string(),
-                activity: p["activity"].as_str().unwrap_or("?").to_string(),
-                osc133: p["osc133_status"].as_str().unwrap_or("?").to_string(),
-                osc133_marker: fmt_secs(&p["osc133_last_marker_secs"]),
-                last_data: fmt_secs(&p["last_data_secs"]),
+            let mut obj = Map::new();
+            obj.insert("id".into(), json!(pane_id));
+            if pane_id == origin_pane {
+                obj.insert("origin".into(), json!(true));
             }
+            obj.insert("x".into(), json!(p["x"].as_i64().unwrap_or(0) - ox));
+            obj.insert("y".into(), json!(p["y"].as_i64().unwrap_or(0) - oy));
+            obj.insert("w".into(), json!(p["width"].as_u64().unwrap_or(0)));
+            obj.insert("h".into(), json!(p["height"].as_u64().unwrap_or(0)));
+            if let Some(cwd) = cwd {
+                obj.insert("cwd".into(), json!(cwd));
+            }
+            if let Some(fg) = p["foreground"].as_str() {
+                obj.insert("fg".into(), json!(fg));
+            }
+            obj.insert(
+                "activity".into(),
+                json!(p["activity"].as_str().unwrap_or("Unknown")),
+            );
+            obj.insert(
+                "shell_integration".into(),
+                json!(p["osc133_status"].as_str().unwrap_or("unknown")),
+            );
+            if let Some(s) = p["osc133_last_marker_secs"].as_f64() {
+                obj.insert("marker_age".into(), json!((s * 10.0).round() / 10.0));
+            }
+            if let Some(s) = p["last_data_secs"].as_f64() {
+                obj.insert("data_age".into(), json!((s * 10.0).round() / 10.0));
+            }
+
+            Value::Object(obj)
         })
         .collect();
 
-    // Compute column widths (all but last column get padded)
-    let headers = [
-        "Pane", "PID", "Geometry", "CWD", "Foreground", "Activity",
-        "OSC133", "LastMarker", "LastData",
-    ];
-    let mut w: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for r in &rows {
-        w[0] = w[0].max(r.pane.len());
-        w[1] = w[1].max(r.pid.len());
-        w[2] = w[2].max(r.geometry.len());
-        w[3] = w[3].max(r.cwd.len());
-        w[4] = w[4].max(r.foreground.len());
-        w[5] = w[5].max(r.activity.len());
-        w[6] = w[6].max(r.osc133.len());
-        w[7] = w[7].max(r.osc133_marker.len());
-        w[8] = w[8].max(r.last_data.len());
+    let mut top = Map::new();
+    if let Some(u) = result["daemon_uptime_secs"].as_f64() {
+        top.insert("uptime".into(), json!((u).round()));
     }
+    top.insert("panes".into(), Value::Array(pane_values));
 
-    let mut out = String::new();
-    // Header
-    out.push_str(&format!(
-        "{:<w0$}  {:>w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}  {:<w6$}  {:>w7$}  {}\n",
-        headers[0], headers[1], headers[2], headers[3], headers[4],
-        headers[5], headers[6], headers[7], headers[8],
-        w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3], w4 = w[4],
-        w5 = w[5], w6 = w[6], w7 = w[7],
-    ));
-    // Rows
-    for r in &rows {
-        out.push_str(&format!(
-            "{:<w0$}  {:>w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}  {:<w6$}  {:>w7$}  {}\n",
-            r.pane, r.pid, r.geometry, r.cwd, r.foreground,
-            r.activity, r.osc133, r.osc133_marker, r.last_data,
-            w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3], w4 = w[4],
-            w5 = w[5], w6 = w[6], w7 = w[7],
-        ));
-    }
-
-    // Footer
-    if let Some(uptime) = result["daemon_uptime_secs"].as_f64() {
-        out.push_str(&format!("\nDaemon uptime: {:.0}s", uptime));
-    }
-
-    out.trim_end().to_string()
+    serde_json::to_string_pretty(&Value::Object(top))
+        .unwrap_or_else(|_| "(error formatting panes)".into())
 }
 
 /// Format command_history result as a compact aligned table.
