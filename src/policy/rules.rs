@@ -279,6 +279,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "rsplit" => eval_rsplit(&call.args, ctx),
         "_[_]" => eval_index(&call.args, ctx),
         "_+_" => eval_add(&call.args, ctx),
+        "_?_:_" => eval_ternary(&call.args, ctx),
         _ => {
             // Member calls: obj.method(args)
             if let Some(target) = &call.target {
@@ -628,6 +629,17 @@ fn resolve_path(arg: &str, cwd: &str, user: Option<&str>) -> Option<String> {
 }
 
 // --- CEL operators and functions ---
+
+/// `cond ? then : else` — ternary conditional
+fn eval_ternary(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
+    if args.len() != 3 { return TriVal::Unknown; }
+    let cond = eval_expr(&args[0].expr, ctx);
+    match cond.is_truthy() {
+        TriBool::True => eval_expr(&args[1].expr, ctx),
+        TriBool::False => eval_expr(&args[2].expr, ctx),
+        TriBool::Unknown => TriVal::Unknown,
+    }
+}
 
 /// `a + b` — integer addition or list concatenation
 fn eval_add(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
@@ -1749,8 +1761,53 @@ mod tests {
         }
     }
 
+    // --- CEL operator: _?_:_ (ternary conditional) ---
+
     #[test]
-    #[ignore] // needs _?_:_ ternary (commit 2)
+    fn cel_ternary_true() {
+        assert_eq!(eval_cel(r#"true ? "yes" : "no""#), TriVal::String("yes".into()));
+    }
+
+    #[test]
+    fn cel_ternary_false() {
+        assert_eq!(eval_cel(r#"false ? "yes" : "no""#), TriVal::String("no".into()));
+    }
+
+    #[test]
+    fn cel_ternary_with_comparison() {
+        assert_eq!(eval_cel(r#"1 == 1 ? "eq" : "ne""#), TriVal::String("eq".into()));
+    }
+
+    #[test]
+    fn cel_ternary_nested() {
+        assert_eq!(
+            eval_cel(r#"true ? (false ? "a" : "b") : "c""#),
+            TriVal::String("b".into()),
+        );
+    }
+
+    #[test]
+    fn cel_ternary_unknown_cond() {
+        let r = eval_cel_with("x ? 1 : 2", &HashMap::new());
+        // x is unbound → Unknown, ternary should propagate
+        assert!(matches!(r, TriVal::Unknown));
+    }
+
+    #[test]
+    fn cel_map_with_ternary() {
+        let r = eval_cel_args(
+            r#"command.args.map(a, a == "-v" ? "verbose" : a)"#,
+            &["-v", "cmd"],
+        );
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements[0], TriVal::String("verbose".into()));
+            assert_eq!(elements[1], TriVal::String("cmd".into()));
+        } else {
+            panic!("expected list, got {:?}", r);
+        }
+    }
+
+    #[test]
     fn cel_filter_comprehension() {
         let r = eval_cel_args(
             r#"command.args.filter(a, a != "-la")"#,
