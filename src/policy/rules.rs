@@ -277,6 +277,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "getopt" => eval_getopt(call, ctx),
         "or" => eval_or_func(&call.args, ctx),
         "rsplit" => eval_rsplit(&call.args, ctx),
+        "slice" => eval_slice(&call.args, ctx),
         "_[_]" => eval_index(&call.args, ctx),
         "_+_" => eval_add(&call.args, ctx),
         "_?_:_" => eval_ternary(&call.args, ctx),
@@ -652,6 +653,26 @@ fn eval_add(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
             let mut result = a.clone();
             result.extend(b.iter().cloned());
             TriVal::List { elements: result, exhaustive: true }
+        }
+        (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
+        _ => TriVal::Unknown,
+    }
+}
+
+/// `slice(list, n)` — list from index n onward
+fn eval_slice(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
+    if args.len() != 2 { return TriVal::Unknown; }
+    let list = eval_expr(&args[0].expr, ctx);
+    let n = eval_expr(&args[1].expr, ctx);
+    match (&list, &n) {
+        (TriVal::List { elements, exhaustive }, TriVal::Int(i)) => {
+            let start = if *i < 0 { 0 } else { *i as usize };
+            let slice = if start < elements.len() {
+                elements[start..].to_vec()
+            } else {
+                Vec::new()
+            };
+            TriVal::List { elements: slice, exhaustive: *exhaustive }
         }
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
         _ => TriVal::Unknown,
@@ -1806,6 +1827,55 @@ mod tests {
             panic!("expected list, got {:?}", r);
         }
     }
+
+    // --- CEL function: slice(list, n) ---
+
+    #[test]
+    fn cel_slice_from_start() {
+        let r = eval_cel(r#"slice(["a","b","c","d"], 0)"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 4);
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_slice_from_middle() {
+        let r = eval_cel(r#"slice(["a","b","c","d"], 2)"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 2);
+            assert_eq!(elements[0], TriVal::String("c".into()));
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_slice_past_end() {
+        let r = eval_cel(r#"slice(["a","b"], 10)"#);
+        if let TriVal::List { elements, .. } = r {
+            assert!(elements.is_empty());
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_slice_empty() {
+        let r = eval_cel(r#"slice([], 0)"#);
+        if let TriVal::List { elements, .. } = r {
+            assert!(elements.is_empty());
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_slice_negative_clamps() {
+        let r = eval_cel(r#"slice(["a","b"], -1)"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 2);
+        } else { panic!("expected list"); }
+    }
+
+    // --- CEL function: take_until(list, tokens) ---
+    // (commit 4 tests, added early)
+
+    // --- CEL function: split_at(list, markers) ---
+    // (commit 5 tests, added early)
 
     #[test]
     fn cel_filter_comprehension() {
