@@ -278,6 +278,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "or" => eval_or_func(&call.args, ctx),
         "rsplit" => eval_rsplit(&call.args, ctx),
         "slice" => eval_slice(&call.args, ctx),
+        "take_until" => eval_take_until(&call.args, ctx),
         "_[_]" => eval_index(&call.args, ctx),
         "_+_" => eval_add(&call.args, ctx),
         "_?_:_" => eval_ternary(&call.args, ctx),
@@ -653,6 +654,32 @@ fn eval_add(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
             let mut result = a.clone();
             result.extend(b.iter().cloned());
             TriVal::List { elements: result, exhaustive: true }
+        }
+        (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
+        _ => TriVal::Unknown,
+    }
+}
+
+/// `take_until(list, tokens)` — elements from front until a token (exclusive). All if no match.
+fn eval_take_until(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
+    if args.len() != 2 { return TriVal::Unknown; }
+    let list = eval_expr(&args[0].expr, ctx);
+    let tokens = eval_expr(&args[1].expr, ctx);
+    match (&list, &tokens) {
+        (TriVal::List { elements, exhaustive }, TriVal::List { elements: tok_list, .. }) => {
+            let tok_strings: Vec<&str> = tok_list.iter().filter_map(|t| {
+                if let TriVal::String(s) = t { Some(s.as_str()) } else { None }
+            }).collect();
+            let mut result = Vec::new();
+            for el in elements {
+                if let TriVal::String(s) = el {
+                    if tok_strings.contains(&s.as_str()) {
+                        break;
+                    }
+                }
+                result.push(el.clone());
+            }
+            TriVal::List { elements: result, exhaustive: *exhaustive }
         }
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
         _ => TriVal::Unknown,
@@ -1872,10 +1899,49 @@ mod tests {
     }
 
     // --- CEL function: take_until(list, tokens) ---
-    // (commit 4 tests, added early)
+
+    #[test]
+    fn cel_take_until_basic() {
+        let r = eval_cel(r#"take_until(["a","b",";","c"], [";"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements, vec![TriVal::String("a".into()), TriVal::String("b".into())]);
+        } else { panic!("expected list, got {:?}", r); }
+    }
+
+    #[test]
+    fn cel_take_until_no_match() {
+        let r = eval_cel(r#"take_until(["a","b","c"], [";"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements.len(), 3);
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_take_until_at_start() {
+        let r = eval_cel(r#"take_until([";","a"], [";"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert!(elements.is_empty());
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_take_until_empty() {
+        let r = eval_cel(r#"take_until([], [";"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert!(elements.is_empty());
+        } else { panic!("expected list"); }
+    }
+
+    #[test]
+    fn cel_take_until_multiple_tokens() {
+        let r = eval_cel(r#"take_until(["a","b","+","c",";"], [";","+"])"#);
+        if let TriVal::List { elements, .. } = r {
+            assert_eq!(elements, vec![TriVal::String("a".into()), TriVal::String("b".into())]);
+        } else { panic!("expected list"); }
+    }
 
     // --- CEL function: split_at(list, markers) ---
-    // (commit 5 tests, added early)
+    // (commit 5)
 
     #[test]
     fn cel_filter_comprehension() {
