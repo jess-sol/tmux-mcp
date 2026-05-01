@@ -132,9 +132,12 @@ async fn event_loop(
                     registry.get_handle(&pane_id)
                 };
                 let Some(handle) = handle else { continue; };
-                let mut tp = handle.lock().await;
-                let bytes = unescape_tmux_output(&data);
-                tp.processor.process_chunk(&bytes);
+                {
+                    let mut tp = handle.lock().await;
+                    let bytes = unescape_tmux_output(&data);
+                    tp.processor.process_chunk(&bytes);
+                } // lock released before notify
+                handle.notify_state_changed();
             }
 
             Notification::Exit { .. } | Notification::SessionClose { .. } => {

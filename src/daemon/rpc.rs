@@ -260,8 +260,16 @@ fn apply_read_params(
                 let end = total_matches.min(n);
                 (&all_match_indices[..end], 0)
             } else if let Some(n) = params.tail {
-                let start = total_matches.saturating_sub(n);
-                (&all_match_indices[start..], start)
+                // Exclude matches on lines already consumed by next (unless cursor at end)
+                let effective_start = if *cursor > 0 && *cursor < total_lines {
+                    all_match_indices.partition_point(|&i| i < *cursor)
+                } else {
+                    0
+                };
+                let effective_count = all_match_indices.len() - effective_start;
+                let tail_skip = effective_count.saturating_sub(n);
+                let final_start = effective_start + tail_skip;
+                (&all_match_indices[final_start..], final_start)
             } else {
                 // bare + search: all matches, advance cursor
                 *cursor = total_lines;
@@ -289,7 +297,11 @@ fn apply_read_params(
             let end = total_lines.min(n);
             (all_lines[..end].to_vec(), 0)
         } else if let Some(n) = params.tail {
-            let start = total_lines.saturating_sub(n);
+            let mut start = total_lines.saturating_sub(n);
+            // Don't re-show lines already consumed by next (unless cursor at end = re-read)
+            if *cursor > 0 && *cursor < total_lines {
+                start = start.max(*cursor);
+            }
             (all_lines[start..].to_vec(), start)
         } else {
             // bare: all output, advance cursor
@@ -322,8 +334,9 @@ fn capture_screen(ps: &crate::pane::registry::PaneState, lines: usize) -> String
     selected[..end].join("\n")
 }
 
-/// Probe OSC 133 by sending ` :` and watching for a completion_seq bump.
-/// Returns true if a bump was observed within the deadline.
+/// Probe OSC 133 by sending ` :` and waiting for the full prompt cycle.
+/// Returns true if completion_seq bumps AND the probe command is finalized
+/// (B marker arrived) within the deadline.
 async fn probe_osc133(
     pane_id: &str,
     pane_handle: &PaneHandle,
@@ -343,16 +356,27 @@ async fn probe_osc133(
     }
 
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(deadline_ms);
+    let mut rx = pane_handle.subscribe_state();
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         {
             let tp = pane_handle.lock().await;
-            if tp.processor.state().completion_seq > seq_before {
+            let s = tp.processor.state();
+            // Wait for D marker (completion_seq bump) AND B marker (Input phase).
+            // Checking phase == Input (not just active_command().is_none()) ensures
+            // we don't return early on a stray D marker from shell init — Input
+            // requires the full A→B cycle to complete, meaning the shell is ready.
+            if s.completion_seq > seq_before
+                && matches!(tp.processor.osc133_phase(), Osc133Phase::Input)
+            {
                 return Ok(true);
             }
         }
         if tokio::time::Instant::now() >= deadline {
             return Ok(false);
+        }
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
         }
     }
 }
@@ -531,6 +555,7 @@ async fn handle_command_read(
         None // tail waits for completion; bare returns immediately
     };
     let is_tail = read_params.tail.is_some();
+    let mut rx = pane_handle.subscribe_state();
 
     loop {
         {
@@ -555,6 +580,7 @@ async fn handle_command_read(
                         "total_lines": result.total_lines,
                         "lines_skipped": result.skipped,
                         "search_matches": result.matched,
+                        "read_cursor": cmd.read_cursor,
                     }));
                 }
 
@@ -583,6 +609,7 @@ async fn handle_command_read(
                         "total_lines": peeked.total_lines,
                         "lines_skipped": peeked.skipped,
                         "search_matches": peeked.matched,
+                        "read_cursor": cmd.read_cursor,
                     }));
                 }
             } else if command_id.is_some() {
@@ -612,6 +639,7 @@ async fn handle_command_read(
                         "status": "running",
                         "output": "",
                         "total_lines": 0,
+                        "read_cursor": cmd.read_cursor,
                     }));
                 }
                 return Err(RpcError::internal("No command found"));
@@ -635,12 +663,16 @@ async fn handle_command_read(
                     "total_lines": result.total_lines,
                     "lines_skipped": result.skipped,
                     "search_matches": result.matched,
+                    "read_cursor": cmd.read_cursor,
                 }));
             }
             return Err(RpcError::internal("No command found"));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
     }
 }
 
@@ -817,10 +849,9 @@ async fn handle_command_run(
     let completion_deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
     let mut command_seen = false;
+    let mut rx = pane_handle.subscribe_state();
 
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
         {
             let mut tp = pane_handle.lock().await;
             let pane_state = tp.processor.state_mut();
@@ -838,6 +869,7 @@ async fn handle_command_run(
                             "total_lines": result.total_lines,
                             "lines_skipped": result.skipped,
                             "search_matches": result.matched,
+                            "read_cursor": cmd.read_cursor,
                         }));
                     }
                 }
@@ -872,6 +904,7 @@ async fn handle_command_run(
                         "status": "running",
                         "output": result.lines.join("\n"),
                         "total_lines": result.total_lines,
+                        "read_cursor": cmd.read_cursor,
                     }));
                 }
             }
@@ -880,6 +913,13 @@ async fn handle_command_run(
                 "output": "",
                 "total_lines": 0,
             }));
+        }
+
+        // Wait for state change or the sooner of the two deadlines
+        let wait_until = if command_seen { completion_deadline } else { marker_deadline };
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(wait_until) => {}
         }
     }
 }

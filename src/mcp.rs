@@ -120,6 +120,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     let lines_skipped = result["lines_skipped"].as_u64().unwrap_or(0);
     let search_matches = result["search_matches"].as_u64();
+    let read_cursor = result["read_cursor"].as_u64().unwrap_or(0);
 
     let mut text = String::new();
 
@@ -128,9 +129,16 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
         text.push_str(&format!("$ {}\n", command));
     }
 
-    // Skipped lines hint
+    // Skipped lines hint — split into already-read vs not-shown portions
     if lines_skipped > 0 {
-        text.push_str(&format!("<skipped {} already-read lines>\n", lines_skipped));
+        let already_read = if read_cursor > 0 { read_cursor.min(lines_skipped) } else { 0 };
+        let not_shown = lines_skipped - already_read;
+        if already_read > 0 {
+            text.push_str(&format!("<{} lines already read>\n", already_read));
+        }
+        if not_shown > 0 {
+            text.push_str(&format!("<{} lines not shown>\n", not_shown));
+        }
     }
 
     // Output

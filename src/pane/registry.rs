@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, watch};
 
 use crate::pane::processor::PaneProcessor;
 use crate::parse::layout::LayoutPane;
@@ -28,12 +28,27 @@ pub struct TrackedPane {
     pub pane_id: String,
     pub window_id: String,
     state: Mutex<PaneState>,
+    /// Bumped after every `process_chunk()` — handlers `subscribe_state()`
+    /// and `select!` on `changed()` instead of polling with sleep.
+    state_tx: watch::Sender<u64>,
 }
 
 impl TrackedPane {
     /// Lock the mutable pane state.
     pub async fn lock(&self) -> MutexGuard<'_, PaneState> {
         self.state.lock().await
+    }
+
+    /// Signal that pane state has changed (new output, completion, etc.).
+    /// Call AFTER releasing the pane Mutex so waiters can acquire it immediately.
+    pub fn notify_state_changed(&self) {
+        self.state_tx.send_modify(|v| *v += 1);
+    }
+
+    /// Subscribe to state changes. Use `receiver.changed().await` to wake
+    /// when `notify_state_changed()` is called.
+    pub fn subscribe_state(&self) -> watch::Receiver<u64> {
+        self.state_tx.subscribe()
     }
 }
 
@@ -137,6 +152,7 @@ impl PaneRegistry {
                 }
             } else {
                 let processor = PaneProcessor::new(lp.height, lp.width);
+                let (state_tx, _) = watch::channel(0u64);
                 let tracked = TrackedPane {
                     pane_id: pane_id.clone(),
                     window_id: window_id.to_string(),
@@ -146,6 +162,7 @@ impl PaneRegistry {
                         y: lp.y,
                         processor,
                     }),
+                    state_tx,
                 };
                 self.panes.insert(pane_id.clone(), Arc::new(tracked));
                 actions.push(SyncAction::PaneAdded { pane_id: pane_id.clone() });
