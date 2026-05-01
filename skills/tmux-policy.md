@@ -1,273 +1,238 @@
 ---
 name: tmux-policy
-description: Add or modify tmux-mcp policy rules (allow/ask/deny commands)
+description: Add or modify tmux-mcp policy rules and custom wrappers (allow/ask/deny commands)
 user-invocable: true
 ---
 
-# tmux-mcp Policy Rule Management
+# tmux-mcp Policy Rule & Wrapper Management
 
-The user wants to add or modify a tmux-mcp policy rule. Policy rules are CEL expressions in TOML config files. The file watcher picks up changes immediately — no restart needed.
+Add or modify policy rules or custom wrappers. Both are CEL expressions in TOML config files. Changes reload immediately — no restart needed.
 
 ## Philosophy
 
-Rules should err on the side of safety:
-- **Read-only commands in-project** → prefer `allow`
-- **Read-only commands out-of-project** → prefer `ask`
-- **Write/modify commands** → prefer `ask`
-- **Destructive/circumvention** → prefer `deny`
-- When unsure, be more conservative. Only open up when the user explicitly asks.
+- **Read-only in-project** → `allow`
+- **Read-only out-of-project** → `ask`
+- **Write/modify** → `ask`
+- **Destructive/circumvention** → `deny`
+- When unsure, be more conservative.
 
-## Config file locations
+## Config files
 
-- **User-wide**: `~/.claude/tmux-mcp.toml` — applies to all projects
-- **Project**: `.claude/tmux-mcp.toml` — applies only to this project, overrides user rules at same order
+- **User-wide**: `~/.claude/tmux-mcp.toml`
+- **Project**: `.claude/tmux-mcp.toml` (overrides user at same order)
 
-## TOML rule format
+Both `[[rules]]` and `[[wrappers]]` go in the same file.
+
+## Rules
 
 ```toml
 [[rules]]
-description = "short human-readable name"
+description = "short name"
 when = 'CEL expression'
 action = "allow"  # or "ask" or "deny"
-# message = "explanation shown when rule triggers"
-# order = 0  # negative runs before built-in rules, positive after
+# message = "shown when triggered"
+# order = 0  # negative = before builtins, positive = after
 ```
 
-Rules are evaluated top-to-bottom within each order level. First match wins. If no rule matches, the default is `ask`.
+First match wins. Default is `ask`. `allow` rules implicitly require same user/host unless the CEL references `command.effective_user` or `command.effective_host`.
 
-## CEL context variables
+## Wrappers
+
+Extract inner commands from wrapper commands (sudo, ssh, docker exec, custom tools).
+
+```toml
+[[wrappers]]
+name = "label"
+when = 'CEL match'
+getopt = "u:C:v"                   # POSIX optstring (: = takes value)
+# getopt_gnu = "n:c:v"            # GNU mode (flags anywhere before --)
+# getopt = { short = "s:k:", long = ["signal:", "kill-after:"] }  # with long opts
+inner = 'command.getopt.operands'  # CEL → inner command
+# capture_user = 'or(command.getopt.value("u"), "root")'
+# capture_host = 'rsplit(command.getopt.positional(0), "@", 2)[1]'
+# skip_wrapper = true             # false = evaluate both wrapper and inner
+# args_complete = true            # false = inner receives unknown additional args
+```
+
+**Optstring**: `"isvu:C:"` — `i`,`s`,`v` standalone; `u`,`C` take values. POSIX stops at first operand. GNU processes flags anywhere.
+
+**`inner` return types**: `List[String]` = single command, `List[List[String]]` = multiple commands, `String` = reparse as shell command, `Null` = extraction failed.
+
+**Transparency**: `skip_wrapper = true` (default) skips wrapper in rule evaluation. Set `false` for wrappers with uncaptured side effects (env vars, etc.).
+
+**Non-exhaustive args**: `args_complete = false` or unknown getopt flags → absent values return `Unknown` instead of `Null` → args-dependent allow rules conservatively fall to Ask.
+
+### Getopt result accessors
+
+| Accessor | Description |
+|----------|-------------|
+| `command.getopt.operands` | Non-flag arguments |
+| `command.getopt.operands_from(n)` | Operands from index n |
+| `command.getopt.value("u")` | Flag value (accepts `"-u"` or `"u"`) |
+| `command.getopt.positional(n)` | Nth operand |
+
+## CEL context
 
 ### command.*
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `command.name` | string | Command name, always literal (e.g. `"cargo"`, `"rm"`) |
-| `command.args` | list[string] | Known literal arguments |
-| `command.args_complete` | bool | `false` if dynamic/unknown args possible (xargs, expansions) |
-| `command.is_pipe_target` | bool | `true` if receiving piped stdin |
-| `command.has_inner` | bool | `true` if this is a recognized wrapper whose inner commands were extracted |
-| `command.effective_user` | string/unknown | Effective user. Equals `pane.user` if unchanged, unknown if unknowable (e.g. `sudo -u $VAR`) |
-| `command.effective_host` | string/unknown | Effective host. Equals `pane.hostname` if unchanged, unknown if unknowable |
-| `command.write_targets` | list[string] | File paths from write redirects (`>`, `>>`, `&>`, `>|`) |
-| `command.read_targets` | list[string] | File paths from read redirects (`<`) |
-| `command.parent` | object/null | Parent wrapper command. Has same fields as `command.*`. Walk `parent.parent` for chains. `null` if top-level |
+| `command.name` | string | Command name |
+| `command.args` | list[string] | Literal arguments |
+| `command.args_complete` | bool | `false` if unknown args possible |
+| `command.is_pipe_target` | bool | Receiving piped stdin |
+| `command.has_inner` | bool | Wrapper with extracted inner commands |
+| `command.effective_user` | string/unknown | User context (pane.user if unchanged) |
+| `command.effective_host` | string/unknown | Host context (pane.hostname if unchanged) |
+| `command.write_targets` | list[string] | Write redirect paths |
+| `command.read_targets` | list[string] | Read redirect paths |
+| `command.parent` | object/null | Parent wrapper (walk `.parent.parent` for chains) |
+| `command.getopt` | object/null | Parsed getopt result |
 
 ### pane.*
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `pane.hostname` | string/null | Pane hostname from OSC 7. null for local panes |
-| `pane.cwd` | string/null | Pane working directory |
-| `pane.user` | string/null | Pane user from OSC 7 |
-| `pane.foreground` | string/null | Foreground process name |
+| `pane.hostname` | string/null | null for local |
+| `pane.cwd` | string/null | Working directory |
+| `pane.user` | string/null | User |
+| `pane.foreground` | string/null | Foreground process |
 
-## Built-in helper functions
+## CEL functions
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `path` | `path(string)` | Resolve a path relative to `pane.cwd`. Handles `~`, `..`, `./`, absolute paths. Returns null for flags (`-x`). Pure string manipulation — no filesystem access, works on remote systems. Prevents directory traversal by normalizing `..` segments. |
-| `glob` | `glob(pattern, string)` | Glob match with `*`, `?`, `{a,b}` |
-| `contains` | `contains(string, substring)` | String contains substring |
-| `startsWith` | `startsWith(string, prefix)` | String starts with prefix |
-| `has_short_flag` | `has_short_flag(args, flag)` | Check for single-char flag, handles combined flags (e.g. `-rf` matches `r` and `f`) |
+| Function | Description |
+|----------|-------------|
+| `path(arg)` | Resolve path relative to pane.cwd. Handles `~`, `..`. Null for flags. |
+| `glob(pattern, str)` | Glob match |
+| `contains(str, sub)` | String contains |
+| `startsWith(str, pre)` | String prefix |
+| `has_short_flag(args, f)` | Short flag check, handles combined (`-rf`) |
+| `or(val, fallback)` | Null coalescing |
+| `rsplit(str, sep [, n])` | Split string; with n, null-pad left |
+| `slice(list, n)` | List from index n |
+| `take_until(list, tokens)` | Elements before first token match |
+| `split_at(list, markers)` | Split into groups at markers |
+| `getopt(args, optstring)` | POSIX getopt (escape hatch for non-command.args) |
+| `a + b` | Int addition or list concat |
+| `cond ? a : b` | Ternary |
+| `list[n]` | Index access |
+| `.exists(v, pred)` | Any element matches |
+| `.all(v, pred)` | All elements match |
+| `.map(v, expr)` | Transform elements |
+| `.filter(v, pred)` | Keep matching elements |
 
-### `path()` resolution examples
+## Built-in wrappers
 
-| Input | pane.cwd | Result |
-|-------|----------|--------|
-| `src/main.rs` | `/home/user/project` | `/home/user/project/src/main.rs` |
-| `./README.md` | `/home/user/project` | `/home/user/project/README.md` |
-| `../../.ssh/id_rsa` | `/home/user/project` | `/home/.ssh/id_rsa` |
-| `~/.ssh/id_rsa` | (any) | `/home/{pane.user}/.ssh/id_rsa` |
-| `/etc/passwd` | (any) | `/etc/passwd` |
-| `-rf` | (any) | null (it's a flag) |
+| Wrapper | Mode | Behavior |
+|---------|------|----------|
+| `command`, `builtin`, `nohup` | — | All args = inner |
+| `nice`, `strace`, `watch` | POSIX | Operands = inner |
+| `timeout` | POSIX+long | Skip duration, rest = inner |
+| `sudo`, `doas` | POSIX | Capture `-u` → effective_user |
+| `su`, `sh -c`, `bash -c` | POSIX | `-c` value reparsed |
+| `ssh` | POSIX | Capture user@host, skip host |
+| `docker`/`podman` exec | GNU | Skip exec + container |
+| `kubectl` exec | GNU | Skip exec + pod |
+| `find` -exec | list ops | Extract all exec blocks |
+| `xargs` | POSIX | args_complete=false |
+| `env` | POSIX | skip_wrapper=false |
 
-## Wrapper transparency
+## Wrapper patterns
 
-The parser extracts inner commands from recognized wrappers. Wrappers are transparent — the engine skips them and only evaluates the inner commands. The wrapper's security impact is encoded on the inner command via `effective_user` and `effective_host`.
-
-**Exception:** `env` is NOT transparent (it modifies environment variables we don't capture). It falls to default Ask.
-
-**Recognized wrappers:** `sudo`, `su`, `doas`, `ssh`, `timeout`, `nice`, `nohup`, `strace`, `watch`, `command`, `builtin`, `env`, `find` (with `-exec`), `xargs`, `bash`/`sh`/`zsh`/`dash` (with `-c`), `podman`/`docker`/`kubectl` (with `exec`)
-
-## Implicit allow constraints
-
-`allow` rules only match when the command runs as the current user on the current host, **unless** the rule's CEL expression directly references `command.effective_user` or `command.effective_host`. This prevents accidentally allowing commands under privilege escalation or on remote hosts.
-
-- `command.name == "cargo"` → allow: only matches when `effective_user == pane.user`. `sudo cargo test` would NOT match (falls to default Ask).
-- `command.name == "cargo" && command.effective_user == "root"` → allow: the rule references `command.effective_user`, so the implicit constraint is skipped. Matches `sudo cargo test`.
-
-`ask` and `deny` rules are NOT affected — they always apply regardless of user/host context.
-
-## CEL expression examples
-
-### Path containment — allow only in-project files
-
-The core pattern for restricting file-interacting commands to the project directory. Uses `path()` to resolve each arg, then checks it starts with `pane.cwd`:
-
-```cel
-# Allow cat only for files inside the project
-command.name == "cat" && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))
+**Privilege escalation:**
+```toml
+[[wrappers]]
+name = "my-elevate"
+when = 'command.name == "my-elevate"'
+getopt = "u:"
+inner = 'command.getopt.operands'
+capture_user = 'or(command.getopt.value("u"), "root")'
 ```
 
-This works by checking that NO non-flag arg resolves outside the project. Flags (starting with `-`) are skipped via `path()` returning null.
-
-### Path containment — full examples from builtin rules
-
+**GNU subcommand:**
 ```toml
-# File readers: allow in-project, ask out-of-project
+[[wrappers]]
+name = "mytool run"
+when = 'command.name == "mytool" && command.args.exists(a, a == "run")'
+getopt_gnu = "e:v"
+inner = 'command.getopt.operands_from(1)'
+```
+
+**Non-transparent (side effects):**
+```toml
+[[wrappers]]
+name = "my-env"
+when = 'command.name == "my-env"'
+getopt = "u:"
+inner = 'command.getopt.operands'
+skip_wrapper = false
+```
+
+## Rule patterns
+
+**Path containment pair** (in-project allow + catch-all ask):
+```toml
 [[rules]]
-description = "file readers (in-project)"
-when = '''
-  command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"] &&
-  !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))
-'''
+description = "readers (in-project)"
+when = 'command.name in ["cat","head","tail"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
 action = "allow"
 
 [[rules]]
-description = "file readers (out-of-project)"
-when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"]'
+description = "readers (out-of-project)"
+when = 'command.name in ["cat","head","tail"]'
 action = "ask"
 ```
 
-The pair pattern: specific "in-project" rule first (allow), then catch-all for the same commands (ask). First match wins, so out-of-project falls through to the second rule.
-
-### Allow reading specific directories outside project
-
-```toml
-# Allow reading /var/log even though it's outside project
-[[rules]]
-description = "allow reading logs"
-when = '''
-  command.name in ["cat","head","tail","less"] &&
-  !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), "/var/log"))
-'''
-action = "allow"
-order = -1
-```
-
-### Write redirect protection
-
+**Flag detection:**
 ```cel
-# Ask if any write redirect targets a file outside the project
-command.write_targets.exists(t, !startsWith(path(t), pane.cwd))
+command.name == "rm" && has_short_flag(command.args, "r")
+command.name == "cargo" && command.args.exists(a, a == "install")
 ```
 
+**Write redirect protection:**
 ```toml
 [[rules]]
 description = "write redirect out-of-project"
 when = 'command.write_targets.exists(t, !startsWith(path(t), pane.cwd))'
 action = "ask"
 order = -1
-message = "write redirect targets a file outside project directory"
 ```
 
-### Read redirect protection
-
-```cel
-# Ask if reading sensitive files via redirect
-command.read_targets.exists(t, glob("*/.ssh/*", path(t)) || glob("*/.aws/*", path(t)))
-```
-
-### Exact command name match
-```cel
-command.name == "eval"
-```
-
-### Match multiple commands
-```cel
-command.name in ["sudo", "su", "doas"]
-```
-
-### Command + specific flag detection
-```cel
-command.name == "find" && command.args.exists(a, a in ["-exec", "-execdir", "-delete", "-ok"])
-```
-
-### Short flag detection (handles combined flags like -rf)
-```cel
-command.name == "rm" && has_short_flag(command.args, "r")
-```
-
-### Complex flag combinations
-```cel
-command.name == "git" && command.args.exists(a, a in ["push","reset","clean"]) && (command.args.exists(a, startsWith(a, "--force") || a == "--hard") || has_short_flag(command.args, "f") || has_short_flag(command.args, "D"))
-```
-
-### Pipe target detection
-```cel
-command.name in ["bash","sh","zsh","dash","ksh"] && command.is_pipe_target
-```
-
-### Subcommand matching
-```cel
-command.name == "cargo" && command.args.exists(a, a == "install")
-```
-
-```cel
-command.name == "systemctl" && command.args.exists(a, a in ["stop","disable","mask","restart"])
-```
-
-### Host-based rules (glob matching)
-```cel
-glob("*.prod.*", pane.hostname)
-```
-
+**Host/user rules:**
 ```cel
 glob("prod-*", command.effective_host)
-```
-
-### User-based rules
-```cel
 command.effective_user == "root"
 ```
 
-### Combining pane context with command
+**Privilege override** (reference effective_user to lift implicit same-user constraint):
 ```cel
-# Allow curl on local panes only, never when piped
-command.name == "curl" && pane.hostname == null && !command.is_pipe_target
-```
-
-```cel
-# Deny rm -r on remote hosts
-command.name == "rm" && has_short_flag(command.args, "r") && pane.hostname != null
+command.name == "mkdir" && command.effective_user == "root" && startsWith(path(command.args[0]), pane.cwd)
 ```
 
 ## Instructions
 
-1. **Determine what the user wants.** Check conversation for:
-   - A recently blocked/prompted command they want to allow
-   - A specific command pattern to allow/ask/deny
-   - Arguments like `allow cargo install` or `deny rm -rf`
+1. **Determine what the user wants**: recently blocked command, specific pattern, or custom wrapper.
 
-2. **If no arguments given (`$ARGUMENTS` is empty):** Look at the most recent policy rejection or approval prompt in the conversation. Extract the command that was blocked.
+2. **If no arguments**: check conversation for the most recent policy rejection.
 
-3. **Generate the CEL rule.** Follow these principles:
-   - **Be specific over broad.** Match on `command.name == "npm" && command.args.exists(a, a == "test")` rather than `command.name == "npm"` unless the user wants all npm commands.
-   - **Read-only → allow in-project, ask out-of-project.** Use the `path()` containment pattern for file-interacting commands.
-   - **Write → ask.** When creating an allow rule for a tool that has both read and write modes, consider splitting into read-allow + write-ask.
-   - **Use `in` for lists.** Multiple commands that share the same policy → `command.name in [...]`
-   - **Use `exists` for flags.** Flag-based rules → `command.args.exists(a, ...)`
-   - **Use `has_short_flag` for single-char flags.** It handles combined flags (e.g. `-rf`).
-   - **Use `path()` for file path arguments.** Resolves relative paths, `~`, `..` against `pane.cwd`.
-   - **Use `glob` for hostname/path patterns.** `glob("*.prod.*", pane.hostname)`
-   - **Use `command.write_targets` for redirect safety.** Catch writes outside project dir.
-   - **Pair pattern for containment.** In-project allow + catch-all ask for the same commands.
-   - **Privilege override.** To allow a command under sudo, reference `command.effective_user` in the condition. This lifts the implicit same-user constraint. Example: `command.name == "mkdir" && command.effective_user == "root" && ...` → allow.
-   - **Host override.** Same for remote: reference `command.effective_host` to lift the same-host constraint.
+3. **Rule or wrapper?**
+   - **Rule**: allow/ask/deny a command pattern
+   - **Wrapper**: command wraps another command, engine should extract and evaluate inner
+   - **Both**: non-transparent wrapper may also need a rule
 
-4. **Ask the user which scope** (user-wide `~/.claude/tmux-mcp.toml` or project `.claude/tmux-mcp.toml`) unless obvious from context. Default to user-wide for tool-specific rules, project for project-specific paths or hosts.
+4. **Generate CEL**:
+   - Be specific over broad
+   - Read-only → in-project allow + out-of-project ask (pair pattern)
+   - Use `has_short_flag` for `-rf` style flags
+   - Use `path()` for file arguments
+   - For wrappers: POSIX `getopt` for C programs, `getopt_gnu` for Go/cobra. Declare all known flags.
 
-5. **Read the existing config file** (create if it doesn't exist). Append the new rule. Write the file.
+5. **Ask scope** (user-wide or project) unless obvious.
 
-6. **Confirm** what was added and that it takes effect immediately.
+6. **Read config**, append rule/wrapper, write file.
+
+7. **Confirm** — takes effect immediately.
 
 ## Arguments
 
-`$ARGUMENTS` — Optional. Examples:
-- `allow cargo install` — allow cargo install
-- `allow` — allow the last blocked command
-- `ask rm` — require approval for rm
-- `deny` — deny the last blocked command
-- `allow cat /var/log` — allow cat for /var/log paths
-- (empty) — interactive, figure out from conversation context
+`$ARGUMENTS` — Optional: `allow cargo install`, `deny rm -rf`, `add wrapper for my-tool`, or empty for interactive.

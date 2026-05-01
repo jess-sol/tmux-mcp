@@ -67,24 +67,29 @@ For active commands, `next` blocks up to a timeout waiting for new output — no
 
 This isn't a sandbox against adversarial agents — it's guardrails for good-faith ones that occasionally reach for `rm -rf` or `curl | sh` without thinking twice. Every command is parsed into a structured tree (via [brush](https://github.com/reubeno/brush)), then evaluated against CEL rules. The evaluator uses **three-valued logic** (true / false / unknown) because some properties — like what a variable expands to — can't be known statically. When any command in a pipeline is unknown, the engine falls through to human approval rather than guessing.
 
-The parser recognizes wrapper commands (sudo, env, timeout, ssh, docker exec, etc.) and extracts their inner commands. Wrappers that only change user/host context are transparent — the engine evaluates only the inner commands, with `effective_user` and `effective_host` propagated. `allow` rules implicitly require same-user/same-host unless the rule explicitly references `command.effective_user` or `command.effective_host`.
+Wrapper commands (sudo, ssh, docker exec, etc.) are defined declaratively in TOML alongside rules. The engine parses their flags using POSIX or GNU getopt, extracts inner commands, and evaluates those instead. Transparent wrappers are skipped — their security effects are captured on inner commands via `effective_user` and `effective_host`. `allow` rules implicitly require same-user/same-host unless the rule explicitly references these fields.
 
-Rules are loaded from three tiers (built-in < user < project) and hot-reload on file change:
+Rules and wrappers are loaded from three tiers (built-in < user < project) and hot-reload on file change:
 
 ```toml
-[[rules]]
-description = "allow cargo in project dirs"
-when = 'command.name == "cargo" && path("/home/jessica/src/**", pane.cwd)'
-action = "allow"
-
 [[rules]]
 description = "block production hosts"
 when = 'pane.hostname != null && glob("prod-*", pane.hostname)'
 action = "deny"
 message = "production hosts are read-only"
+
+# Custom wrapper: extract inner command from my-sudo
+[[wrappers]]
+name = "my-sudo"
+when = 'command.name == "my-sudo"'
+getopt = "u:"                                          # POSIX optstring: -u takes a value
+inner = 'command.getopt.operands'                      # inner = everything after flags
+capture_user = 'or(command.getopt.value("u"), "root")' # -u value or default root
 ```
 
-Available context in rules: `command.name`, `command.args`, `command.has_inner`, `command.effective_user`, `command.effective_host`, `command.parent`, `pane.cwd`, `pane.hostname`, `pane.user`, `pane.foreground`, plus helpers like `path()`, `glob()`, `startsWith()`, and `has_short_flag()`.
+When the engine encounters `my-sudo -u admin rm -rf /`, it parses the flags, extracts `rm -rf /` as the inner command with `effective_user = "admin"`, and evaluates `rm` against rules. Commands with non-exhaustive args (xargs, find -exec) use three-valued logic — args-dependent allow rules conservatively fall through to Ask when args are uncertain.
+
+Available context: `command.name`, `command.args`, `command.getopt.*`, `command.effective_user`, `command.effective_host`, `command.parent`, `pane.cwd`, `pane.hostname`, `pane.user`, plus helpers like `path()`, `glob()`, `startsWith()`, `has_short_flag()`, `slice()`, `take_until()`, `split_at()`. Use `/tmux-policy` for interactive rule and wrapper generation.
 
 ### Context-aware approval drift detection
 
