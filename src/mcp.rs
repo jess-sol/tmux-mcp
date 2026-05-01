@@ -47,6 +47,10 @@ pub struct CommandRunParams {
     pub tail: Option<i64>,
     #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
     pub search: Option<String>,
+    #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
+    pub before: Option<i64>,
+    #[schemars(description = "Lines of context after each search match (like grep -A). Requires search.")]
+    pub after: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -65,6 +69,10 @@ pub struct CommandReadParams {
     pub tail: Option<i64>,
     #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
     pub search: Option<String>,
+    #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
+    pub before: Option<i64>,
+    #[schemars(description = "Lines of context after each search match (like grep -A). Requires search.")]
+    pub after: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -231,6 +239,8 @@ impl TmuxMcp {
         if let Some(n) = params.head { rpc_params["head"] = json!(n); }
         if let Some(n) = params.tail { rpc_params["tail"] = json!(n); }
         if let Some(ref s) = params.search { rpc_params["search"] = json!(s); }
+        if let Some(n) = params.before { rpc_params["before"] = json!(n); }
+        if let Some(n) = params.after { rpc_params["after"] = json!(n); }
 
         let mut client = self.client.lock().await;
         let result = client
@@ -262,6 +272,8 @@ impl TmuxMcp {
         if let Some(n) = params.head { rpc_params["head"] = json!(n); }
         if let Some(n) = params.tail { rpc_params["tail"] = json!(n); }
         if let Some(ref s) = params.search { rpc_params["search"] = json!(s); }
+        if let Some(n) = params.before { rpc_params["before"] = json!(n); }
+        if let Some(n) = params.after { rpc_params["after"] = json!(n); }
 
         let mut client = self.client.lock().await;
         let result = client
@@ -408,7 +420,8 @@ impl ServerHandler for TmuxMcp {
                  available panes, then run commands and read their output.\n\n\
                  command_run: Prefer tail=30 for commands where you only need the result \
                  (builds, tests, installs). Use search to filter verbose output \
-                 (e.g. search=\"error|fail|warn\" on test runs). Use head or next when \
+                 (e.g. search=\"error|fail|warn\" on test runs); add before/after for \
+                 context lines around matches (like grep -B/-A). Use head or next when \
                  exploring unknown output. On timeout, returns partial output — use \
                  command_read(command_id=N) to continue reading. For long-running \
                  servers, use command_read(command_id=N, next=1, \
@@ -417,8 +430,9 @@ impl ServerHandler for TmuxMcp {
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit).\n\n\
                  command_read: Use next to stream new output from a running command, \
-                 head/tail to view ranges, search to filter by regex. For active commands, \
-                 waits up to timeout_secs for new output.\n\n\
+                 head/tail to view ranges, search to filter by regex. Use before/after \
+                 with search for context lines around matches (like grep -B/-A). \
+                 For active commands, waits up to timeout_secs for new output.\n\n\
                  command_history: Lists recent commands with their command_id, exit code, \
                  and output line count. Use command_id with command_read to revisit \
                  output from earlier commands.\n\n\

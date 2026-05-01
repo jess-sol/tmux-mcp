@@ -1332,3 +1332,225 @@ async fn test_read_bare_returns_immediately() {
     .await
     .expect("test timed out");
 }
+
+// --- search before/after context tests ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_before_context() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf 'aaa\\nbbb\\nccc\\nMATCH\\nddd\\neee\\n'",
+                    "timeout_secs": 5,
+                    "search": "MATCH",
+                    "before": 2
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("bbb"), "should include 2 lines before: {:?}", output);
+        assert!(output.contains("ccc"), "should include line just before: {:?}", output);
+        assert!(output.contains("MATCH"), "should include the match: {:?}", output);
+        assert!(!output.contains("aaa"), "should not include 3 lines before: {:?}", output);
+        assert!(!output.contains("ddd"), "should not include lines after: {:?}", output);
+        assert_eq!(result["search_matches"].as_u64(), Some(1));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_after_context() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf 'aaa\\nbbb\\nMATCH\\nccc\\nddd\\neee\\n'",
+                    "timeout_secs": 5,
+                    "search": "MATCH",
+                    "after": 2
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("MATCH"), "should include the match: {:?}", output);
+        assert!(output.contains("ccc"), "should include line just after: {:?}", output);
+        assert!(output.contains("ddd"), "should include 2 lines after: {:?}", output);
+        assert!(!output.contains("bbb"), "should not include lines before: {:?}", output);
+        assert!(!output.contains("eee"), "should not include 3 lines after: {:?}", output);
+        assert_eq!(result["search_matches"].as_u64(), Some(1));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_context_separator() {
+    // Two distant matches should produce a -- separator between groups.
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf 'HIT1\\naaa\\nbbb\\nccc\\nddd\\nHIT2\\n'",
+                    "timeout_secs": 5,
+                    "search": "HIT",
+                    "after": 1
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("--"), "should have separator between groups: {:?}", output);
+        assert!(output.contains("HIT1"), "should include first match: {:?}", output);
+        assert!(output.contains("aaa"), "should include after-context of first match: {:?}", output);
+        assert!(output.contains("HIT2"), "should include second match: {:?}", output);
+        assert!(!output.contains("ccc"), "should not include middle lines: {:?}", output);
+        assert_eq!(result["search_matches"].as_u64(), Some(2));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_context_merged() {
+    // Adjacent matches should merge context — no separator.
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf 'HIT1\\naaa\\nHIT2\\nbbb\\n'",
+                    "timeout_secs": 5,
+                    "search": "HIT",
+                    "after": 1
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(!output.contains("--"), "merged context should have no separator: {:?}", output);
+        assert!(output.contains("HIT1"), "should include first match: {:?}", output);
+        assert!(output.contains("aaa"), "should include context between: {:?}", output);
+        assert!(output.contains("HIT2"), "should include second match: {:?}", output);
+        assert!(output.contains("bbb"), "should include after-context of second: {:?}", output);
+        assert_eq!(result["search_matches"].as_u64(), Some(2));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_context_with_head() {
+    // head=1 with context should show only the first match + its context.
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf 'aaa\\nHIT1\\nbbb\\nccc\\nHIT2\\nddd\\n'",
+                    "timeout_secs": 5,
+                    "search": "HIT",
+                    "head": 1,
+                    "after": 1
+                }),
+            )
+            .await;
+        let output = result["output"].as_str().unwrap_or("");
+        assert!(output.contains("HIT1"), "should include first match: {:?}", output);
+        assert!(output.contains("bbb"), "should include after-context of first: {:?}", output);
+        assert!(!output.contains("HIT2"), "should not include second match: {:?}", output);
+        // search_matches reports total matches in the output, not just windowed ones
+        assert_eq!(result["search_matches"].as_u64(), Some(2));
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_context_next_cursor_advancement() {
+    // next=1 + after=1: cursor should advance past the after-context.
+    // A second next=1 should find the second match, not re-show context.
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let run_result = td
+            .rpc(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "printf 'HIT1\\nctx\\nfiller\\nHIT2\\nend\\n'",
+                    "timeout_secs": 5,
+                    "next": 1,
+                    "search": "HIT",
+                    "after": 1
+                }),
+            )
+            .await;
+        let output1 = run_result["output"].as_str().unwrap_or("");
+        let cmd_id = run_result["command_id"].as_u64().unwrap();
+        assert!(output1.contains("HIT1"), "first call should find HIT1: {:?}", output1);
+        assert!(output1.contains("ctx"), "first call should include after-context: {:?}", output1);
+
+        // Second read: should find HIT2, not re-show HIT1's context
+        let read_result = td
+            .rpc(
+                "command_read",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command_id": cmd_id,
+                    "next": 1,
+                    "search": "HIT",
+                    "after": 1
+                }),
+            )
+            .await;
+        let output2 = read_result["output"].as_str().unwrap_or("");
+        assert!(output2.contains("HIT2"), "second call should find HIT2: {:?}", output2);
+        assert!(output2.contains("end"), "second call should include after-context: {:?}", output2);
+        assert!(!output2.contains("HIT1"), "second call should not re-show HIT1: {:?}", output2);
+        td.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_before_after_without_search_errors() {
+    with_timeout(async {
+        let mut td = TestDaemon::start().await;
+        let result = td
+            .rpc_err(
+                "command_run",
+                json!({
+                    "pane_id": td.origin_pane.clone(),
+                    "command": "echo hello",
+                    "timeout_secs": 5,
+                    "before": 2
+                }),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "before without search should error: {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("require search"),
+            "error should mention 'require search': {:?}",
+            err
+        );
+        td.cleanup().await;
+    })
+    .await;
+}

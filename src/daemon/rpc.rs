@@ -111,6 +111,8 @@ struct ReadParams {
     head: Option<usize>,
     tail: Option<usize>,
     search: Option<regex::Regex>,
+    before: usize,
+    after: usize,
 }
 
 impl ReadParams {
@@ -135,7 +137,16 @@ impl ReadParams {
             None
         };
 
-        Ok(Self { next, head, tail, search })
+        let before = params["before"].as_u64().unwrap_or(0) as usize;
+        let after = params["after"].as_u64().unwrap_or(0) as usize;
+
+        if (before > 0 || after > 0) && search.is_none() {
+            return Err(RpcError::invalid_params(
+                "before and after require search",
+            ));
+        }
+
+        Ok(Self { next, head, tail, search, before, after })
     }
 }
 
@@ -145,6 +156,47 @@ struct ReadResult {
     total_lines: usize,
     skipped: usize,
     matched: Option<usize>,  // number of search matches (if search was used)
+}
+
+/// Expand match positions into merged (start, end) ranges with before/after context.
+/// Returns inclusive ranges sorted by position.
+fn merge_context_ranges(
+    match_indices: &[usize],
+    before: usize,
+    after: usize,
+    total_lines: usize,
+) -> Vec<(usize, usize)> {
+    if match_indices.is_empty() || total_lines == 0 {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    for &m in match_indices {
+        let start = m.saturating_sub(before);
+        let end = (m + after).min(total_lines - 1);
+        if let Some((_, prev_end)) = ranges.last_mut() {
+            if start <= *prev_end + 1 {
+                // Merge: extend previous range
+                *prev_end = end.max(*prev_end);
+                continue;
+            }
+        }
+        ranges.push((start, end));
+    }
+    ranges
+}
+
+/// Collect lines from merged ranges, inserting "--" separators between groups.
+fn collect_context_lines(all_lines: &[&str], ranges: &[(usize, usize)]) -> Vec<String> {
+    let mut result = Vec::new();
+    for (i, &(start, end)) in ranges.iter().enumerate() {
+        if i > 0 {
+            result.push("--".to_string());
+        }
+        for idx in start..=end {
+            result.push(all_lines[idx].to_string());
+        }
+    }
+    result
 }
 
 /// Apply read params (next/head/tail/search) to a command record.
@@ -166,43 +218,64 @@ fn apply_read_params(
     let total_lines = all_lines.len();
 
     if let Some(re) = &params.search {
-        // Search mode: find matches first, then apply windowing to matches.
+        let has_context = params.before > 0 || params.after > 0;
+
         if let Some(n) = params.next {
             // Scan from cursor, collect up to N matches, advance cursor past all scanned.
             let start = (*cursor).min(total_lines);
-            let mut matches = Vec::new();
+            let mut match_indices = Vec::new();
             let mut scanned = 0;
-            for line in &all_lines[start..] {
-                scanned += 1;
+            for (i, line) in all_lines[start..].iter().enumerate() {
+                scanned = i + 1;
                 if re.is_match(line) {
-                    matches.push(line.to_string());
-                    if matches.len() >= n {
+                    match_indices.push(start + i);
+                    if match_indices.len() >= n {
                         break;
                     }
                 }
             }
-            let matched = matches.len();
-            *cursor = start + scanned;
-            ReadResult { lines: matches, total_lines, skipped: start, matched: Some(matched) }
+            let matched = match_indices.len();
+
+            let lines = if has_context {
+                let ranges = merge_context_ranges(&match_indices, params.before, params.after, total_lines);
+                let display_end = ranges.last().map(|(_, e)| e + 1).unwrap_or(start + scanned);
+                *cursor = (start + scanned).max(display_end);
+                collect_context_lines(&all_lines, &ranges)
+            } else {
+                *cursor = start + scanned;
+                match_indices.iter().map(|&i| all_lines[i].to_string()).collect()
+            };
+
+            ReadResult { lines, total_lines, skipped: start, matched: Some(matched) }
         } else {
-            // head/tail/bare: collect all matches, then window.
-            let all_matches: Vec<String> = all_lines.iter()
-                .filter(|l| re.is_match(l))
-                .map(|l| l.to_string())
+            // head/tail/bare: collect all match indices, then window.
+            let all_match_indices: Vec<usize> = all_lines.iter()
+                .enumerate()
+                .filter(|(_, l)| re.is_match(l))
+                .map(|(i, _)| i)
                 .collect();
-            let total_matches = all_matches.len();
-            let (selected, skipped) = if let Some(n) = params.head {
+            let total_matches = all_match_indices.len();
+
+            let (selected_indices, skipped) = if let Some(n) = params.head {
                 let end = total_matches.min(n);
-                (all_matches[..end].to_vec(), 0)
+                (&all_match_indices[..end], 0)
             } else if let Some(n) = params.tail {
                 let start = total_matches.saturating_sub(n);
-                (all_matches[start..].to_vec(), start)
+                (&all_match_indices[start..], start)
             } else {
                 // bare + search: all matches, advance cursor
                 *cursor = total_lines;
-                (all_matches, 0)
+                (&all_match_indices[..], 0)
             };
-            ReadResult { lines: selected, total_lines, skipped, matched: Some(total_matches) }
+
+            let lines = if has_context {
+                let ranges = merge_context_ranges(selected_indices, params.before, params.after, total_lines);
+                collect_context_lines(&all_lines, &ranges)
+            } else {
+                selected_indices.iter().map(|&i| all_lines[i].to_string()).collect()
+            };
+
+            ReadResult { lines, total_lines, skipped, matched: Some(total_matches) }
         }
     } else {
         // No search: window raw lines.
@@ -490,7 +563,9 @@ async fn handle_command_read(
                 let peeked = apply_read_params(&cmd.output, &mut peek_cursor, &read_params);
 
                 let has_enough = if let Some(n) = required_lines {
-                    peeked.lines.len() >= n
+                    // When search is active, count matches (not output lines
+                    // which may be inflated by before/after context).
+                    peeked.matched.unwrap_or(peeked.lines.len()) >= n
                 } else if is_tail {
                     false // tail must wait for completion
                 } else {
