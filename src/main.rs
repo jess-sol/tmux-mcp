@@ -66,14 +66,7 @@ async fn main() {
 
 async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
     let input: serde_json::Value = serde_json::from_reader(std::io::stdin())?;
-    let tool_name = input["tool_name"].as_str().unwrap_or("");
     let tool_input = &input["tool_input"];
-
-    // Only handle command_run — allow everything else through
-    if tool_name != "mcp__tmux-mcp__command_run" {
-        print_hook_response("allow", None);
-        return Ok(());
-    }
 
     let pane_id = tool_input["pane_id"].as_str().unwrap_or("");
     let command = tool_input["command"].as_str().unwrap_or("");
