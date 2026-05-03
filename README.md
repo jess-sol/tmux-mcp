@@ -67,7 +67,15 @@ For active commands, `next` blocks up to a timeout waiting for new output — no
 
 This isn't a sandbox against adversarial agents — it's guardrails for good-faith ones that occasionally reach for `rm -rf` or `curl | sh` without thinking twice. Every command is parsed into a structured tree (via [brush](https://github.com/reubeno/brush)), then evaluated against CEL rules. The evaluator uses **three-valued logic** (true / false / unknown) because some properties — like what a variable expands to — can't be known statically. When any command in a pipeline is unknown, the engine falls through to human approval rather than guessing.
 
+Compound commands (`cd /tmp && rm -rf .`) are evaluated sequentially — the engine tracks working directory changes through `cd`/`pushd` via `capture_cwd` expressions, so `rm` is evaluated with the effective cwd, not the pane's original cwd.
+
 Wrapper commands (sudo, ssh, docker exec, etc.) are defined declaratively in TOML alongside rules. The engine parses their flags using POSIX or GNU getopt, extracts inner commands, and evaluates those instead. Transparent wrappers are skipped — their security effects are captured on inner commands via `effective_user` and `effective_host`. `allow` rules implicitly require same-user/same-host unless the rule explicitly references these fields.
+
+Path containment uses `in_project(path(arg))` — a built-in function backed by a configurable `project_dirs` list (default: `["."]`, resolved against the pane's cwd). This supports multi-root layouts where project files span multiple directories:
+
+```toml
+project_dirs = [".", "../shared-lib", "/opt/data"]
+```
 
 Rules and wrappers are loaded from three tiers (built-in < user < project) and hot-reload on file change:
 
@@ -89,15 +97,21 @@ capture_user = 'or(command.getopt.value("u"), "root")' # -u value or default roo
 
 When the engine encounters `my-sudo -u admin rm -rf /`, it parses the flags, extracts `rm -rf /` as the inner command with `effective_user = "admin"`, and evaluates `rm` against rules. Commands with non-exhaustive args (xargs, find -exec) use three-valued logic — args-dependent allow rules conservatively fall through to Ask when args are uncertain.
 
-Available context: `command.name`, `command.args`, `command.getopt.*`, `command.effective_user`, `command.effective_host`, `command.parent`, `pane.cwd`, `pane.hostname`, `pane.user`, plus helpers like `path()`, `glob()`, `startsWith()`, `has_short_flag()`, `slice()`, `take_until()`, `split_at()`. Use `/tmux-policy` for interactive rule and wrapper generation.
+Available context: `command.name`, `command.args`, `command.getopt.*`, `command.effective_user`, `command.effective_host`, `command.write_targets`, `command.read_targets`, `command.parent`, `pane.cwd`, `pane.hostname`, `pane.user`, `pane.project_dirs`, plus helpers like `path()`, `in_project()`, `glob()`, `startsWith()`, `has_short_flag()`, `slice()`, `take_until()`, `split_at()`. Use `/tmux-policy` for interactive rule and wrapper generation.
 
 ### Context-aware approval drift detection
 
-When the policy engine returns "ask" and a human approves, that approval is bound to a snapshot of the current context: the command text, hostname, cwd, user, and foreground process. If any of these change before execution (e.g., an `ssh` command changed the hostname, or `cd` moved the working directory), the approval is invalidated and must be re-requested. Approvals also expire after 30 seconds.
+When the policy engine returns "ask" and a human approves, that approval is bound to a snapshot of the current context: the command text, hostname, cwd, user, and foreground process. If any of these change before execution (e.g., an `ssh` command changed the hostname, or `cd` moved the working directory), the approval is invalidated and must be re-requested. Approvals expire after 30 minutes.
+
+### Command linting
+
+The daemon lints `command_run` calls for anti-patterns — piping to `tail`/`head`/`grep` instead of using built-in parameters, `2>&1` (stderr is already captured), `| tee` (output is already in history), trailing `&` (use a separate pane), and redundant `cd` to the pane's current directory. Lint errors include the corrected command so the agent can self-correct immediately.
+
+With the policy hook installed, lints are evaluated at hook time and returned as a JSON deny with the lint message — the agent sees the correction without ever prompting the user for approval.
 
 ### Dual-mode security
 
-- **With hook** (human-in-the-loop): Safe commands auto-approve silently. Everything else triggers Claude Code's native approval prompt. The policy hook runs as a Claude Code `PreToolUse` hook.
+- **With hook** (human-in-the-loop): Safe commands auto-approve silently. Lint violations are auto-denied with corrective feedback. Everything else triggers Claude Code's native approval prompt. The policy hook runs as a Claude Code `PreToolUse` hook.
 - **Without hook** (autonomous): The daemon enforces policy directly — safe commands execute, everything else is rejected with an actionable hint. No human needed.
 
 ## Tools

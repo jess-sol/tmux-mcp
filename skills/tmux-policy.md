@@ -12,7 +12,8 @@ Add or modify policy rules or custom wrappers. Both are CEL expressions in TOML 
 
 - **Read-only in-project** → `allow`
 - **Read-only out-of-project** → `ask`
-- **Write/modify** → `ask`
+- **Write/modify in-project** → `allow`
+- **Write/modify out-of-project** → `ask`
 - **Destructive/circumvention** → `deny`
 - When unsure, be more conservative.
 
@@ -21,7 +22,13 @@ Add or modify policy rules or custom wrappers. Both are CEL expressions in TOML 
 - **User-wide**: `~/.claude/tmux-mcp.toml`
 - **Project**: `.claude/tmux-mcp.toml` (overrides user at same order)
 
-Both `[[rules]]` and `[[wrappers]]` go in the same file.
+Both `[[rules]]` and `[[wrappers]]` go in the same file. Top-level config:
+
+```toml
+# Directories considered "in-project" for in_project() checks.
+# Relative paths resolved against pane cwd. Default: ["."]
+project_dirs = [".", "../shared-lib"]
+```
 
 ## Rules
 
@@ -32,9 +39,12 @@ when = 'CEL expression'
 action = "allow"  # or "ask" or "deny"
 # message = "shown when triggered"
 # order = 0  # negative = before builtins, positive = after
+# capture_cwd = 'path(command.args[0])'  # track cwd changes (for cd/pushd)
 ```
 
 First match wins. Default is `ask`. `allow` rules implicitly require same user/host unless the CEL references `command.effective_user` or `command.effective_host`.
+
+Compound commands (`cd /tmp && rm -rf .`) are evaluated sequentially — cwd changes captured via `capture_cwd` propagate to subsequent commands in the chain.
 
 ## Wrappers
 
@@ -84,8 +94,8 @@ inner = 'command.getopt.operands'  # CEL → inner command
 | `command.has_inner` | bool | Wrapper with extracted inner commands |
 | `command.effective_user` | string/unknown | User context (pane.user if unchanged) |
 | `command.effective_host` | string/unknown | Host context (pane.hostname if unchanged) |
-| `command.write_targets` | list[string] | Write redirect paths |
-| `command.read_targets` | list[string] | Read redirect paths |
+| `command.write_targets` | list[string] | Write redirect targets (`>`, `>>`) |
+| `command.read_targets` | list[string] | Read redirect sources (`<`) |
 | `command.parent` | object/null | Parent wrapper (walk `.parent.parent` for chains) |
 | `command.getopt` | object/null | Parsed getopt result |
 
@@ -97,12 +107,14 @@ inner = 'command.getopt.operands'  # CEL → inner command
 | `pane.cwd` | string/null | Working directory |
 | `pane.user` | string/null | User |
 | `pane.foreground` | string/null | Foreground process |
+| `pane.project_dirs` | list[string] | Resolved project directories (from `project_dirs` config) |
 
 ## CEL functions
 
 | Function | Description |
 |----------|-------------|
 | `path(arg)` | Resolve path relative to pane.cwd. Handles `~`, `..`. Null for flags. |
+| `in_project(path)` | Check if resolved path falls within any `project_dirs` directory |
 | `glob(pattern, str)` | Glob match |
 | `contains(str, sub)` | String contains |
 | `startsWith(str, pre)` | String prefix |
@@ -174,7 +186,7 @@ skip_wrapper = false
 ```toml
 [[rules]]
 description = "readers (in-project)"
-when = 'command.name in ["cat","head","tail"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
+when = 'command.name in ["cat","head","tail"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
 
 [[rules]]
@@ -193,7 +205,7 @@ command.name == "cargo" && command.args.exists(a, a == "install")
 ```toml
 [[rules]]
 description = "write redirect out-of-project"
-when = 'command.write_targets.exists(t, !startsWith(path(t), pane.cwd))'
+when = 'command.write_targets.exists(t, !in_project(path(t)))'
 action = "ask"
 order = -1
 ```
