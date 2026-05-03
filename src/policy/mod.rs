@@ -88,8 +88,13 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         return result;
     }
 
+    // Resolve project_dirs against pane cwd (anchored to real workspace, not tracked cwd)
+    let project_dirs: Vec<String> = compiled.project_dirs.iter()
+        .filter_map(|d| rules::resolve_path(d, ctx.cwd.as_deref().unwrap_or("/"), ctx.user.as_deref()))
+        .collect();
+
     // CEL rules: evaluate every command in flat list, most restrictive wins
-    evaluate_all(&commands, ctx, &compiled.rules)
+    evaluate_all(&commands, ctx, &compiled.rules, &project_dirs)
 }
 
 // --- Internal ---
@@ -109,6 +114,7 @@ fn evaluate_all(
     commands: &[parse::CommandInfo],
     ctx: &PaneContext,
     ruleset: &rules::RuleSet,
+    project_dirs: &[String],
 ) -> PolicyResult {
     // Track cwd as Effective, same type as effective_user/host.
     let mut shell_cwd = match &ctx.cwd {
@@ -144,7 +150,7 @@ fn evaluate_all(
             parse::Effective::Unchanged => shell_cwd.clone(),
         };
 
-        let result = rules::evaluate(cmd, ctx, ruleset, &resolved_cwd);
+        let result = rules::evaluate(cmd, ctx, ruleset, &resolved_cwd, project_dirs);
 
         // Update tracked shell cwd from rule capture.
         if let Some(ref captured) = result.captured_cwd {

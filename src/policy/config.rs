@@ -21,6 +21,10 @@ use super::rules::{self, RuleSet};
 pub struct PolicyConfig {
     #[serde(default)]
     pub default: Option<String>,
+    /// Directories considered "in-project" for path containment checks.
+    /// Relative paths resolved against pane.cwd. Default: `["."]`.
+    #[serde(default)]
+    pub project_dirs: Option<Vec<String>>,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
     #[serde(default)]
@@ -132,6 +136,8 @@ const BUILTIN_TOML: &str = include_str!("builtin_rules.toml");
 pub struct CompiledPolicy {
     pub rules: RuleSet,
     pub wrappers: WrapperRegistry,
+    /// Unresolved project dir patterns from config (resolved against pane.cwd at eval time).
+    pub project_dirs: Vec<String>,
 }
 
 /// Thread-safe policy engine that holds compiled policy and watches config files.
@@ -143,7 +149,7 @@ pub struct PolicyEngine {
 }
 
 fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
-    let (default, tagged, tagged_wrappers) = load_merged_config(project_cwd);
+    let (default, project_dirs, tagged, tagged_wrappers) = load_merged_config(project_cwd);
     let rules = match rules::compile(&tagged, default) {
         Ok(rs) => rs,
         Err(e) => {
@@ -152,7 +158,7 @@ fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
         }
     };
     let wrappers = parse::compile_wrappers(&tagged_wrappers);
-    CompiledPolicy { rules, wrappers }
+    CompiledPolicy { rules, wrappers, project_dirs }
 }
 
 impl PolicyEngine {
@@ -268,7 +274,7 @@ impl PolicyEngine {
 /// Load and merge config from all three sources.
 pub fn load_merged_config(
     project_cwd: Option<&str>,
-) -> (Decision, Vec<TaggedRule>, Vec<TaggedWrapper>) {
+) -> (Decision, Vec<String>, Vec<TaggedRule>, Vec<TaggedWrapper>) {
     let builtin = parse_config(BUILTIN_TOML).expect("built-in rules TOML is invalid");
     let home = load_config_file(&home_config_path_always());
     let project = project_cwd.and_then(|cwd| load_config_file(&project_config_path_always(cwd)));
@@ -313,13 +319,20 @@ fn merge(
     builtin: PolicyConfig,
     home: Option<PolicyConfig>,
     project: Option<PolicyConfig>,
-) -> (Decision, Vec<TaggedRule>, Vec<TaggedWrapper>) {
+) -> (Decision, Vec<String>, Vec<TaggedRule>, Vec<TaggedWrapper>) {
     let default = project.as_ref()
         .and_then(|c| c.default.as_ref())
         .or_else(|| home.as_ref().and_then(|c| c.default.as_ref()))
         .or(builtin.default.as_ref())
         .map(|s| parse_decision(s))
         .unwrap_or(Decision::Ask);
+
+    let project_dirs = project.as_ref()
+        .and_then(|c| c.project_dirs.as_ref())
+        .or_else(|| home.as_ref().and_then(|c| c.project_dirs.as_ref()))
+        .or(builtin.project_dirs.as_ref())
+        .cloned()
+        .unwrap_or_else(|| vec![".".to_string()]);
 
     let mut tagged = Vec::new();
 
@@ -366,7 +379,7 @@ fn merge(
             .then(a.source_index.cmp(&b.source_index))
     });
 
-    (default, tagged, tagged_wrappers)
+    (default, project_dirs, tagged, tagged_wrappers)
 }
 
 fn parse_decision(s: &str) -> Decision {
@@ -444,7 +457,7 @@ mod tests {
 
     #[test]
     fn builtin_default_is_ask() {
-        let (default, _, _) = load_merged_config(None);
+        let (default, _, _, _) = load_merged_config(None);
         assert_eq!(default, Decision::Ask);
     }
 
@@ -452,7 +465,7 @@ mod tests {
     fn home_overrides_default() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let home = parse_config("default = \"deny\"").unwrap();
-        let (default, _, _) = merge(builtin, Some(home), None);
+        let (default, _, _, _) = merge(builtin, Some(home), None);
         assert_eq!(default, Decision::Deny);
     }
 
@@ -461,7 +474,7 @@ mod tests {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let home = parse_config("default = \"deny\"").unwrap();
         let project = parse_config("default = \"allow\"").unwrap();
-        let (default, _, _) = merge(builtin, Some(home), Some(project));
+        let (default, _, _, _) = merge(builtin, Some(home), Some(project));
         assert_eq!(default, Decision::Allow);
     }
 
@@ -475,7 +488,7 @@ mod tests {
             action = "allow"
             order = -1
         "#).unwrap();
-        let (_, rules, _) = merge(builtin, Some(home), None);
+        let (_, _, rules, _) = merge(builtin, Some(home), None);
         // The early rule should be before any order-0 rules
         let early_pos = rules.iter().position(|r| r.config.description == "early rule").unwrap();
         let first_order0 = rules.iter().position(|r| r.config.order == 0).unwrap();
@@ -492,7 +505,7 @@ mod tests {
             action = "allow"
             order = 1
         "#).unwrap();
-        let (_, rules, _) = merge(builtin, Some(home), None);
+        let (_, _, rules, _) = merge(builtin, Some(home), None);
         assert_eq!(rules.last().unwrap().config.description, "late rule");
     }
 
@@ -510,7 +523,7 @@ mod tests {
             when = 'command.name == "ls"'
             action = "deny"
         "#).unwrap();
-        let (_, rules, _) = merge(builtin, Some(home), None);
+        let (_, _, rules, _) = merge(builtin, Some(home), None);
         assert_eq!(rules[0].source, RuleSource::Builtin);
         assert_eq!(rules[1].source, RuleSource::Home);
     }
@@ -530,7 +543,7 @@ mod tests {
             when = 'true'
             action = "deny"
         "#).unwrap();
-        let (_, rules, _) = merge(builtin, Some(home), Some(project));
+        let (_, _, rules, _) = merge(builtin, Some(home), Some(project));
         assert_eq!(rules[0].config.description, "home");
         assert_eq!(rules[1].config.description, "project");
     }
@@ -547,14 +560,14 @@ mod tests {
             when = 'true'
             action = "deny"
         "#).unwrap();
-        let (_, rules, _) = merge(builtin, None, None);
+        let (_, _, rules, _) = merge(builtin, None, None);
         assert_eq!(rules[0].config.description, "first");
         assert_eq!(rules[1].config.description, "second");
     }
 
     #[test]
     fn no_config_files_uses_builtin_only() {
-        let (default, rules, _) = load_merged_config(None);
+        let (default, _, rules, _) = load_merged_config(None);
         assert_eq!(default, Decision::Ask);
         assert!(rules.iter().all(|r| r.source == RuleSource::Builtin));
     }
@@ -563,7 +576,7 @@ mod tests {
     fn empty_config_file_uses_builtin() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let empty = parse_config("").unwrap();
-        let (_, rules, _) = merge(builtin, Some(empty), None);
+        let (_, _, rules, _) = merge(builtin, Some(empty), None);
         assert!(rules.iter().all(|r| r.source == RuleSource::Builtin));
     }
 

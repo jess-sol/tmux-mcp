@@ -131,7 +131,7 @@ order = -1
 
 [[rules]]
 description = "write redirect out-of-project"
-when = 'command.write_targets.exists(t, !startsWith(path(t), pane.cwd))'
+when = 'command.write_targets.exists(t, !in_project(path(t)))'
 action = "ask"
 order = -1
 message = "write redirect targets a file outside project directory"
@@ -155,7 +155,7 @@ action = "allow"
 # File-reading tools — contained to project dir
 [[rules]]
 description = "file readers (in-project)"
-when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
+when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
 
 [[rules]]
@@ -166,7 +166,7 @@ action = "ask"
 # Search/list tools — contained to project dir
 [[rules]]
 description = "search tools (in-project)"
-when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
+when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
 
 [[rules]]
@@ -177,7 +177,7 @@ action = "ask"
 # File-write tools — contained to project dir
 [[rules]]
 description = "file ops (in-project)"
-when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"] && !command.args.exists(a, !startsWith(a, "-") && !startsWith(path(a), pane.cwd))'
+when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
 
 [[rules]]
