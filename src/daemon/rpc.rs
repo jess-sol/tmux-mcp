@@ -1133,6 +1133,12 @@ async fn handle_request_approval(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
 
+    // Lint the command before policy evaluation — early rejection avoids
+    // wasting a user approval prompt on commands that would fail anyway.
+    if let Err(err) = crate::lint::lint_command_run(command) {
+        return Ok(json!({"result": "lint", "message": err.to_string()}));
+    }
+
     // Window scoping still applies
     let origin_pane = {
         let registry = state.registry.read().await;
@@ -1145,6 +1151,14 @@ async fn handle_request_approval(
     };
 
     let ctx = read_pane_context(state, pane_id).await?;
+
+    // cd-to-cwd lint needs the pane's working directory
+    if let Some(cwd) = &ctx.cwd {
+        if let Err(err) = crate::lint::lint_cd_to_cwd(command, cwd) {
+            return Ok(json!({"result": "lint", "message": err.to_string()}));
+        }
+    }
+
     let result = policy::evaluate(command, &ctx, &state.policy);
 
     let ctx_json = json!({

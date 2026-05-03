@@ -101,6 +101,12 @@ async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
 
     match decision {
         "allow" => print_hook_response("allow", None),
+        "lint" => {
+            // JSON deny with the lint message — Claude sees the reason and can
+            // self-correct, but the user is never prompted for approval.
+            let msg = result["message"].as_str().unwrap_or("lint error");
+            print_hook_response("deny", Some(msg));
+        }
         "deny" => {
             eprintln!(
                 "Policy denied: {}\n  pane {}  host: {}  cwd: {}  rule: {}",
