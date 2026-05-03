@@ -97,6 +97,9 @@ pub struct CompiledRule {
     /// True if the CEL expression directly references command.effective_host.
     /// When true, the implicit same-host constraint on `allow` is skipped.
     pub host_aware: bool,
+    /// CEL expression to capture the new cwd when this rule matches.
+    /// String → Known(dir), anything else → Unknown. Absent → no effect.
+    pub capture_cwd: Option<cel::IdedExpr>,
 }
 
 pub struct RuleSet {
@@ -124,6 +127,15 @@ pub fn compile(tagged_rules: &[TaggedRule], default: Decision) -> Result<RuleSet
         };
         let privilege_aware = references_command_field(&ast.expr, "effective_user");
         let host_aware = references_command_field(&ast.expr, "effective_host");
+        let capture_cwd = match &tagged.config.capture_cwd {
+            Some(expr) => {
+                let cwd_parser = cel_parser::Parser::new();
+                let parsed = cwd_parser.parse(expr)
+                    .map_err(|e| format!("CEL parse error in capture_cwd of '{}': {:?}", tagged.config.description, e))?;
+                Some(parsed)
+            }
+            None => None,
+        };
         rules.push(CompiledRule {
             description: tagged.config.description.clone(),
             ast,
@@ -131,6 +143,7 @@ pub fn compile(tagged_rules: &[TaggedRule], default: Decision) -> Result<RuleSet
             message: tagged.config.message.clone(),
             privilege_aware,
             host_aware,
+            capture_cwd,
         });
     }
     Ok(RuleSet { rules, default })
@@ -169,13 +182,17 @@ fn references_command_field(expr: &cel::Expr, field: &str) -> bool {
 /// Evaluate a single CommandInfo against the rule set.
 /// First matching rule wins, or returns default.
 ///
+/// `effective_cwd` is the resolved cwd for this command (from sequential
+/// tracking in evaluate_all). It's resolved to TriVal in the pane context,
+/// same pattern as effective_user/effective_host on commands.
+///
 /// For `allow` rules: an implicit context constraint applies. The rule only
 /// matches if effective_user resolves to pane.user AND effective_host resolves
 /// to pane.hostname. This is skipped if the rule's CEL expression directly
 /// references command.effective_user or command.effective_host (the rule
 /// author has explicitly considered the context).
-pub fn evaluate(cmd: &CommandInfo, ctx: &PaneContext, rules: &RuleSet) -> PolicyResult {
-    let eval_ctx = build_context(cmd, ctx);
+pub fn evaluate(cmd: &CommandInfo, ctx: &PaneContext, rules: &RuleSet, effective_cwd: &Effective) -> PolicyResult {
+    let eval_ctx = build_context(cmd, ctx, effective_cwd);
 
     for rule in &rules.rules {
         let result = eval_expr(&rule.ast.expr, &eval_ctx);
@@ -204,9 +221,16 @@ pub fn evaluate(cmd: &CommandInfo, ctx: &PaneContext, rules: &RuleSet) -> Policy
                 Some(msg) => format!("{}: {}", rule.description, msg),
                 None => rule.description.clone(),
             };
+            let captured_cwd = rule.capture_cwd.as_ref().map(|expr| {
+                match eval_expr(&expr.expr, &eval_ctx) {
+                    TriVal::String(s) => Effective::Known(s),
+                    _ => Effective::Unknown,
+                }
+            });
             return PolicyResult {
                 decision: rule.action.clone(),
                 rule: rule_desc,
+                captured_cwd,
             };
         }
         // False or Unknown → rule doesn't match, try next
@@ -215,6 +239,7 @@ pub fn evaluate(cmd: &CommandInfo, ctx: &PaneContext, rules: &RuleSet) -> Policy
     PolicyResult {
         decision: rules.default.clone(),
         rule: "default".to_string(),
+        captured_cwd: None,
     }
 }
 
@@ -583,14 +608,24 @@ fn eval_path(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
     };
 
     // Get pane.cwd and pane.user from context
-    let pane_cwd = ctx.get("pane")
-        .and_then(|p| if let TriVal::Map(m) = p { m.get("cwd") } else { None })
-        .and_then(|v| if let TriVal::String(s) = v { Some(s.as_str()) } else { None })
-        .unwrap_or("/");
+    let pane_map = ctx.get("pane")
+        .and_then(|p| if let TriVal::Map(m) = p { Some(m) } else { None });
 
-    let pane_user = ctx.get("pane")
-        .and_then(|p| if let TriVal::Map(m) = p { m.get("user") } else { None })
+    let pane_cwd_val = pane_map.and_then(|m| m.get("cwd"));
+
+    let pane_user = pane_map
+        .and_then(|m| m.get("user"))
         .and_then(|v| if let TriVal::String(s) = v { Some(s.as_str()) } else { None });
+
+    // For relative paths, we need a known cwd to resolve against.
+    // Absolute paths (/ or ~/) don't depend on cwd.
+    let is_relative = !arg_str.starts_with('/') && !arg_str.starts_with('~');
+
+    let pane_cwd = match pane_cwd_val {
+        Some(TriVal::String(s)) => s.as_str(),
+        _ if is_relative => return TriVal::Unknown,
+        _ => "/", // absolute paths don't use cwd; provide dummy
+    };
 
     let resolved = resolve_path(arg_str, pane_cwd, pane_user);
     match resolved {
@@ -601,7 +636,7 @@ fn eval_path(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
 
 /// Resolve a path string to absolute, normalizing `.` and `..` segments.
 /// Pure string manipulation — no filesystem access, safe for remote systems.
-fn resolve_path(arg: &str, cwd: &str, user: Option<&str>) -> Option<String> {
+pub(super) fn resolve_path(arg: &str, cwd: &str, user: Option<&str>) -> Option<String> {
     use std::path::{Component, Path};
 
     // Flags are not paths
@@ -942,10 +977,10 @@ fn eval_getopt_method(
 
 // --- Context construction ---
 
-fn build_context(cmd: &CommandInfo, pane: &PaneContext) -> HashMap<String, TriVal> {
+fn build_context(cmd: &CommandInfo, pane: &PaneContext, effective_cwd: &Effective) -> HashMap<String, TriVal> {
     let mut ctx = HashMap::new();
     ctx.insert("command".to_string(), build_command_val(cmd, pane));
-    ctx.insert("pane".to_string(), build_pane_val(pane));
+    ctx.insert("pane".to_string(), build_pane_val(pane, effective_cwd));
     ctx
 }
 
@@ -1016,10 +1051,18 @@ fn option_to_trival(opt: &Option<String>) -> TriVal {
     }
 }
 
-fn build_pane_val(pane: &PaneContext) -> TriVal {
+fn build_pane_val(pane: &PaneContext, effective_cwd: &Effective) -> TriVal {
     let mut map = HashMap::new();
     map.insert("hostname".into(), option_to_trival(&pane.hostname));
-    map.insert("cwd".into(), option_to_trival(&pane.cwd));
+    // Resolve effective_cwd same way as effective_user/host on commands.
+    map.insert("cwd".into(), match effective_cwd {
+        Effective::Unchanged => match &pane.cwd {
+            Some(s) => TriVal::String(s.clone()),
+            None => TriVal::Unknown,
+        },
+        Effective::Known(s) => TriVal::String(s.clone()),
+        Effective::Unknown => TriVal::Unknown,
+    });
     map.insert("foreground".into(), option_to_trival(&pane.foreground));
     map.insert("user".into(), option_to_trival(&pane.user));
     TriVal::Map(map)
@@ -1069,6 +1112,7 @@ mod tests {
                     action: action.to_string(),
                     order: 0,
                     message: None,
+                    capture_cwd: None,
                 },
                 source: crate::policy::config::RuleSource::Builtin,
                 source_index: i,
@@ -1137,19 +1181,19 @@ mod tests {
     #[test]
     fn name_equals_matches() {
         let rules = compile_rules(&[("ls rule", r#"command.name == "ls""#, "allow")]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
     fn name_equals_no_match() {
         let rules = compile_rules(&[("ls rule", r#"command.name == "ls""#, "allow")]);
-        assert_eq!(evaluate(&cmd("cat"), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("cat"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
     fn name_in_list_matches() {
         let rules = compile_rules(&[("tools", r#"command.name in ["ls","cat","grep"]"#, "allow")]);
-        assert_eq!(evaluate(&cmd("cat"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("cat"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1157,7 +1201,7 @@ mod tests {
         let rules = compile_rules(&[
             ("rm -rf", r#"command.name == "rm" && command.args.exists(a, a == "-rf")"#, "ask"),
         ]);
-        assert_eq!(evaluate(&cmd_with_args("rm", &["-rf", "/"]), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd_with_args("rm", &["-rf", "/"]), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1166,7 +1210,7 @@ mod tests {
             ("rm -rf", r#"command.name == "rm" && command.args.exists(a, a == "-rf")"#, "deny"),
             ("rm allow", r#"command.name == "rm""#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd_with_args("rm", &["-v", "file"]), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd_with_args("rm", &["-v", "file"]), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     // --- First match wins ---
@@ -1177,7 +1221,7 @@ mod tests {
             ("allow ls", r#"command.name == "ls""#, "allow"),
             ("deny ls", r#"command.name == "ls""#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1186,13 +1230,13 @@ mod tests {
             ("allow cat", r#"command.name == "cat""#, "allow"),
             ("deny ls", r#"command.name == "ls""#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
     fn no_match_returns_default() {
         let rules = compile_rules(&[("allow cat", r#"command.name == "cat""#, "allow")]);
-        let r = evaluate(&cmd("ls"), &local_pane(), &rules);
+        let r = evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged);
         assert_eq!(r.decision, Decision::Ask);
         assert_eq!(r.rule, "default");
     }
@@ -1207,7 +1251,7 @@ mod tests {
         let mut c = cmd("rm");
         c.effective_user = Effective::Unknown;
         // Unknown == "root" → Unknown → no match → default Ask
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1218,7 +1262,7 @@ mod tests {
         let mut c = cmd("rm");
         c.effective_user = Effective::Unknown;
         // Unknown != "root" → Unknown → no match → default Ask
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1228,7 +1272,7 @@ mod tests {
         ]);
         let mut c = cmd("rm");
         c.effective_user = Effective::Known("root".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
@@ -1236,7 +1280,7 @@ mod tests {
         let rules = compile_rules(&[
             ("jess check", r#"command.effective_user == "jess""#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1247,7 +1291,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_user = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1258,7 +1302,7 @@ mod tests {
         ]);
         let mut c = cmd("rm");
         c.effective_user = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Null (definite absence) ---
@@ -1269,7 +1313,7 @@ mod tests {
         let rules = compile_rules(&[
             ("sudo parent", r#"command.parent.name == "sudo""#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1278,7 +1322,7 @@ mod tests {
         let rules = compile_rules(&[
             ("not sudo parent", r#"command.parent.name != "sudo""#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1287,7 +1331,7 @@ mod tests {
         let rules = compile_rules(&[
             ("no parent", r#"command.parent == null"#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1297,7 +1341,7 @@ mod tests {
         ]);
         let mut c = cmd("rm");
         c.parent = Some(Arc::new(cmd("sudo")));
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
@@ -1306,7 +1350,7 @@ mod tests {
         let rules = compile_rules(&[
             ("deep null", r#"command.parent.name == "test""#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Null vs Unknown are distinct ---
@@ -1317,7 +1361,7 @@ mod tests {
         let rules = compile_rules(&[
             ("null ne", r#"command.parent.name != "x""#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1328,7 +1372,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_user = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Non-exhaustive list ---
@@ -1340,7 +1384,7 @@ mod tests {
         ]);
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1351,7 +1395,7 @@ mod tests {
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
         // exists returns Unknown (not found in known, list non-exhaustive) → no match
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1362,7 +1406,7 @@ mod tests {
         ]);
         let c = cmd_with_args("rm", &["-v"]);
         // exhaustive list, -rf not found → False → try next rule → allow
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1372,7 +1416,7 @@ mod tests {
         ]);
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1382,7 +1426,7 @@ mod tests {
         ]);
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1393,7 +1437,7 @@ mod tests {
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
         // !Unknown → Unknown → no match
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Boolean propagation (Kleene) ---
@@ -1406,7 +1450,7 @@ mod tests {
         let mut c = cmd("rm");  // name != "cat" → False
         c.effective_user = Effective::Unknown;
         // False && Unknown → False → no match
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Pane context ---
@@ -1416,7 +1460,7 @@ mod tests {
         let rules = compile_rules(&[
             ("prod host", r#"pane.hostname == "prod-server""#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &remote_pane("prod-server"), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&cmd("ls"), &remote_pane("prod-server"), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
@@ -1425,7 +1469,7 @@ mod tests {
             ("etc", r#"pane.cwd == "/etc""#, "deny"),
         ]);
         let pane = PaneContext { cwd: Some("/etc".into()), ..local_pane() };
-        assert_eq!(evaluate(&cmd("ls"), &pane, &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&cmd("ls"), &pane, &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     // --- Pipe target ---
@@ -1437,7 +1481,7 @@ mod tests {
         ]);
         let mut c = cmd("bash");
         c.is_pipe_target = true;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
@@ -1445,7 +1489,7 @@ mod tests {
         let rules = compile_rules(&[
             ("pipe to bash", r#"command.name == "bash" && command.is_pipe_target"#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("bash"), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("bash"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Glob ---
@@ -1457,7 +1501,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Known("web.prod.example.com".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
@@ -1467,7 +1511,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Known("web.staging.example.com".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1478,7 +1522,7 @@ mod tests {
         let mut c = cmd("ls");
         c.effective_host = Effective::Unknown;
         // Unknown host → glob returns Unknown → no match
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     // --- Compile errors ---
@@ -1492,6 +1536,7 @@ mod tests {
                 action: "allow".into(),
                 order: 0,
                 message: None,
+                capture_cwd: None,
             },
             source: crate::policy::config::RuleSource::Builtin,
             source_index: 0,
@@ -1511,6 +1556,7 @@ mod tests {
                 action: "invalid".into(),
                 order: 0,
                 message: None,
+                capture_cwd: None,
             },
             source: crate::policy::config::RuleSource::Builtin,
             source_index: 0,
@@ -1540,7 +1586,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1550,7 +1596,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Known("prod".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     #[test]
@@ -1558,7 +1604,7 @@ mod tests {
         let rules = compile_rules(&[
             ("staging", r#"command.effective_host == "staging.example.com""#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &remote_pane("staging.example.com"), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &remote_pane("staging.example.com"), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1566,7 +1612,7 @@ mod tests {
         let rules = compile_rules(&[
             ("local", r#"command.effective_host == null"#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     // --- path() function ---
@@ -1640,7 +1686,7 @@ mod tests {
         ]);
         let c = cmd_with_args("cat", &["src/main.rs"]);
         let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
-        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &pane, &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1650,7 +1696,7 @@ mod tests {
         ]);
         let c = cmd_with_args("cat", &["/etc/passwd"]);
         let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
-        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &pane, &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1660,7 +1706,7 @@ mod tests {
         ]);
         let c = cmd_with_args("cat", &["../../.ssh/id_rsa"]);
         let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
-        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &pane, &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1670,7 +1716,7 @@ mod tests {
         ]);
         let c = cmd_with_args("cat", &["~/.ssh/id_ed25519"]);
         let pane = PaneContext { cwd: Some("/home/user/project".into()), user: Some("user".into()), ..local_pane() };
-        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &pane, &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1680,7 +1726,7 @@ mod tests {
         ]);
         let c = cmd_with_args("cat", &["-n", "src/main.rs"]);
         let pane = PaneContext { cwd: Some("/home/user/project".into()), ..local_pane() };
-        assert_eq!(evaluate(&c, &pane, &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &pane, &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     // --- AST walker: references_command_field ---
@@ -1730,7 +1776,7 @@ mod tests {
         let mut c = cmd("cargo");
         c.effective_user = Effective::Known("root".into());
         // Rule matches CEL but implicit constraint fails (root != jess)
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1738,7 +1784,7 @@ mod tests {
         let rules = compile_rules(&[
             ("cargo", r#"command.name == "cargo""#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd("cargo"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("cargo"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1748,7 +1794,7 @@ mod tests {
         ]);
         let mut c = cmd("cargo");
         c.effective_user = Effective::Known("jess".into()); // same as pane.user
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1758,7 +1804,7 @@ mod tests {
         ]);
         let mut c = cmd("cargo");
         c.effective_user = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1769,7 +1815,7 @@ mod tests {
         let mut c = cmd("cargo");
         c.effective_user = Effective::Known("root".into());
         // Rule is privilege-aware (references command.effective_user), so constraint skipped
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1779,7 +1825,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Known("server".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1789,7 +1835,7 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Known("staging".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
     }
 
     #[test]
@@ -1800,7 +1846,7 @@ mod tests {
         ]);
         let mut c = cmd("rm");
         c.effective_user = Effective::Known("root".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -1810,7 +1856,7 @@ mod tests {
         ]);
         let mut c = cmd("eval");
         c.effective_user = Effective::Known("root".into());
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Deny);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
     }
 
     // --- CEL expression evaluator helper ---
@@ -2108,9 +2154,9 @@ mod tests {
             is_write: true,
             has_expansion: false,
         });
-        assert_eq!(evaluate(&c, &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
         // No redirects → size() == 0 → no match
-        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -2120,8 +2166,8 @@ mod tests {
             r#"command.name.size() > 3"#,
             "allow",
         )]);
-        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules).decision, Decision::Allow);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
     }
 
     #[test]
@@ -2131,8 +2177,60 @@ mod tests {
             ("eq", r#"command.args.size() >= 1"#, "ask"),
             ("fallback", r#"true"#, "allow"),
         ]);
-        assert_eq!(evaluate(&cmd_with_args("x", &["a", "b"]), &local_pane(), &rules).decision, Decision::Deny);
-        assert_eq!(evaluate(&cmd_with_args("x", &["a"]), &local_pane(), &rules).decision, Decision::Ask);
-        assert_eq!(evaluate(&cmd("x"), &local_pane(), &rules).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd_with_args("x", &["a", "b"]), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Deny);
+        assert_eq!(evaluate(&cmd_with_args("x", &["a"]), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Ask);
+        assert_eq!(evaluate(&cmd("x"), &local_pane(), &rules, &Effective::Unchanged).decision, Decision::Allow);
+    }
+
+    // --- cwd uncertainty ---
+
+    #[test]
+    fn path_with_unknown_cwd_relative_returns_unknown() {
+        let mut pane_map = HashMap::new();
+        pane_map.insert("cwd".into(), TriVal::Unknown);
+        let mut ctx = HashMap::new();
+        ctx.insert("pane".into(), TriVal::Map(pane_map));
+
+        let parser = cel_parser::Parser::new();
+        let expr = parser.parse(r#"path("file.txt")"#).unwrap();
+        assert_eq!(eval_expr(&expr.expr, &ctx), TriVal::Unknown);
+    }
+
+    #[test]
+    fn path_with_unknown_cwd_absolute_resolves() {
+        let mut pane_map = HashMap::new();
+        pane_map.insert("cwd".into(), TriVal::Unknown);
+        let mut ctx = HashMap::new();
+        ctx.insert("pane".into(), TriVal::Map(pane_map));
+
+        let parser = cel_parser::Parser::new();
+        let expr = parser.parse(r#"path("/etc/passwd")"#).unwrap();
+        assert_eq!(eval_expr(&expr.expr, &ctx), TriVal::String("/etc/passwd".into()));
+    }
+
+    #[test]
+    fn build_pane_val_cwd_none_is_unknown() {
+        let pane = PaneContext {
+            hostname: None,
+            cwd: None,
+            foreground: None,
+            user: None,
+        };
+        let val = build_pane_val(&pane, &Effective::Unchanged);
+        let map = match val { TriVal::Map(m) => m, _ => panic!("expected map") };
+        assert_eq!(map.get("cwd"), Some(&TriVal::Unknown));
+    }
+
+    #[test]
+    fn build_pane_val_cwd_some_is_string() {
+        let pane = PaneContext {
+            hostname: None,
+            cwd: Some("/foo".into()),
+            foreground: None,
+            user: None,
+        };
+        let val = build_pane_val(&pane, &Effective::Unchanged);
+        let map = match val { TriVal::Map(m) => m, _ => panic!("expected map") };
+        assert_eq!(map.get("cwd"), Some(&TriVal::String("/foo".into())));
     }
 }

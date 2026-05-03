@@ -36,6 +36,11 @@ pub struct RuleConfig {
     pub order: i32,
     #[serde(default)]
     pub message: Option<String>,
+    /// CEL expression to capture the new cwd when this rule matches.
+    /// String result → Known(dir), anything else → Unknown.
+    /// Absent → no effect on cwd tracking.
+    #[serde(default)]
+    pub capture_cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +62,9 @@ pub struct WrapperConfig {
     pub skip_wrapper: bool,
     #[serde(default = "default_true")]
     pub args_complete: bool,
+    /// When true, inner commands have uncertain cwd (effective_cwd = Unknown).
+    #[serde(default)]
+    pub changes_cwd: bool,
     #[serde(default)]
     pub order: i32,
 }

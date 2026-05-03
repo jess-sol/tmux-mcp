@@ -28,6 +28,8 @@ pub struct CommandInfo {
     pub effective_user: Effective,
     /// Host context — propagated down from host-modifying wrappers.
     pub effective_host: Effective,
+    /// CWD context — set by wrappers with `changes_cwd = true`.
+    pub effective_cwd: Effective,
     /// True if this command receives piped stdin in a pipeline.
     pub is_pipe_target: bool,
     /// Shell redirects attached to this command.
@@ -58,6 +60,7 @@ impl CommandInfo {
             args_complete: true,
             effective_user: Effective::Unchanged,
             effective_host: Effective::Unchanged,
+            effective_cwd: Effective::Unchanged,
             is_pipe_target: false,
             redirects: Vec::new(),
             parent: None,
@@ -253,6 +256,7 @@ fn extract_from_simple_command(
         args_complete,
         effective_user,
         effective_host,
+        effective_cwd: Effective::Unchanged,
         is_pipe_target,
         redirects,
         parent,
@@ -413,6 +417,8 @@ pub struct CompiledWrapper {
     pub capture_host: Option<cel::Expr>,
     pub skip_wrapper: bool,
     pub args_complete: bool,
+    /// When true, inner commands have uncertain cwd (effective_cwd = Unknown).
+    pub changes_cwd: bool,
 }
 
 /// Ordered list of compiled wrapper rules. First match wins.
@@ -490,6 +496,7 @@ pub fn compile_wrappers(tagged: &[TaggedWrapper]) -> WrapperRegistry {
             capture_host,
             skip_wrapper: w.skip_wrapper,
             args_complete: w.args_complete,
+            changes_cwd: w.changes_cwd,
         });
     }
 
@@ -564,6 +571,11 @@ fn extract_wrapper_children(
             Some(expr) => trival_to_effective(rules::eval_expr(expr, &ctx)),
             None => wrapper.effective_host.clone(),
         };
+        let effective_cwd = if cw.changes_cwd {
+            Effective::Unknown
+        } else {
+            wrapper.effective_cwd.clone()
+        };
 
         // Interpret inner result type
         let extracted = match inner_result {
@@ -580,7 +592,8 @@ fn extract_wrapper_children(
                             }).collect();
                             if !str_args.is_empty() {
                                 push_inner(wrapper, &str_args, effective_user.clone(),
-                                    effective_host.clone(), cw.args_complete, registry, out);
+                                    effective_host.clone(), effective_cwd.clone(),
+                                    cw.args_complete, registry, out);
                                 found = true;
                             }
                         }
@@ -595,7 +608,7 @@ fn extract_wrapper_children(
                         false
                     } else {
                         push_inner(wrapper, &str_args, effective_user, effective_host,
-                            cw.args_complete, registry, out)
+                            effective_cwd, cw.args_complete, registry, out)
                     }
                 }
             }
@@ -609,6 +622,7 @@ fn extract_wrapper_children(
                     for c in &mut inner_cmds {
                         c.effective_user = effective_user.clone();
                         c.effective_host = effective_host.clone();
+                        c.effective_cwd = effective_cwd.clone();
                         c.parent = Some(parent_arc.clone());
                     }
                     let found = !inner_cmds.is_empty();
@@ -663,6 +677,7 @@ fn push_inner(
     inner_args: &[String],
     user: Effective,
     host: Effective,
+    cwd: Effective,
     args_complete: bool,
     registry: &WrapperRegistry,
     out: &mut Vec<CommandInfo>,
@@ -679,6 +694,7 @@ fn push_inner(
         args_complete,
         effective_user: user,
         effective_host: host,
+        effective_cwd: cwd,
         is_pipe_target: false,
         redirects: Vec::new(),
         parent: Some(parent_arc),

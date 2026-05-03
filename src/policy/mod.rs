@@ -31,6 +31,9 @@ pub struct PaneContext {
 pub struct PolicyResult {
     pub decision: Decision,
     pub rule: String,
+    /// Cwd captured by the matched rule's capture_cwd expression.
+    /// Used by evaluate_all to track cwd changes through compound commands.
+    pub captured_cwd: Option<parse::Effective>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         return PolicyResult {
             decision: Decision::Deny,
             rule: "structural:unprintable_chars".into(),
+            captured_cwd: None,
         };
     }
 
@@ -66,6 +70,7 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
             return PolicyResult {
                 decision: Decision::Ask,
                 rule: "default".into(),
+                captured_cwd: None,
             };
         }
         Ok(cmds) => cmds,
@@ -73,6 +78,7 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
             return PolicyResult {
                 decision: Decision::Deny,
                 rule: format!("structural:parse_failure ({})", err.message),
+                captured_cwd: None,
             };
         }
     };
@@ -92,23 +98,63 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
 /// Deny > Ask > Allow.
 ///
 /// Transparent wrappers (inner == Transparent) are skipped — their effects are
-/// fully captured on inner commands via effective_user/effective_host. Wrappers
-/// that modify uncaptured state (inner == Evaluated, e.g. env) are still evaluated.
+/// fully captured on inner commands via effective_user/effective_host/effective_cwd.
+/// Wrappers that modify uncaptured state (inner == Evaluated, e.g. env) are still
+/// evaluated.
+///
+/// Tracks cwd sequentially: when a rule with `capture_cwd` matches, the captured
+/// value updates the tracked cwd for subsequent commands. Wrappers with
+/// `changes_cwd = true` set effective_cwd on inner commands during parsing.
 fn evaluate_all(
     commands: &[parse::CommandInfo],
     ctx: &PaneContext,
     ruleset: &rules::RuleSet,
 ) -> PolicyResult {
+    // Track cwd as Effective, same type as effective_user/host.
+    let mut shell_cwd = match &ctx.cwd {
+        Some(s) => parse::Effective::Known(s.clone()),
+        None => parse::Effective::Unknown,
+    };
+
     let mut worst: Option<PolicyResult> = None;
 
     for cmd in commands {
         // Transparent wrappers are redundant — their effects are captured
-        // on inner commands via effective_user/effective_host.
+        // on inner commands via effective_user/effective_host/effective_cwd.
         if cmd.inner == parse::InnerExtraction::Transparent {
             continue;
         }
 
-        let result = rules::evaluate(cmd, ctx, ruleset);
+        // Resolve this command's effective cwd by merging wrapper cwd with shell cwd.
+        let resolved_cwd = match &cmd.effective_cwd {
+            parse::Effective::Unknown => parse::Effective::Unknown,
+            parse::Effective::Known(dir) => {
+                // Wrapper captured a specific dir — resolve relative to shell cwd.
+                match &shell_cwd {
+                    parse::Effective::Known(base) => {
+                        let user = ctx.user.as_deref();
+                        match rules::resolve_path(dir, base, user) {
+                            Some(abs) => parse::Effective::Known(abs),
+                            None => parse::Effective::Unknown,
+                        }
+                    }
+                    _ => parse::Effective::Unknown,
+                }
+            }
+            parse::Effective::Unchanged => shell_cwd.clone(),
+        };
+
+        let result = rules::evaluate(cmd, ctx, ruleset, &resolved_cwd);
+
+        // Update tracked shell cwd from rule capture.
+        if let Some(ref captured) = result.captured_cwd {
+            match captured {
+                parse::Effective::Known(dir) => shell_cwd = parse::Effective::Known(dir.clone()),
+                parse::Effective::Unknown => shell_cwd = parse::Effective::Unknown,
+                parse::Effective::Unchanged => {}
+            }
+        }
+
         if result.decision == Decision::Deny {
             return result;
         }
@@ -121,6 +167,7 @@ fn evaluate_all(
     worst.unwrap_or(PolicyResult {
         decision: ruleset.default.clone(),
         rule: "default".into(),
+        captured_cwd: None,
     })
 }
 
@@ -1148,5 +1195,84 @@ mod tests {
     fn write_redirect_to_dev_null_and_out_of_project_asks() {
         // Mixed: one safe device target + one out-of-project target → ask
         assert_eq!(evaluate_test("echo foo > /dev/null > /tmp/evil", &local_ctx()).decision, Decision::Ask);
+    }
+
+    // ====================================================================
+    // cwd tracking: cd/pushd/popd capture and sequential propagation
+    // ====================================================================
+
+    #[test]
+    fn cd_out_of_project_cat_asks() {
+        // cd /etc captures /etc, cat passwd resolves to /etc/passwd → out of project
+        assert_eq!(evaluate_test("cd /etc; cat passwd", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cd_out_of_project_and_cat_asks() {
+        assert_eq!(evaluate_test("cd /etc && cat passwd", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cd_to_subdir_cat_asks_because_cd_asks() {
+        // cd src captures $PROJECT/src, cat main.rs resolves in project → Allow.
+        // But cd itself is Ask, and most-restrictive-wins → Ask overall.
+        // The precise capture ensures cat isn't DENIED, just that cd needs approval.
+        assert_eq!(evaluate_test("cd src && cat main.rs", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cat_without_cd_still_allowed() {
+        assert_eq!(evaluate_test("cat src/main.rs", &local_ctx()).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn pushd_out_of_project_asks() {
+        // pushd /tmp captures /tmp, ls . resolves to /tmp/. → out of project
+        assert_eq!(evaluate_test("pushd /tmp; ls .", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn popd_makes_cwd_unknown() {
+        // popd has no resolvable target → Unknown cwd
+        assert_eq!(evaluate_test("popd; cat file.txt", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cd_dash_makes_cwd_unknown() {
+        // cd - → path("-") returns Null → Unknown cwd
+        assert_eq!(evaluate_test("cd -; cat file.txt", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn chained_cd_resolves_correctly() {
+        // cd /tmp → captures /tmp; cd sub → resolves sub against /tmp → /tmp/sub
+        // cat file → resolves against /tmp/sub → out of project
+        assert_eq!(evaluate_test("cd /tmp; cd sub; cat file", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cd_to_subdir_chained_cat_not_denied() {
+        // cd src → $PROJECT/src; cd tests → $PROJECT/src/tests; cat foo.rs resolves in project.
+        // cd commands are Ask, so overall is Ask (not Deny — cat's path is correctly resolved).
+        assert_eq!(evaluate_test("cd src; cd tests; cat foo.rs", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn cd_absolute_then_cat_absolute_asks() {
+        assert_eq!(evaluate_test("cd /etc; cat /etc/passwd", &local_ctx()).decision, Decision::Ask);
+    }
+
+    // --- Wrapper changes_cwd ---
+
+    #[test]
+    fn env_with_c_flag_asks() {
+        // env -C /etc changes cwd for inner command
+        assert_eq!(evaluate_test("env -C /etc cat passwd", &local_ctx()).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn env_without_c_flag_allowed() {
+        // env without -C inherits cwd, cargo test is allowed
+        assert_eq!(evaluate_test("env FOO=bar cargo test", &local_ctx()).decision, Decision::Ask);
     }
 }

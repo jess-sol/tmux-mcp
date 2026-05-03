@@ -30,6 +30,14 @@ when = 'command.name in ["bash","sh","zsh","dash","ksh","csh","tcsh","fish"] && 
 action = "deny"
 message = "piping to a shell interpreter can execute arbitrary code"
 
+# --- Directory changes (ask, with cwd capture) ---
+
+[[rules]]
+description = "cd/pushd/popd"
+when = 'command.name in ["cd", "pushd", "popd"]'
+action = "ask"
+capture_cwd = 'path(command.args[0])'
+
 # --- Dangerous commands (ask) ---
 
 [[rules]]
@@ -245,6 +253,7 @@ when = 'command.name == "sudo"'
 getopt = "isC:D:g:r:t:U:u:"
 inner = 'command.getopt.operands'
 capture_user = 'or(command.getopt.value("-u"), "root")'
+changes_cwd = true
 
 [[wrappers]]
 name = "doas"
@@ -269,6 +278,7 @@ getopt = "b:c:D:E:e:F:I:i:J:L:l:m:O:o:p:Q:R:S:W:w:"
 inner = 'command.getopt.operands_from(1)'
 capture_host = 'rsplit(command.getopt.positional(0), "@", 2)[1]'
 capture_user = 'rsplit(command.getopt.positional(0), "@", 2)[0]'
+changes_cwd = true
 
 # Container/kubectl exec — GNU mode (pflag/cobra)
 # "exec" is an operand: operands = [exec, container/pod, cmd...]
@@ -279,6 +289,7 @@ when = 'command.name in ["podman","docker"] && command.args.exists(a, a == "exec
 getopt_gnu = { short = "e:u:w:", long = ["env:", "user:", "workdir:"] }
 inner = 'command.getopt.operands_from(2)'
 capture_host = 'command.getopt.positional(1)'
+changes_cwd = true
 
 [[wrappers]]
 name = "kubectl exec"
@@ -286,6 +297,7 @@ when = 'command.name == "kubectl" && command.args.exists(a, a == "exec")'
 getopt_gnu = { short = "n:c:", long = ["namespace:", "container:"] }
 inner = 'command.getopt.operands_from(2)'
 capture_host = 'command.getopt.positional(1)'
+changes_cwd = true
 
 # Shell eval (inner is String -> engine reparses)
 
@@ -313,6 +325,17 @@ args_complete = false
 # Environment — shell puts FOO=bar in prefix, not args, so we can't distinguish
 # env-with-vars from bare env via args alone. Always evaluate both.
 
+# env with -C/--chdir: cwd changes for inner commands
+[[wrappers]]
+name = "env chdir"
+when = 'command.name == "env" && command.args.exists(a, a == "-C" || startsWith(a, "--chdir"))'
+getopt = "u:S:C:"
+inner = 'command.getopt.operands'
+changes_cwd = true
+skip_wrapper = false
+order = -1
+
+# env without -C: inherits cwd
 [[wrappers]]
 name = "env"
 when = 'command.name == "env"'
