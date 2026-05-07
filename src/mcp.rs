@@ -554,29 +554,32 @@ impl ServerHandler for TmuxMcp {
             instructions: Some(
                 "MCP server for interacting with tmux panes. Use list_panes to discover \
                  available panes, then run commands and read their output.\n\n\
-                 command_run: Prefer tail=30 for commands where you only need the result \
-                 (builds, tests, installs). Use search to filter verbose output \
-                 (e.g. search=\"error|fail|warn\" on test runs); add before/after for \
-                 context lines around matches (like grep -B/-A). Use head or next when \
-                 exploring unknown output. On timeout, returns partial output — use \
-                 command_read(command_id=N) to continue reading. For long-running \
-                 servers, use command_read(command_id=N, next=1, \
+                 command_run: On timeout, the command keeps running — use \
+                 command_read(command_id=N) to continue reading. \
+                 For long-running servers, use command_read(command_id=N, next=1, \
                  search=\"listen|ready|serving\", timeout_secs=30) to wait for the \
                  ready signal before running dependent commands — never sleep. \
                  Use timeout_secs=0 for commands that change shell state \
-                 (sudo -i, ssh host, exit).\n\n\
-                 command_read: Use next to stream new output from a running command, \
-                 head/tail to view ranges, search to filter by regex. Use before/after \
-                 with search for context lines around matches (like grep -B/-A). \
-                 For active commands, waits up to timeout_secs for new output.\n\n\
+                 (sudo -i, ssh host, exit). \
+                 If a pane is busy (RPC error), use command_read with timeout_secs \
+                 to wait for output, or press_key C-c to cancel. \
+                 Build separately from run — build output drowns run output.\n\n\
+                 command_read: Primary tool for streaming output from running or completed \
+                 commands. Use next to advance through output (advances cursor), \
+                 head/tail to view ranges, search to filter by regex with before/after \
+                 for context. For active commands, waits up to timeout_secs for new \
+                 output — don't poll in a loop. \
+                 Pattern for long-running commands: start with command_run, if it \
+                 times out follow up with command_read(command_id=N, timeout_secs=300, \
+                 search=\"pattern\") to wait for specific output.\n\n\
                  command_history: Lists recent commands with their command_id, exit code, \
-                 and output line count. Use command_id with command_read to revisit \
-                 output from earlier commands.\n\n\
+                 and output line count. Essential for finding command IDs to revisit \
+                 output from earlier commands via command_read(command_id=N).\n\n\
                  debug_pane: Shows only visible terminal text — no scrollback, no structure. \
                  NOT for reading command output (use command_read instead). Use only to \
                  debug pane state or inspect TUI apps.\n\n\
-                 press_key: For control sequences only. NOT for running commands — use \
-                 command_run instead."
+                 press_key: For control sequences only (C-c, C-d, Enter, Escape). \
+                 NOT for running commands — use command_run instead."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

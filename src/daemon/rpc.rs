@@ -592,10 +592,10 @@ async fn handle_command_read(
                     // When search is active, count matches (not output lines
                     // which may be inflated by before/after context).
                     peeked.matched.unwrap_or(peeked.lines.len()) >= n
-                } else if is_tail {
-                    false // tail must wait for completion
+                } else if is_tail || peeked.matched.is_some() {
+                    false // tail / bare+search: wait for completion or timeout
                 } else {
-                    true // bare: return immediately
+                    true // bare without search: return immediately
                 };
 
                 if has_enough {
