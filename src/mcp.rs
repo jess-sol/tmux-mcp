@@ -45,7 +45,7 @@ pub struct CommandRunParams {
     pub head: Option<i64>,
     #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
     pub tail: Option<i64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
+    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
     pub search: Option<String>,
     #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
     pub before: Option<i64>,
@@ -67,7 +67,7 @@ pub struct CommandReadParams {
     pub head: Option<i64>,
     #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
     pub tail: Option<i64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor.")]
+    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
     pub search: Option<String>,
     #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
     pub before: Option<i64>,
@@ -585,5 +585,45 @@ impl ServerHandler for TmuxMcp {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that the `search` field description in the JSON schema contains
+    /// single-backslash regex examples (e.g. `plan\.metrics`), not double-escaped
+    /// ones. The Rust string `"\\."` becomes `\.` in the generated schema JSON,
+    /// which after JSON parsing gives the AI the literal `\.` to use.
+    #[test]
+    fn search_schema_has_single_backslash_examples() {
+        let schema = schemars::schema_for!(CommandReadParams);
+        let json = serde_json::to_string(&schema).unwrap();
+
+        // In the JSON wire format, a single regex backslash is encoded as \\
+        // So `plan\.metrics` in the description appears as `plan\\.metrics` in JSON text
+        assert!(
+            json.contains(r#"plan\\.metrics"#),
+            "expected plan\\.metrics (literal dot) in schema JSON, got: {json}"
+        );
+        assert!(
+            json.contains(r#"result\\?"#),
+            "expected result\\? (literal question mark) in schema JSON, got: {json}"
+        );
+        assert!(
+            json.contains(r#"\\d+"#),
+            "expected \\d+ (digit class) in schema JSON, got: {json}"
+        );
+
+        // Must NOT contain triple or quadruple backslashes for these patterns
+        assert!(
+            !json.contains(r#"plan\\\\.metrics"#),
+            "found over-escaped plan\\\\.metrics in schema JSON"
+        );
+        assert!(
+            !json.contains(r#"result\\\\?"#),
+            "found over-escaped result\\\\? in schema JSON"
+        );
     }
 }
