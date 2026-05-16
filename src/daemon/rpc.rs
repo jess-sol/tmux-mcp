@@ -317,6 +317,163 @@ fn apply_read_params(
     }
 }
 
+/// How to treat a "bare" read — no `next`/`head`/`tail`/`search` — on a still-running
+/// command. `command_read` returns whatever output exists immediately; `command_run`
+/// blocks until the command completes or the deadline elapses.
+#[derive(Copy, Clone)]
+enum BareReadPolicy {
+    ReturnNow,
+    WaitForCompletion,
+}
+
+/// Wait for output from a command and return a result JSON.
+///
+/// Shared between `command_read` and `command_run`'s post-marker phase.
+/// `command_id = None` reads the front (most recent) command — `command_read`'s
+/// default. `command_run` passes the id of the record it pushed.
+///
+/// Returns as soon as one of:
+///   * the command is completed (status: "completed"),
+///   * `next`/`head` is satisfied — N lines (or, with `search`, N matches) are
+///     available (status: "running"),
+///   * a bare read (no next/head/tail/search) with `bare_policy = ReturnNow`
+///     observes the new record (status: "running"),
+///   * the deadline elapses (status: "running", with whatever output exists).
+///
+/// `tail`, bare+search, and bare reads with `bare_policy = WaitForCompletion`
+/// wait for completion or the deadline; they don't early-return on partial output.
+async fn wait_and_read(
+    pane_handle: &PaneHandle,
+    command_id: Option<u64>,
+    read_params: &ReadParams,
+    deadline: tokio::time::Instant,
+    bare_policy: BareReadPolicy,
+) -> Result<Value, RpcError> {
+    // Determine how many result lines constitute "enough" to return early.
+    let required_lines = read_params.next.or(read_params.head);
+    let is_tail = read_params.tail.is_some();
+    let mut rx = pane_handle.subscribe_state();
+
+    loop {
+        {
+            let mut tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state_mut();
+            let cmd = if let Some(id) = command_id {
+                pane_state.command_by_id_mut(id)
+            } else {
+                pane_state.commands.front_mut()
+            };
+
+            if let Some(cmd) = cmd {
+                // Completed commands: always return immediately
+                if cmd.completed {
+                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, read_params);
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "completed",
+                        "exit_code": cmd.exit_code,
+                        "output": result.lines.join("\n"),
+                        "total_lines": result.total_lines,
+                        "lines_skipped": result.skipped,
+                        "search_matches": result.matched,
+                        "read_cursor": cmd.read_cursor,
+                    }));
+                }
+
+                // Running command: peek without mutating cursor
+                let mut peek_cursor = cmd.read_cursor;
+                let peeked = apply_read_params(&cmd.output, &mut peek_cursor, read_params);
+
+                let has_enough = if let Some(n) = required_lines {
+                    // When search is active, count matches (not output lines
+                    // which may be inflated by before/after context).
+                    peeked.matched.unwrap_or(peeked.lines.len()) >= n
+                } else if is_tail || peeked.matched.is_some() {
+                    false // tail / bare+search: wait for completion or timeout
+                } else {
+                    // Bare read (no next/head/tail/search): policy decides.
+                    matches!(bare_policy, BareReadPolicy::ReturnNow)
+                };
+
+                if has_enough {
+                    // Commit cursor and return
+                    cmd.read_cursor = peek_cursor;
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "running",
+                        "output": peeked.lines.join("\n"),
+                        "total_lines": peeked.total_lines,
+                        "lines_skipped": peeked.skipped,
+                        "search_matches": peeked.matched,
+                        "read_cursor": cmd.read_cursor,
+                    }));
+                }
+            } else if let Some(id) = command_id {
+                return Err(RpcError::invalid_params(format!(
+                    "Command {} not found", id
+                )));
+            } else {
+                return Err(RpcError::invalid_params("No commands in history"));
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            // Timeout: tail returns empty, others return partial results
+            if is_tail {
+                // Re-read command metadata for the response
+                let tp = pane_handle.lock().await;
+                let pane_state = tp.processor.state();
+                let cmd = if let Some(id) = command_id {
+                    pane_state.command_by_id(id)
+                } else {
+                    pane_state.commands.front()
+                };
+                if let Some(cmd) = cmd {
+                    return Ok(json!({
+                        "command_id": cmd.id,
+                        "command": cmd.command,
+                        "status": "running",
+                        "output": "",
+                        "total_lines": 0,
+                        "read_cursor": cmd.read_cursor,
+                    }));
+                }
+                return Err(RpcError::internal("No command found"));
+            }
+
+            let mut tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state_mut();
+            let cmd = if let Some(id) = command_id {
+                pane_state.command_by_id_mut(id)
+            } else {
+                pane_state.commands.front_mut()
+            };
+            if let Some(cmd) = cmd {
+                let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, read_params);
+                return Ok(json!({
+                    "command_id": cmd.id,
+                    "command": cmd.command,
+                    "status": "running",
+                    "exit_code": cmd.exit_code,
+                    "output": result.lines.join("\n"),
+                    "total_lines": result.total_lines,
+                    "lines_skipped": result.skipped,
+                    "search_matches": result.matched,
+                    "read_cursor": cmd.read_cursor,
+                }));
+            }
+            return Err(RpcError::internal("No command found"));
+        }
+
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
+}
+
 /// Get the leaf PID for a pane: the foreground process PID, or the shell PID if idle.
 fn get_leaf_pid(shell_pid: u32) -> u32 {
     proc::proc_info(shell_pid)
@@ -543,137 +700,8 @@ async fn handle_command_read(
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    // Find the target command
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
-
-    // Determine how many result lines constitute "enough" to return early.
-    let required_lines = if let Some(n) = read_params.next {
-        Some(n)
-    } else if let Some(n) = read_params.head {
-        Some(n)
-    } else {
-        None // tail waits for completion; bare returns immediately
-    };
-    let is_tail = read_params.tail.is_some();
-    let mut rx = pane_handle.subscribe_state();
-
-    loop {
-        {
-            let mut tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state_mut();
-            let cmd = if let Some(id) = command_id {
-                pane_state.command_by_id_mut(id)
-            } else {
-                pane_state.commands.front_mut()
-            };
-
-            if let Some(cmd) = cmd {
-                // Completed commands: always return immediately
-                if cmd.completed {
-                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "completed",
-                        "exit_code": cmd.exit_code,
-                        "output": result.lines.join("\n"),
-                        "total_lines": result.total_lines,
-                        "lines_skipped": result.skipped,
-                        "search_matches": result.matched,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
-
-                // Running command: peek without mutating cursor
-                let mut peek_cursor = cmd.read_cursor;
-                let peeked = apply_read_params(&cmd.output, &mut peek_cursor, &read_params);
-
-                let has_enough = if let Some(n) = required_lines {
-                    // When search is active, count matches (not output lines
-                    // which may be inflated by before/after context).
-                    peeked.matched.unwrap_or(peeked.lines.len()) >= n
-                } else if is_tail || peeked.matched.is_some() {
-                    false // tail / bare+search: wait for completion or timeout
-                } else {
-                    true // bare without search: return immediately
-                };
-
-                if has_enough {
-                    // Commit cursor and return
-                    cmd.read_cursor = peek_cursor;
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "running",
-                        "output": peeked.lines.join("\n"),
-                        "total_lines": peeked.total_lines,
-                        "lines_skipped": peeked.skipped,
-                        "search_matches": peeked.matched,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
-            } else if command_id.is_some() {
-                return Err(RpcError::invalid_params(format!(
-                    "Command {} not found", command_id.unwrap()
-                )));
-            } else {
-                return Err(RpcError::invalid_params("No commands in history"));
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            // Timeout: tail returns empty, others return partial results
-            if is_tail {
-                // Re-read command metadata for the response
-                let tp = pane_handle.lock().await;
-                let pane_state = tp.processor.state();
-                let cmd = if let Some(id) = command_id {
-                    pane_state.command_by_id(id)
-                } else {
-                    pane_state.commands.front()
-                };
-                if let Some(cmd) = cmd {
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "running",
-                        "output": "",
-                        "total_lines": 0,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
-                return Err(RpcError::internal("No command found"));
-            }
-
-            let mut tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state_mut();
-            let cmd = if let Some(id) = command_id {
-                pane_state.command_by_id_mut(id)
-            } else {
-                pane_state.commands.front_mut()
-            };
-            if let Some(cmd) = cmd {
-                let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                return Ok(json!({
-                    "command_id": cmd.id,
-                    "command": cmd.command,
-                    "status": "running",
-                    "exit_code": cmd.exit_code,
-                    "output": result.lines.join("\n"),
-                    "total_lines": result.total_lines,
-                    "lines_skipped": result.skipped,
-                    "search_matches": result.matched,
-                    "read_cursor": cmd.read_cursor,
-                }));
-            }
-            return Err(RpcError::internal("No command found"));
-        }
-
-        tokio::select! {
-            _ = rx.changed() => {}
-            _ = tokio::time::sleep_until(deadline) => {}
-        }
-    }
+    wait_and_read(&pane_handle, command_id, &read_params, deadline, BareReadPolicy::ReturnNow).await
 }
 
 async fn handle_command_run(
@@ -866,87 +894,52 @@ async fn handle_command_run(
             .map_err(|e| RpcError::internal(format!("Failed to send command: {}", e)))?;
     }
 
-    // --- Unified poll: wait for new command record, then for completion ---
-    // Phase 1 (first 500ms): wait for C marker to push a new record (id > id_before).
-    //   If no new record appears, OSC 133 is broken — error out.
-    // Phase 2 (remaining timeout): wait for that record to complete.
+    // --- Phase 1: wait up to 500 ms for C marker to push a new command record ---
+    // If no new record appears, OSC 133 is broken — error out with screen capture.
     let marker_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
     let completion_deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
-    let mut command_seen = false;
-    let mut rx = pane_handle.subscribe_state();
-
-    loop {
-        {
-            let mut tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state_mut();
-            if let Some(cmd) = pane_state.commands.front_mut() {
-                if cmd.id > id_before {
-                    command_seen = true;
-                    if cmd.completed {
-                        let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                        return Ok(json!({
-                            "command_id": cmd.id,
-                            "command": cmd.command,
-                            "status": "completed",
-                            "exit_code": cmd.exit_code,
-                            "output": result.lines.join("\n"),
-                            "total_lines": result.total_lines,
-                            "lines_skipped": result.skipped,
-                            "search_matches": result.matched,
-                            "read_cursor": cmd.read_cursor,
-                        }));
+    let new_command_id = {
+        let mut rx = pane_handle.subscribe_state();
+        loop {
+            {
+                let tp = pane_handle.lock().await;
+                if let Some(cmd) = tp.processor.state().commands.front() {
+                    if cmd.id > id_before {
+                        break cmd.id;
                     }
                 }
             }
-        }
-
-        let now = tokio::time::Instant::now();
-
-        // Phase 1 timeout: no new command record appeared
-        if !command_seen && now >= marker_deadline {
-            tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
-            let mut tp = pane_handle.lock().await;
-            tp.processor.state_mut().osc133_fail(leaf_pid);
-            let screen = capture_screen(&tp, 20);
-            return Err(RpcError::internal(format!(
-                "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
-                 Use debug_pane to inspect pane state.\n\nScreen:\n{}",
-                screen
-            )));
-        }
-
-        // Phase 2 timeout: command seen but not completed
-        if now >= completion_deadline {
-            let mut tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state_mut();
-            if let Some(cmd) = pane_state.commands.front_mut() {
-                if cmd.id > id_before {
-                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, &read_params);
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "running",
-                        "output": result.lines.join("\n"),
-                        "total_lines": result.total_lines,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
+            if tokio::time::Instant::now() >= marker_deadline {
+                tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
+                let mut tp = pane_handle.lock().await;
+                tp.processor.state_mut().osc133_fail(leaf_pid);
+                let screen = capture_screen(&tp, 20);
+                return Err(RpcError::internal(format!(
+                    "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
+                     Use debug_pane to inspect pane state.\n\nScreen:\n{}",
+                    screen
+                )));
             }
-            return Ok(json!({
-                "status": "running",
-                "output": "",
-                "total_lines": 0,
-            }));
+            tokio::select! {
+                _ = rx.changed() => {}
+                _ = tokio::time::sleep_until(marker_deadline) => {}
+            }
         }
+    };
 
-        // Wait for state change or the sooner of the two deadlines
-        let wait_until = if command_seen { completion_deadline } else { marker_deadline };
-        tokio::select! {
-            _ = rx.changed() => {}
-            _ = tokio::time::sleep_until(wait_until) => {}
-        }
-    }
+    // --- Phase 2: shared wait/read loop ---
+    // Returns when the command completes, when next/head (± search) is satisfied,
+    // or when the completion deadline elapses (status: "running").
+    // Bare reads wait for completion (unlike command_read, which returns immediately).
+    wait_and_read(
+        &pane_handle,
+        Some(new_command_id),
+        &read_params,
+        completion_deadline,
+        BareReadPolicy::WaitForCompletion,
+    )
+    .await
 }
 
 async fn handle_capture_pane(

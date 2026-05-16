@@ -39,11 +39,11 @@ pub struct CommandRunParams {
     pub command: String,
     #[schemars(description = "Timeout in seconds (default 30)")]
     pub timeout_secs: Option<i64>,
-    #[schemars(description = "Show next N lines from cursor (advances cursor). Mutually exclusive with head/tail.")]
+    #[schemars(description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail.")]
     pub next: Option<i64>,
-    #[schemars(description = "Show first N lines. Mutually exclusive with next/tail.")]
+    #[schemars(description = "Show first N lines. Returns as soon as the first N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with next/tail.")]
     pub head: Option<i64>,
-    #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
+    #[schemars(description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head.")]
     pub tail: Option<i64>,
     #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
     pub search: Option<String>,
@@ -61,11 +61,11 @@ pub struct CommandReadParams {
     pub command_id: Option<i64>,
     #[schemars(description = "Timeout in seconds — how long to wait for new output (default 5)")]
     pub timeout_secs: Option<i64>,
-    #[schemars(description = "Show next N lines from cursor (advances cursor). Mutually exclusive with head/tail.")]
+    #[schemars(description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail.")]
     pub next: Option<i64>,
-    #[schemars(description = "Show first N lines. Mutually exclusive with next/tail.")]
+    #[schemars(description = "Show first N lines. Returns as soon as the first N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with next/tail.")]
     pub head: Option<i64>,
-    #[schemars(description = "Show last N lines. Mutually exclusive with next/head.")]
+    #[schemars(description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head.")]
     pub tail: Option<i64>,
     #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
     pub search: Option<String>,
@@ -554,24 +554,26 @@ impl ServerHandler for TmuxMcp {
             instructions: Some(
                 "MCP server for interacting with tmux panes. Use list_panes to discover \
                  available panes, then run commands and read their output.\n\n\
-                 command_run: On timeout, the command keeps running — use \
-                 command_read(command_id=N) to continue reading. \
-                 For long-running servers, use command_read(command_id=N, next=1, \
-                 search=\"listen|ready|serving\", timeout_secs=30) to wait for the \
-                 ready signal before running dependent commands — never sleep. \
+                 command_run: Combine with next=N + search=\"regex\" to return as soon as \
+                 N matching lines appear, leaving the command running. \
+                 Example for a long-running server: \
+                 command_run(pane_id=%X, command=\"python serve.py\", next=1, \
+                 search=\"listen|ready|serving\", timeout_secs=60) returns on the first \
+                 match, then run dependent commands while the server keeps going. \
+                 head=N + search behaves the same over the first N matches. \
+                 Without next/head, the call blocks until the command completes or \
+                 timeout_secs elapses; on timeout the command keeps running — continue \
+                 with command_read(command_id=N). \
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit). \
                  If a pane is busy (RPC error), use command_read with timeout_secs \
                  to wait for output, or press_key C-c to cancel. \
                  Build separately from run — build output drowns run output.\n\n\
-                 command_read: Primary tool for streaming output from running or completed \
-                 commands. Use next to advance through output (advances cursor), \
-                 head/tail to view ranges, search to filter by regex with before/after \
-                 for context. For active commands, waits up to timeout_secs for new \
-                 output — don't poll in a loop. \
-                 Pattern for long-running commands: start with command_run, if it \
-                 times out follow up with command_read(command_id=N, timeout_secs=300, \
-                 search=\"pattern\") to wait for specific output.\n\n\
+                 command_read: Stream output from running or completed commands. Use next \
+                 to advance through output (advances cursor), head/tail to view ranges, \
+                 search to filter by regex with before/after for context. \
+                 next/head + search waits up to timeout_secs and returns as soon as N \
+                 matches accumulate — don't poll in a loop.\n\n\
                  command_history: Lists recent commands with their command_id, exit code, \
                  and output line count. Essential for finding command IDs to revisit \
                  output from earlier commands via command_read(command_id=N).\n\n\
