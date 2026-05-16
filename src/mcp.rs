@@ -554,9 +554,15 @@ impl ServerHandler for TmuxMcp {
             instructions: Some(
                 "MCP server for interacting with tmux panes. Use list_panes to discover \
                  available panes, then run commands and read their output.\n\n\
-                 command_run: Combine with next=N + search=\"regex\" to return as soon as \
-                 N matching lines appear, leaving the command running. \
-                 Example for a long-running server: \
+                 command_run: Combine with next=N + search=\"regex\" to return as soon \
+                 as N matching lines appear, leaving the command running. Reach for \
+                 this any time you'd otherwise set timeout_secs past ~30s and the \
+                 command emits a recognizable progress marker (server ready line, \
+                 build artifact written, test summary). In search mode, size \
+                 timeout_secs to when the match should appear if things go well, not \
+                 to total command runtime — if the regex is wrong you fail fast, then \
+                 use command_read to inspect what actually printed and retry with a \
+                 better pattern. Example for a long-running server: \
                  command_run(pane_id=%X, command=\"python serve.py\", next=1, \
                  search=\"listen|ready|serving\", timeout_secs=60) returns on the first \
                  match, then run dependent commands while the server keeps going. \
