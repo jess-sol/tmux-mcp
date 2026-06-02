@@ -9,6 +9,7 @@
 /// use regex where the pattern has no quoting ambiguity.
 
 use brush_parser::ast;
+use brush_parser::word::WordPiece;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -41,6 +42,9 @@ pub fn lint_command_run(command: &str) -> Result<(), LintError> {
             return Err(err);
         }
         if let Some(err) = lint_exit_status_echo(&program, command) {
+            return Err(err);
+        }
+        if let Some(err) = lint_static_echo(&program, command) {
             return Err(err);
         }
     }
@@ -347,6 +351,114 @@ fn render_without_trailing_command(program: &ast::Program) -> Option<String> {
     }
 }
 
+/// Lint: reject a top-level `echo`/`printf` that prints only constant text.
+///
+/// A fixed-string stdout command conveys nothing the agent doesn't already
+/// know, and is almost always a leftover progress marker — the `echo "=== X ==="`
+/// scaffolding around a chain of real commands. command_run already tracks each
+/// command independently (output, exit code, command_history entry, OSC 133
+/// delimiters), so those markers are pure noise; the real commands should be
+/// run as separate command_run calls.
+///
+/// We flag an echo/printf only when it is the *first* pipeline of a top-level
+/// and-or list — i.e. it runs unconditionally as a leading or sequenced step.
+/// This deliberately leaves `cmd && echo ok` / `cmd || echo fail` (conditional
+/// status reporting in `&&`/`||` branches) alone. It also requires the command
+/// to be:
+///   - a single-segment pipeline (not piped into or out of anything),
+///   - free of output redirects (`echo x > f` writes a file — a real use), and
+///   - free of anything dynamic: no parameter/command/arithmetic expansion,
+///     and no *unquoted* glob/brace/tilde (which depend on the filesystem or
+///     args). Quoting is honored, so `echo "*** ERROR ***"` is caught as a
+///     constant while `echo *.log`, `echo "$VAR"`, and `echo $(date)` pass.
+fn lint_static_echo(program: &ast::Program, command: &str) -> Option<LintError> {
+    for cc in &program.complete_commands {
+        for item in &cc.0 {
+            let Some(simple) = static_echo_pipeline(&item.0.first) else {
+                continue;
+            };
+            let offending = format!("{simple}");
+            return Some(LintError {
+                message: format!(
+                    "Don't run echo/printf with only constant text — its output is already known.\n\
+                     \n\
+                     Rejected:  command_run(command=\"{command}\")\n\
+                     Marker:    {offending}\n\
+                     \n\
+                     A top-level echo of a fixed string is almost always a leftover progress \
+                     marker (e.g. \"=== Building ===\"). command_run tracks each command \
+                     separately — output, exit code, and a command_history entry — so markers \
+                     between commands add nothing. Run the real commands as separate \
+                     command_run calls. To inspect a value, echo the variable itself \
+                     (e.g. echo \"$VAR\"), which this lint allows."
+                ),
+            });
+        }
+    }
+    None
+}
+
+/// Return the simple command if `pipeline` is a single, unredirected,
+/// constant-only `echo`/`printf`. See [`lint_static_echo`] for the rationale.
+fn static_echo_pipeline(pipeline: &ast::Pipeline) -> Option<&ast::SimpleCommand> {
+    if pipeline.seq.len() != 1 {
+        return None;
+    }
+    let simple = match pipeline.seq.last()? {
+        ast::Command::Simple(s) => s,
+        _ => return None,
+    };
+    let name = simple.word_or_name.as_ref()?.value.as_str();
+    if name != "echo" && name != "printf" {
+        return None;
+    }
+    if let Some(suffix) = &simple.suffix {
+        let all_static = suffix.0.iter().all(|i| match i {
+            ast::CommandPrefixOrSuffixItem::Word(w) => is_static_literal(&w.value),
+            // A redirect, assignment, or process substitution means it's doing
+            // something beyond printing a constant — leave it alone.
+            _ => false,
+        });
+        if !all_static {
+            return None;
+        }
+    }
+    Some(simple)
+}
+
+/// True if `value` expands to a fixed string. Parses the word into pieces so
+/// quoting is honored: glob/brace metacharacters only count when *unquoted*,
+/// and parameter/command/arithmetic expansions and tilde prefixes are always
+/// dynamic. Conservative — a word brush can't parse is treated as dynamic.
+fn is_static_literal(value: &str) -> bool {
+    let options = brush_parser::ParserOptions::default();
+    match brush_parser::word::parse(value, &options) {
+        Ok(pieces) => pieces.iter().all(|p| piece_is_static(&p.piece, false)),
+        Err(_) => false,
+    }
+}
+
+/// Whether a single word piece contributes only constant text. `quoted` marks
+/// pieces inside double quotes, where glob/brace characters are literal.
+fn piece_is_static(piece: &WordPiece, quoted: bool) -> bool {
+    match piece {
+        // Unquoted text — glob and brace metacharacters expand here.
+        WordPiece::Text(s) => quoted || !s.contains(['*', '?', '[', ']', '{', '}']),
+        // Fully literal regardless of context.
+        WordPiece::SingleQuotedText(_)
+        | WordPiece::AnsiCQuotedText(_)
+        | WordPiece::EscapeSequence(_) => true,
+        // Inside double quotes glob/brace are literal; only nested expansions
+        // (parameters, command substitutions, …) make the result dynamic.
+        WordPiece::DoubleQuotedSequence(inner)
+        | WordPiece::GettextDoubleQuotedSequence(inner) => {
+            inner.iter().all(|p| piece_is_static(&p.piece, true))
+        }
+        // Tilde prefix and parameter/command/arithmetic expansions are dynamic.
+        _ => false,
+    }
+}
+
 /// Extract the search pattern from grep args, skipping flag arguments.
 fn extract_grep_pattern(args: &[String]) -> String {
     for arg in args {
@@ -621,7 +733,9 @@ mod tests {
 
     #[test]
     fn echo_without_status_allowed() {
-        assert!(lint_command_run("make; echo done").is_ok());
+        // No `$?` → exit-status lint doesn't fire. Uses a variable so the
+        // static-echo lint doesn't fire either.
+        assert!(lint_command_run("make; echo \"$summary\"").is_ok());
     }
 
     #[test]
@@ -640,6 +754,116 @@ mod tests {
     fn status_assignment_allowed() {
         // Capturing into a variable for later use is fine.
         assert!(lint_command_run("make; RC=$?; echo $RC").is_ok());
+    }
+
+    // --- Static echo / printf markers ---
+
+    #[test]
+    fn lone_static_echo_rejected() {
+        let err = lint_command_run("echo \"=== Building ===\"").unwrap_err();
+        assert!(err.message.contains("constant text"), "{}", err);
+    }
+
+    #[test]
+    fn marker_before_command_rejected() {
+        let err = lint_command_run("echo \"Building\"; cargo build").unwrap_err();
+        assert!(err.message.contains("Marker:"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_static_marker_rejected() {
+        // `;`-sequenced trailing marker — its own list item, so it's a `first`.
+        assert!(lint_command_run("cargo build; echo done").is_err());
+    }
+
+    #[test]
+    fn marker_with_logical_and_prefix_rejected() {
+        // `echo "x" && cmd` — the echo runs unconditionally as the leading step.
+        assert!(lint_command_run("echo \"start\" && cargo build").is_err());
+    }
+
+    #[test]
+    fn static_printf_rejected() {
+        assert!(lint_command_run("printf '=== %s ===\\n' Building").is_err());
+    }
+
+    #[test]
+    fn bare_echo_rejected() {
+        // A blank-line spacer is still constant top-level stdout.
+        assert!(lint_command_run("echo").is_err());
+    }
+
+    #[test]
+    fn echo_with_variable_allowed() {
+        assert!(lint_command_run("echo \"$HOME\"").is_ok());
+        assert!(lint_command_run("echo $PATH").is_ok());
+    }
+
+    #[test]
+    fn echo_with_command_substitution_allowed() {
+        assert!(lint_command_run("echo \"$(date)\"").is_ok());
+        assert!(lint_command_run("echo `hostname`").is_ok());
+    }
+
+    #[test]
+    fn echo_with_glob_allowed() {
+        // Unquoted glob — output depends on the filesystem, not a constant.
+        assert!(lint_command_run("echo *.log").is_ok());
+    }
+
+    #[test]
+    fn echo_unquoted_brace_allowed() {
+        assert!(lint_command_run("echo {a,b}").is_ok());
+    }
+
+    #[test]
+    fn echo_unquoted_tilde_allowed() {
+        // Tilde expands to $HOME — dynamic.
+        assert!(lint_command_run("echo ~/projects").is_ok());
+    }
+
+    #[test]
+    fn echo_quoted_metachars_rejected() {
+        // Quoted glob/brace/tilde are literal — genuinely constant markers.
+        assert!(lint_command_run("echo \"*** ERROR ***\"").is_err());
+        assert!(lint_command_run("echo \"{a,b}\"").is_err());
+        assert!(lint_command_run("echo \"~\"").is_err());
+        assert!(lint_command_run("echo '*** done ***'").is_err());
+    }
+
+    #[test]
+    fn echo_literal_text_around_quoted_expansion_allowed() {
+        // A double-quoted string containing a real expansion stays dynamic.
+        assert!(lint_command_run("echo \"result: $RESULT\"").is_ok());
+    }
+
+    #[test]
+    fn echo_redirected_to_file_allowed() {
+        assert!(lint_command_run("echo \"content\" > config.txt").is_ok());
+    }
+
+    #[test]
+    fn echo_piped_allowed() {
+        assert!(lint_command_run("echo hello | base64").is_ok());
+    }
+
+    #[test]
+    fn conditional_success_marker_allowed() {
+        // `&&`/`||` branches carry status meaning — left alone by design.
+        assert!(lint_command_run("cargo build && echo ok").is_ok());
+        assert!(lint_command_run("cargo build || echo failed").is_ok());
+    }
+
+    #[test]
+    fn non_echo_string_literal_allowed() {
+        // Only echo/printf are targeted — other commands take literal args.
+        assert!(lint_command_run("git commit -m \"fix: stuff\"").is_ok());
+    }
+
+    #[test]
+    fn single_quoted_literal_dollar_rejected() {
+        // `'$X'` is a literal — word_has_expansion sees no expansion.
+        assert!(lint_command_run("echo 'price is $5'").is_err());
     }
 
     // --- Background ---
