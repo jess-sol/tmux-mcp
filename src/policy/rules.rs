@@ -314,22 +314,24 @@ fn eval_call(call: &cel::CallExpr, ctx: &HashMap<String, TriVal>) -> TriVal {
         "_+_" => eval_add(&call.args, ctx),
         "_?_:_" => eval_ternary(&call.args, ctx),
         "size" => {
-            // list.size() → Int(len) or Unknown for non-exhaustive lists
-            if let Some(target) = &call.target {
-                match eval_expr(&target.expr, ctx) {
-                    TriVal::List { elements, exhaustive } => {
-                        if exhaustive {
-                            TriVal::Int(elements.len() as i64)
-                        } else {
-                            TriVal::Unknown
-                        }
+            // size(x) or x.size() → Int(len) for exhaustive lists/strings, else Unknown.
+            // Resolve the operand from the receiver (method form) or the first
+            // positional arg (function form), mirroring glob/contains/startsWith.
+            let operand = call
+                .target
+                .as_ref()
+                .map(|t| &t.expr)
+                .or_else(|| call.args.first().map(|a| &a.expr));
+            match operand.map(|e| eval_expr(e, ctx)) {
+                Some(TriVal::List { elements, exhaustive }) => {
+                    if exhaustive {
+                        TriVal::Int(elements.len() as i64)
+                    } else {
+                        TriVal::Unknown
                     }
-                    TriVal::String(s) => TriVal::Int(s.len() as i64),
-                    TriVal::Unknown => TriVal::Unknown,
-                    _ => TriVal::Unknown,
                 }
-            } else {
-                TriVal::Unknown
+                Some(TriVal::String(s)) => TriVal::Int(s.len() as i64),
+                _ => TriVal::Unknown,
             }
         }
         _ => {
@@ -2206,6 +2208,22 @@ mod tests {
         )]);
         assert_eq!(evaluate(&cmd("echo"), &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Allow);
         assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn size_as_function_call() {
+        // size(x) global-call form must behave identically to x.size().
+        let rules = compile_rules(&[(
+            "two args",
+            r#"size(command.args) > 1"#,
+            "allow",
+        )]);
+        assert_eq!(evaluate(&cmd_with_args("k3d", &["cluster", "delete"]), &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd_with_args("k3d", &["cluster"]), &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        // String operand via function form.
+        let name_rules = compile_rules(&[("long name", r#"size(command.name) > 3"#, "allow")]);
+        assert_eq!(evaluate(&cmd("echo"), &local_pane(), &name_rules, &Effective::Unchanged, &[]).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &name_rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
     }
 
     #[test]
