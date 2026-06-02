@@ -40,6 +40,9 @@ pub fn lint_command_run(command: &str) -> Result<(), LintError> {
         if let Some(err) = lint_pipe_to(&program, command, "command_run", "tee") {
             return Err(err);
         }
+        if let Some(err) = lint_exit_status_echo(&program, command) {
+            return Err(err);
+        }
     }
 
     // Regex-based lints — simple patterns without quoting issues
@@ -219,6 +222,128 @@ fn lint_pipe_to(
             })
         }
         _ => None,
+    }
+}
+
+/// Lint: discourage reading back the exit code (`$?`) with `echo`/`printf`.
+///
+/// command_run captures each command's exit status out-of-band (via OSC 133
+/// markers) and reports it itself; command_history keeps it for past commands.
+/// So echoing `$?` is redundant. Two shapes get two nudges:
+///   - `cmd; echo "EXIT=$?"` — the echo is appended to a real command, whose
+///     status is already in this run's result; suggest dropping the echo.
+///   - `echo $?` on its own — the agent is re-running a command just to read a
+///     prior result; point at command_history, which has it authoritatively
+///     (a bare `echo $?` is also fragile, since the shell prompt runs between
+///     command_run calls and can reset `$?`).
+///
+/// To avoid blocking genuine `$?` uses, we fire only when the trailing command
+/// is a bare (non-piped) `echo`/`printf` referencing `$?`/`${?}` with no output
+/// redirect. So `RC=$?; ...`, `cmd; [ $? -eq 0 ] && ...`, and `echo $? > rc`
+/// (persisting the value) all pass untouched.
+fn lint_exit_status_echo(program: &ast::Program, command: &str) -> Option<LintError> {
+    let cc = program.complete_commands.last()?;
+    let item = cc.0.last()?;
+    let and_or = &item.0;
+
+    // The last pipeline executed in this list: the final `&&`/`||` segment if
+    // any, otherwise the first.
+    let pipeline = match and_or.additional.last() {
+        Some(ast::AndOr::And(p) | ast::AndOr::Or(p)) => p,
+        None => &and_or.first,
+    };
+    // Only a bare trailing command, not the receiving end of a pipe.
+    if pipeline.seq.len() != 1 {
+        return None;
+    }
+    let simple = match pipeline.seq.last()? {
+        ast::Command::Simple(s) => s,
+        _ => return None,
+    };
+    let name = simple.word_or_name.as_ref()?.value.as_str();
+    if name != "echo" && name != "printf" {
+        return None;
+    }
+
+    let suffix = simple.suffix.as_ref()?;
+    // A redirect means the value is being persisted somewhere — leave it alone.
+    let has_redirect = suffix
+        .0
+        .iter()
+        .any(|i| matches!(i, ast::CommandPrefixOrSuffixItem::IoRedirect(_)));
+    if has_redirect {
+        return None;
+    }
+    let refs_status = suffix.0.iter().any(|i| match i {
+        ast::CommandPrefixOrSuffixItem::Word(w) => {
+            w.value.contains("$?") || w.value.contains("${?}")
+        }
+        _ => false,
+    });
+    if !refs_status {
+        return None;
+    }
+
+    // Whether a command runs before this echo decides which nudge applies.
+    let has_preceding = program.complete_commands.len() > 1
+        || cc.0.len() > 1
+        || !and_or.additional.is_empty();
+
+    if has_preceding {
+        // An echo appended to a real command — the status is already in this
+        // run's result. Suggest the command without the trailing echo.
+        let base = render_without_trailing_command(program)?;
+        Some(LintError {
+            message: format!(
+                "Don't echo $? — command_run already reports each command's exit code.\n\
+                 \n\
+                 Instead of:  command_run(command=\"{command}\")\n\
+                 Try:         command_run(command=\"{base}\")\n\
+                 \n\
+                 The exit status of the last command is captured and shown automatically; \
+                 reading it back with echo just duplicates it. To branch on the status, \
+                 use it directly (e.g. `cmd && on_success || on_failure`)."
+            ),
+        })
+    } else {
+        // A standalone `echo $?` to inspect a previous run — command_history is
+        // the authoritative source.
+        Some(LintError {
+            message: format!(
+                "Don't re-run a command to read $? — use the command_history tool.\n\
+                 \n\
+                 Rejected:    command_run(command=\"{command}\")\n\
+                 \n\
+                 command_history lists recent commands with their exit codes, captured \
+                 directly when each command finished. A bare `echo $?` in a new command_run \
+                 is fragile: the shell prompt runs between runs and can reset $?."
+            ),
+        })
+    }
+}
+
+/// Re-render `program` with its final command removed, for use as a suggested
+/// replacement. Mirrors the navigation in [`lint_trailing_exit_echo`].
+fn render_without_trailing_command(program: &ast::Program) -> Option<String> {
+    let mut prog = program.clone();
+    let cc = prog.complete_commands.last_mut()?;
+    let item = cc.0.last_mut()?;
+    if item.0.additional.is_empty() {
+        // Trailing command was its own list item — drop the whole item.
+        cc.0.pop();
+        if cc.0.is_empty() {
+            prog.complete_commands.pop();
+        }
+    } else {
+        // Trailing command was the last `&&`/`||` segment — drop just that.
+        item.0.additional.pop();
+    }
+    let base = format!("{prog}");
+    let base = base.trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
     }
 }
 
@@ -428,6 +553,93 @@ mod tests {
     #[test]
     fn tee_mid_pipeline_allowed() {
         assert!(lint_command_run("make | tee build.log | wc -l").is_ok());
+    }
+
+    // --- Trailing echo $? ---
+
+    #[test]
+    fn trailing_echo_exit_code_rejected() {
+        let err = lint_command_run("helmfile -e localsync; echo \"HELMFILE_EXIT=$?\"").unwrap_err();
+        assert!(err.message.contains("command_run(command=\"helmfile -e localsync\")"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_echo_bare_status_rejected() {
+        let err = lint_command_run("make; echo $?").unwrap_err();
+        assert!(err.message.contains("command_run(command=\"make\")"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_echo_after_and_rejected() {
+        let err = lint_command_run("cargo test && echo \"rc=$?\"").unwrap_err();
+        assert!(err.message.contains("command_run(command=\"cargo test\")"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_echo_with_midcommand_stderr_redirect_rejected() {
+        // The 2>&1 is mid-string (not trailing) so the stderr lint misses it;
+        // this lint still catches the redundant exit-code echo.
+        let err = lint_command_run("helmfile -e localsync 2>&1; echo \"HELMFILE_EXIT=$?\"").unwrap_err();
+        assert!(err.message.contains("echo $?"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_printf_status_rejected() {
+        assert!(lint_command_run("make; printf 'exit %d\\n' $?").is_err());
+    }
+
+    #[test]
+    fn trailing_echo_braced_status_rejected() {
+        assert!(lint_command_run("make; echo \"${?}\"").is_err());
+    }
+
+    #[test]
+    fn bare_echo_status_nudges_command_history() {
+        // No preceding command — the agent is re-running just to read a prior
+        // result; point it at command_history instead.
+        let err = lint_command_run("echo $?").unwrap_err();
+        assert!(err.message.contains("command_history"), "{}", err);
+    }
+
+    #[test]
+    fn bare_printf_status_nudges_command_history() {
+        let err = lint_command_run("printf '%d\\n' $?").unwrap_err();
+        assert!(err.message.contains("command_history"), "{}", err);
+    }
+
+    #[test]
+    fn bare_echo_status_redirected_allowed() {
+        // Even standalone, persisting the code to a file is legitimate.
+        assert!(lint_command_run("echo $? > /tmp/rc").is_ok());
+    }
+
+    #[test]
+    fn echo_status_redirected_allowed() {
+        // Persisting the exit code to a file is a legitimate use.
+        assert!(lint_command_run("make; echo $? > /tmp/rc").is_ok());
+    }
+
+    #[test]
+    fn echo_without_status_allowed() {
+        assert!(lint_command_run("make; echo done").is_ok());
+    }
+
+    #[test]
+    fn mid_sequence_echo_status_allowed() {
+        // $? echoed mid-script, with real work after — not a trailing report.
+        assert!(lint_command_run("make; echo $?; deploy").is_ok());
+    }
+
+    #[test]
+    fn status_in_condition_allowed() {
+        // Branching on $? — trailing command is `echo ok`, which has no $?.
+        assert!(lint_command_run("make; [ $? -eq 0 ] && echo ok").is_ok());
+    }
+
+    #[test]
+    fn status_assignment_allowed() {
+        // Capturing into a variable for later use is fine.
+        assert!(lint_command_run("make; RC=$?; echo $RC").is_ok());
     }
 
     // --- Background ---
