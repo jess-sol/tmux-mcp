@@ -360,11 +360,18 @@ fn render_without_trailing_command(program: &ast::Program) -> Option<String> {
 /// delimiters), so those markers are pure noise; the real commands should be
 /// run as separate command_run calls.
 ///
-/// We flag an echo/printf only when it is the *first* pipeline of a top-level
-/// and-or list — i.e. it runs unconditionally as a leading or sequenced step.
-/// This deliberately leaves `cmd && echo ok` / `cmd || echo fail` (conditional
-/// status reporting in `&&`/`||` branches) alone. It also requires the command
-/// to be:
+/// We flag an echo/printf in two shapes:
+///   - the *first* pipeline of a top-level and-or list — i.e. it runs
+///     unconditionally as a leading or `;`-sequenced step (a bare progress
+///     marker), flagged wherever it sits; and
+///   - the trailing `&& echo …` of the run's final step — a success sentinel
+///     that runs exactly when the preceding command succeeds, so it only
+///     restates the exit code command_run already reports for that command.
+///
+/// `|| echo fail` is deliberately left alone: it *changes* the exit code (the
+/// echo's success masks the failure), so the result is no longer available as
+/// the exit status this lint would point back to. In both shapes the echo/printf
+/// must be:
 ///   - a single-segment pipeline (not piped into or out of anything),
 ///   - free of output redirects (`echo x > f` writes a file — a real use), and
 ///   - free of anything dynamic: no parameter/command/arithmetic expansion,
@@ -372,30 +379,69 @@ fn render_without_trailing_command(program: &ast::Program) -> Option<String> {
 ///     args). Quoting is honored, so `echo "*** ERROR ***"` is caught as a
 ///     constant while `echo *.log`, `echo "$VAR"`, and `echo $(date)` pass.
 fn lint_static_echo(program: &ast::Program, command: &str) -> Option<LintError> {
+    // Unconditional markers: a constant echo as the *first* pipeline of any
+    // top-level list item. Flagged wherever it sits — noise regardless of
+    // position.
     for cc in &program.complete_commands {
         for item in &cc.0 {
-            let Some(simple) = static_echo_pipeline(&item.0.first) else {
-                continue;
-            };
-            let offending = format!("{simple}");
-            return Some(LintError {
-                message: format!(
-                    "Don't run echo/printf with only constant text — its output is already known.\n\
-                     \n\
-                     Rejected:  command_run(command=\"{command}\")\n\
-                     Marker:    {offending}\n\
-                     \n\
-                     A top-level echo of a fixed string is almost always a leftover progress \
-                     marker (e.g. \"=== Building ===\"). command_run tracks each command \
-                     separately — output, exit code, and a command_history entry — so markers \
-                     between commands add nothing. Run the real commands as separate \
-                     command_run calls. To inspect a value, echo the variable itself \
-                     (e.g. echo \"$VAR\"), which this lint allows."
-                ),
-            });
+            if let Some(simple) = static_echo_pipeline(&item.0.first) {
+                return Some(static_marker_error(command, simple));
+            }
         }
     }
+
+    // Trailing success sentinel: `… && echo <constant>` as the run's final
+    // step. Only the last command's exit status is reported, and the echo runs
+    // exactly when the preceding command succeeds — so it just restates that
+    // exit code.
+    if trailing_success_echo(program).is_some() {
+        return Some(exit_code_marker_error(command, program));
+    }
     None
+}
+
+/// Message for an unconditional constant echo/printf (a leading or `;`-sequenced
+/// progress marker). See [`lint_static_echo`].
+fn static_marker_error(command: &str, simple: &ast::SimpleCommand) -> LintError {
+    let offending = format!("{simple}");
+    LintError {
+        message: format!(
+            "Don't run echo/printf with only constant text — its output is already known.\n\
+             \n\
+             Rejected:  command_run(command=\"{command}\")\n\
+             Marker:    {offending}\n\
+             \n\
+             A top-level echo of a fixed string is almost always a leftover progress \
+             marker (e.g. \"=== Building ===\"). command_run tracks each command \
+             separately — output, exit code, and a command_history entry — so markers \
+             between commands add nothing. Run the real commands as separate \
+             command_run calls. To inspect a value, echo the variable itself \
+             (e.g. echo \"$VAR\"), which this lint allows."
+        ),
+    }
+}
+
+/// Message for a trailing `&& echo <constant>` success sentinel, whose result
+/// is already available as command_run's reported exit code. See
+/// [`lint_static_echo`].
+fn exit_code_marker_error(command: &str, program: &ast::Program) -> LintError {
+    let suggestion = render_without_trailing_command(program)
+        .map(|base| format!("Try:       command_run(command=\"{base}\")"))
+        .unwrap_or_else(|| "Drop the trailing `&& echo …`.".to_string());
+    LintError {
+        message: format!(
+            "Don't echo a constant success marker — command_run reports the exit code.\n\
+             \n\
+             Rejected:  command_run(command=\"{command}\")\n\
+             {suggestion}\n\
+             \n\
+             A trailing `&& echo …` runs only when the preceding command succeeds, so it \
+             just restates the exit status that command_run already captures for the last \
+             command. Drop it — the reported exit code tells you whether the command \
+             succeeded. (`|| echo fail` isn't needed either; a non-zero exit code is \
+             shown automatically.)"
+        ),
+    }
 }
 
 /// Return the simple command if `pipeline` is a single, unredirected,
@@ -424,6 +470,20 @@ fn static_echo_pipeline(pipeline: &ast::Pipeline) -> Option<&ast::SimpleCommand>
         }
     }
     Some(simple)
+}
+
+/// The trailing `&& echo <constant>` of the run's final top-level list item, if
+/// present. Returns None when the last and-or segment is `||` (which masks the
+/// exit code rather than reflecting it) or isn't a bare constant echo/printf.
+/// See [`lint_static_echo`].
+fn trailing_success_echo(program: &ast::Program) -> Option<&ast::SimpleCommand> {
+    let cc = program.complete_commands.last()?;
+    let item = cc.0.last()?;
+    let pipeline = match item.0.additional.last()? {
+        ast::AndOr::And(p) => p,
+        ast::AndOr::Or(_) => return None,
+    };
+    static_echo_pipeline(pipeline)
 }
 
 /// True if `value` expands to a fixed string. Parses the word into pieces so
@@ -746,8 +806,9 @@ mod tests {
 
     #[test]
     fn status_in_condition_allowed() {
-        // Branching on $? — trailing command is `echo ok`, which has no $?.
-        assert!(lint_command_run("make; [ $? -eq 0 ] && echo ok").is_ok());
+        // Branching on $?, reporting via a variable — the trailing echo has no
+        // $? (exit-status lint quiet) and isn't a constant (static lint quiet).
+        assert!(lint_command_run("make; [ $? -eq 0 ] && echo \"$msg\"").is_ok());
     }
 
     #[test]
@@ -848,10 +909,41 @@ mod tests {
     }
 
     #[test]
-    fn conditional_success_marker_allowed() {
-        // `&&`/`||` branches carry status meaning — left alone by design.
-        assert!(lint_command_run("cargo build && echo ok").is_ok());
+    fn trailing_and_success_marker_rejected() {
+        // `&& echo <constant>` runs only on success, restating the exit code
+        // command_run already reports for the last command.
+        let err = lint_command_run("cargo build && echo ok").unwrap_err();
+        assert!(err.message.contains("exit code"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_and_marker_after_chain_rejected() {
+        // A `&&` success sentinel at the tail of a multi-step chain (the
+        // reported real-world case). A drop-the-marker suggestion is offered.
+        let cmd = "cargo update -p microlp && cargo build 2>/dev/null; cargo build --quiet && echo BUILD_OK";
+        let err = lint_command_run(cmd).unwrap_err();
+        assert!(err.message.contains("exit code"), "{}", err);
+        assert!(err.message.contains("Try:"), "{}", err);
+    }
+
+    #[test]
+    fn trailing_or_failure_marker_allowed() {
+        // `|| echo fail` masks the exit code (the echo succeeds), so the failure
+        // is no longer in the exit status — left alone.
         assert!(lint_command_run("cargo build || echo failed").is_ok());
+    }
+
+    #[test]
+    fn trailing_and_dynamic_echo_allowed() {
+        // A `&&` echo of a variable isn't a constant marker.
+        assert!(lint_command_run("cargo build && echo \"$RESULT\"").is_ok());
+    }
+
+    #[test]
+    fn trailing_and_marker_not_final_step_allowed() {
+        // The `&& echo ok` isn't the run's last command, so its success isn't
+        // the reported exit code — the trailing lint leaves it alone.
+        assert!(lint_command_run("make && echo ok; deploy").is_ok());
     }
 
     #[test]
