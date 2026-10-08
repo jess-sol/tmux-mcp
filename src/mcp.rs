@@ -109,79 +109,88 @@ pub struct PressKeyParams {
 
 // --- Response formatting ---
 
-/// Format list_panes result as clean JSON with relative coordinates and short keys.
+/// Format list_panes result as an aligned table in reading order, with the
+/// origin pane marked `*` and geometry (`WxH+X+Y`) relative to it.
 fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
-    use serde_json::{Map, Value};
+    use serde_json::Value;
 
-    let panes = match result["panes"].as_array() {
-        Some(arr) => arr,
-        None => return "(no panes)".to_string(),
+    let mut panes: Vec<&Value> = match result["panes"].as_array() {
+        Some(arr) if !arr.is_empty() => arr.iter().collect(),
+        _ => return "(no panes)".to_string(),
     };
 
-    // Origin pane position used as coordinate reference point.
+    let pos = |p: &Value| (p["x"].as_i64().unwrap_or(0), p["y"].as_i64().unwrap_or(0));
+    panes.sort_by_key(|p| {
+        let (x, y) = pos(p);
+        (y, x)
+    });
     let (ox, oy) = panes
         .iter()
         .find(|p| p["pane_id"].as_str() == Some(origin_pane))
-        .map(|p| (p["x"].as_i64().unwrap_or(0), p["y"].as_i64().unwrap_or(0)))
+        .map(|p| pos(p))
         .unwrap_or((0, 0));
 
-    let pane_values: Vec<Value> = panes
+    let header = ["ID", "Geometry", "State", "Integration", "Process", "Output", "Cwd"]
+        .map(String::from);
+    let rows: Vec<[String; 7]> = panes
         .iter()
         .map(|p| {
             let pane_id = p["pane_id"].as_str().unwrap_or("?");
-
-            // Merge cwd: prefer osc_cwd (works across SSH), fall back to process_cwd
-            let cwd = p["osc_cwd"]
-                .as_str()
-                .or_else(|| p["process_cwd"].as_str())
-                .map(|path| match (p["osc_user"].as_str(), p["osc_hostname"].as_str()) {
-                    (Some(user), Some(host)) => format!("{}@{}:{}", user, host, path),
-                    (None, Some(host)) => format!("{}:{}", host, path),
-                    _ => path.to_string(),
-                });
-
-            let mut obj = Map::new();
-            obj.insert("id".into(), json!(pane_id));
-            if pane_id == origin_pane {
-                obj.insert("origin".into(), json!(true));
-            }
-            obj.insert("x".into(), json!(p["x"].as_i64().unwrap_or(0) - ox));
-            obj.insert("y".into(), json!(p["y"].as_i64().unwrap_or(0) - oy));
-            obj.insert("w".into(), json!(p["width"].as_u64().unwrap_or(0)));
-            obj.insert("h".into(), json!(p["height"].as_u64().unwrap_or(0)));
-            if let Some(cwd) = cwd {
-                obj.insert("cwd".into(), json!(cwd));
-            }
-            if let Some(fg) = p["foreground"].as_str() {
-                obj.insert("fg".into(), json!(fg));
-            }
-            obj.insert(
-                "activity".into(),
-                json!(p["activity"].as_str().unwrap_or("Unknown")),
-            );
-            obj.insert(
-                "shell_integration".into(),
-                json!(p["osc133_status"].as_str().unwrap_or("unknown")),
-            );
-            if let Some(s) = p["osc133_last_marker_secs"].as_f64() {
-                obj.insert("marker_age".into(), json!((s * 10.0).round() / 10.0));
-            }
-            if let Some(s) = p["last_data_secs"].as_f64() {
-                obj.insert("data_age".into(), json!((s * 10.0).round() / 10.0));
-            }
-
-            Value::Object(obj)
+            let (x, y) = pos(p);
+            [
+                if pane_id == origin_pane {
+                    format!("{pane_id}*")
+                } else {
+                    pane_id.to_string()
+                },
+                format!(
+                    "{}x{}{:+}{:+}",
+                    p["width"].as_u64().unwrap_or(0),
+                    p["height"].as_u64().unwrap_or(0),
+                    x - ox,
+                    y - oy,
+                ),
+                p["activity"].as_str().unwrap_or("Unknown").to_lowercase(),
+                p["osc133_status"].as_str().unwrap_or("unknown").to_string(),
+                p["foreground"].as_str().unwrap_or("-").to_string(),
+                p["last_data_secs"].as_f64().map(format_age).unwrap_or("-".into()),
+                pane_cwd(p).unwrap_or("-".into()),
+            ]
         })
         .collect();
 
-    let mut top = Map::new();
-    if let Some(u) = result["daemon_uptime_secs"].as_f64() {
-        top.insert("uptime".into(), json!((u).round()));
+    let mut widths = [0; 7];
+    for row in std::iter::once(&header).chain(&rows) {
+        for (w, cell) in widths.iter_mut().zip(row) {
+            *w = (*w).max(cell.chars().count());
+        }
     }
-    top.insert("panes".into(), Value::Array(pane_values));
+    std::iter::once(&header)
+        .chain(&rows)
+        .map(|row| {
+            let cells: Vec<String> = row.iter().zip(widths).map(|(c, w)| format!("{c:w$}")).collect();
+            cells.join("  ").trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    serde_json::to_string_pretty(&Value::Object(top))
-        .unwrap_or_else(|_| "(error formatting panes)".into())
+/// Prefer osc_cwd (works across SSH), fall back to process_cwd.
+fn pane_cwd(p: &serde_json::Value) -> Option<String> {
+    let path = p["osc_cwd"].as_str().or_else(|| p["process_cwd"].as_str())?;
+    Some(match (p["osc_user"].as_str(), p["osc_hostname"].as_str()) {
+        (Some(user), Some(host)) => format!("{user}@{host}:{path}"),
+        (None, Some(host)) => format!("{host}:{path}"),
+        _ => path.to_string(),
+    })
+}
+
+fn format_age(secs: f64) -> String {
+    match secs {
+        s if s < 60.0 => format!("{s:.1}s"),
+        s if s < 3600.0 => format!("{}m", (s / 60.0) as u64),
+        s => format!("{}h", (s / 3600.0) as u64),
+    }
 }
 
 /// Format command_history result as a compact aligned table.
@@ -349,7 +358,10 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
 #[tool_router]
 impl TmuxMcp {
-    #[tool(description = "List tmux panes with status, working directory, and running process")]
+    #[tool(
+        description = "List tmux panes with status, working directory, and running process. \
+                       `*` marks the pane you run in; Geometry is WxH+X+Y relative to it."
+    )]
     async fn list_panes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut client = self.client.lock().await;
         let result = client
