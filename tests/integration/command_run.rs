@@ -6,7 +6,6 @@ use crate::harness::{Harness, Read};
 
 /// Every command's reply, exact: the command, its output, its exit code.
 #[tokio::test]
-#[ignore = "harness: red — a stray \\x02 leads every output; replies carry \\r from the terminal"]
 async fn finished_commands_reply_with_their_output_and_exit_code() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -14,8 +13,8 @@ async fn finished_commands_reply_with_their_output_and_exit_code() {
     let long = format!("$ seq 500\n{}\n\nExit code: 0", numbers.join("\n"));
     let corpus = [
         ("seq 5", "$ seq 5\n1\n2\n3\n4\n5\n\nExit code: 0"),
-        ("false", "$ false\n\n\nExit code: 1"),
-        ("true", "$ true\n\n\nExit code: 0"),
+        ("false", "$ false\n\nExit code: 1"),
+        ("true", "$ true\n\nExit code: 0"),
         ("seq 500", &long),
         (
             "(echo aaa; echo bbb; echo ccc)",
@@ -122,6 +121,26 @@ async fn head_with_search_returns_once_enough_matches_arrive() {
 }
 
 #[tokio::test]
+async fn a_search_window_waits_for_its_matchs_after_context() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    let window = || Read::default().head(1).search("HIT").after(1);
+
+    let finished =
+        h.run_with(&shell, "seq 1 | sed s/1/HIT/; sleep 1; seq 1 | sed s/1/ctx/", window()).await;
+    let started = Instant::now();
+    let command = "seq 1 | sed s/1/HIT/; sleep 2; seq 1 | sed s/1/ctx/; sleep 30";
+    let running = h.run_with(&shell, command, window()).await;
+
+    assert!(finished.contains("HIT\nctx\n") && finished.contains("Exit code: 0"), "{finished:?}");
+    assert!(started.elapsed() < Duration::from_secs(10), "returned after {:?}", started.elapsed());
+    assert!(
+        running.contains("HIT\nctx\n") && running.contains("Command still running"),
+        "{running:?}"
+    );
+}
+
+#[tokio::test]
 async fn next_returns_once_enough_lines_arrive() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -134,7 +153,6 @@ async fn next_returns_once_enough_lines_arrive() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — output chunks that split a UTF-8 character are dropped"]
 async fn multibyte_output_arrives_whole() {
     let h = Harness::new().await;
     let shell = h.shell().await;

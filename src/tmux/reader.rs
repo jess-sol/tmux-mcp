@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::tmux::notification::{CommandResponse, Notification, ReaderMessage, parse_line};
+use crate::tmux::notification::{CommandResponse, Notification, ReaderMessage, parse_line, parse_output};
 
 /// Handle to send commands to the reader for response routing.
 ///
@@ -70,6 +70,15 @@ async fn reader_loop(
                         break;
                     }
                     Ok(_) => {
+                        let raw = line_buf.strip_suffix(b"\n").unwrap_or(&line_buf);
+                        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+                        if let Some(notif) = parse_output(raw) {
+                            if notification_tx.try_send(notif).is_err() {
+                                tracing::warn!("Notification channel full, dropping");
+                            }
+                            line_buf.clear();
+                            continue;
+                        }
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\n').trim_end_matches('\r');
 

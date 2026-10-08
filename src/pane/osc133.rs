@@ -246,6 +246,8 @@ impl Osc133Parser {
     /// E (Explicit Command Text): authoritative command text from the shell.
     fn handle_e(&mut self, param: Option<&str>, state: &mut TerminalState) {
         let Some(text) = param else { return };
+        // The marker crossed the terminal, which turns each `\n` into `\r\n`.
+        let text = &text.replace("\r\n", "\n");
 
         match &mut self.phase {
             Osc133Phase::Executing { command } => {

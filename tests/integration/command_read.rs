@@ -70,7 +70,6 @@ async fn read_parameters_shape_a_finished_commands_output() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — a window on a finished command says it is still running"]
 async fn a_window_on_a_finished_command_reports_its_exit_code() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -136,7 +135,6 @@ async fn next_waits_for_lines_a_running_command_has_not_printed_yet() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — a timed-out command_run counts an unfinished line as read"]
 async fn a_line_still_being_written_is_read_once_it_ends() {
     let h = Harness::new().await;
     let shell = h.shell().await;

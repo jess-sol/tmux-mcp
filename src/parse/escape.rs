@@ -7,40 +7,40 @@
 ///   \015 → CR  (0x0d)
 ///   \012 → LF  (0x0a)
 ///
-/// Regular printable characters (including multibyte UTF-8) pass through unchanged.
-pub fn unescape_tmux_output(escaped: &str) -> Vec<u8> {
+/// Every other byte, a fragment of a multibyte character included, passes
+/// through unchanged.
+pub fn unescape_tmux_output(escaped: &[u8]) -> Vec<u8> {
+    let is_octal = |b: u8| (b'0'..=b'7').contains(&b);
     let mut result = Vec::with_capacity(escaped.len());
-    let mut chars = escaped.chars().peekable();
+    let mut bytes = escaped.iter().copied().peekable();
 
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.peek() {
-                Some(&d) if d.is_ascii_digit() && d < '8' => {
-                    // Octal escape: collect up to 3 octal digits
-                    let mut octal = String::with_capacity(3);
-                    for _ in 0..3 {
-                        if let Some(&c) = chars.peek() {
-                            if c.is_ascii_digit() && c < '8' {
-                                octal.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            result.push(b);
+            continue;
+        }
+        match bytes.peek() {
+            Some(&d) if is_octal(d) => {
+                // Octal escape: up to 3 octal digits
+                let mut value: u32 = 0;
+                for _ in 0..3 {
+                    match bytes.peek() {
+                        Some(&d) if is_octal(d) => {
+                            value = value * 8 + u32::from(d - b'0');
+                            bytes.next();
                         }
-                    }
-                    if let Ok(byte) = u8::from_str_radix(&octal, 8) {
-                        result.push(byte);
+                        _ => break,
                     }
                 }
-                Some(&'\\') => {
-                    chars.next();
-                    result.push(b'\\');
+                if let Ok(byte) = u8::try_from(value) {
+                    result.push(byte);
                 }
-                _ => result.push(b'\\'),
             }
-        } else {
-            let mut buf = [0u8; 4];
-            let bytes = c.encode_utf8(&mut buf);
-            result.extend_from_slice(bytes.as_bytes());
+            Some(&b'\\') => {
+                bytes.next();
+                result.push(b'\\');
+            }
+            _ => result.push(b'\\'),
         }
     }
     result
@@ -61,93 +61,93 @@ mod tests {
 
     #[test]
     fn unescape_plain_ascii() {
-        assert_eq!(unescape_tmux_output("hello world"), b"hello world");
+        assert_eq!(unescape_tmux_output(b"hello world"), b"hello world");
     }
 
     #[test]
     fn unescape_empty() {
-        assert_eq!(unescape_tmux_output(""), b"");
+        assert_eq!(unescape_tmux_output(b""), b"");
     }
 
     #[test]
     fn unescape_esc_033() {
-        let result = unescape_tmux_output("\\033[31m");
+        let result = unescape_tmux_output(b"\\033[31m");
         assert_eq!(result, b"\x1b[31m");
     }
 
     #[test]
     fn unescape_bel_007() {
-        let result = unescape_tmux_output("\\007");
+        let result = unescape_tmux_output(b"\\007");
         assert_eq!(result, b"\x07");
     }
 
     #[test]
     fn unescape_backslash_134() {
-        let result = unescape_tmux_output("\\134");
+        let result = unescape_tmux_output(b"\\134");
         assert_eq!(result, b"\\");
     }
 
     #[test]
     fn unescape_cr_015() {
-        let result = unescape_tmux_output("\\015");
+        let result = unescape_tmux_output(b"\\015");
         assert_eq!(result, b"\r");
     }
 
     #[test]
     fn unescape_lf_012() {
-        let result = unescape_tmux_output("\\012");
+        let result = unescape_tmux_output(b"\\012");
         assert_eq!(result, b"\n");
     }
 
     #[test]
     fn unescape_double_backslash() {
-        let result = unescape_tmux_output("a\\\\b");
+        let result = unescape_tmux_output(b"a\\\\b");
         assert_eq!(result, b"a\\b");
     }
 
     #[test]
     fn unescape_trailing_backslash() {
         // Backslash at end of input with nothing after it
-        let result = unescape_tmux_output("abc\\");
+        let result = unescape_tmux_output(b"abc\\");
         assert_eq!(result, b"abc\\");
     }
 
     #[test]
     fn unescape_osc133_marker() {
         // Full OSC 133;A marker as tmux would encode it
-        let result = unescape_tmux_output("\\033]133;A\\007");
+        let result = unescape_tmux_output(b"\\033]133;A\\007");
         assert_eq!(result, b"\x1b]133;A\x07");
     }
 
     #[test]
     fn unescape_osc133_with_st_terminator() {
         // OSC 133;D;0 with ST terminator (ESC \)
-        let result = unescape_tmux_output("\\033]133;D;0\\033\\134");
+        let result = unescape_tmux_output(b"\\033]133;D;0\\033\\134");
         assert_eq!(result, b"\x1b]133;D;0\x1b\\");
     }
 
     #[test]
     fn unescape_osc7() {
-        let result = unescape_tmux_output("\\033]7;file://myhost/home/user\\007");
+        let result = unescape_tmux_output(b"\\033]7;file://myhost/home/user\\007");
         assert_eq!(result, b"\x1b]7;file://myhost/home/user\x07");
     }
 
     #[test]
     fn unescape_mixed_text_and_escapes() {
-        let result = unescape_tmux_output("hello\\033[32m world\\033[0m");
+        let result = unescape_tmux_output(b"hello\\033[32m world\\033[0m");
         assert_eq!(result, b"hello\x1b[32m world\x1b[0m");
     }
 
     #[test]
     fn unescape_utf8_passthrough() {
         // UTF-8 characters should pass through unchanged
-        let result = unescape_tmux_output("héllo wörld 日本語");
+        let result = unescape_tmux_output("héllo wörld 日本語".as_bytes());
         assert_eq!(result, "héllo wörld 日本語".as_bytes());
     }
 
     #[test]
     fn unescape_utf8_mixed_with_escapes() {
-        let result = unescape_tmux_output("\\033[1m日本語\\033[0m");
+        let result = unescape_tmux_output("\\033[1m日本語\\033[0m".as_bytes());
         let mut expected = vec![0x1b, b'[', b'1', b'm'];
         expected.extend_from_slice("日本語".as_bytes());
         expected.extend_from_slice(&[0x1b, b'[', b'0', b'm']);
@@ -157,37 +157,37 @@ mod tests {
     #[test]
     fn unescape_all_octal_digits() {
         // Test boundary octal values
-        assert_eq!(unescape_tmux_output("\\000"), b"\x00"); // NUL
-        assert_eq!(unescape_tmux_output("\\001"), b"\x01"); // SOH
-        assert_eq!(unescape_tmux_output("\\177"), b"\x7f"); // DEL
-        assert_eq!(unescape_tmux_output("\\377"), b"\xff"); // 255
+        assert_eq!(unescape_tmux_output(b"\\000"), b"\x00"); // NUL
+        assert_eq!(unescape_tmux_output(b"\\001"), b"\x01"); // SOH
+        assert_eq!(unescape_tmux_output(b"\\177"), b"\x7f"); // DEL
+        assert_eq!(unescape_tmux_output(b"\\377"), b"\xff"); // 255
     }
 
     #[test]
     fn unescape_short_octal() {
         // 1-digit and 2-digit octals
-        assert_eq!(unescape_tmux_output("\\0"), b"\x00");
-        assert_eq!(unescape_tmux_output("\\7"), b"\x07");
-        assert_eq!(unescape_tmux_output("\\77"), b"\x3f"); // '?'
+        assert_eq!(unescape_tmux_output(b"\\0"), b"\x00");
+        assert_eq!(unescape_tmux_output(b"\\7"), b"\x07");
+        assert_eq!(unescape_tmux_output(b"\\77"), b"\x3f"); // '?'
     }
 
     #[test]
     fn unescape_octal_followed_by_digit() {
         // Octal escape followed by a non-octal digit (8 or 9)
-        let result = unescape_tmux_output("\\0339"); // \033 then '9'
+        let result = unescape_tmux_output(b"\\0339"); // \033 then '9'
         assert_eq!(result, b"\x1b9");
     }
 
     #[test]
     fn unescape_consecutive_escapes() {
-        let result = unescape_tmux_output("\\033\\033\\007\\007");
+        let result = unescape_tmux_output(b"\\033\\033\\007\\007");
         assert_eq!(result, b"\x1b\x1b\x07\x07");
     }
 
     #[test]
     fn unescape_backslash_before_non_octal() {
         // Backslash followed by non-octal, non-backslash
-        let result = unescape_tmux_output("\\n\\t");
+        let result = unescape_tmux_output(b"\\n\\t");
         assert_eq!(result, b"\\n\\t");
     }
 
@@ -195,7 +195,7 @@ mod tests {
     fn unescape_large_input() {
         // Ensure it handles large input without issues
         let large = "hello ".repeat(10_000);
-        let result = unescape_tmux_output(&large);
+        let result = unescape_tmux_output(large.as_bytes());
         assert_eq!(result.len(), 60_000);
     }
 
@@ -203,7 +203,7 @@ mod tests {
     fn unescape_realistic_output_line() {
         // Realistic %output content: prompt with OSC 133 markers + colors
         let input = "\\033]133;D;0\\033\\134\\033]133;A\\033\\134\\033]7;file://localhost/home/user\\033\\134\\033[01;32muser@host\\033[00m:\\033[01;34m~\\033[00m$ \\033]133;B\\033\\134";
-        let result = unescape_tmux_output(input);
+        let result = unescape_tmux_output(input.as_bytes());
         // Should start with ESC]133;D;0
         assert_eq!(result[0], 0x1b);
         assert_eq!(result[1], b']');

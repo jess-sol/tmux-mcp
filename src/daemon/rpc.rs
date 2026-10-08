@@ -156,6 +156,8 @@ struct ReadResult {
     total_lines: usize,
     skipped: usize,
     matched: Option<usize>,  // number of search matches (if search was used)
+    /// The last selected match's after-context runs past the whole lines so far.
+    context_pending: bool,
 }
 
 /// Expand match positions into merged (start, end) ranges with before/after context.
@@ -186,7 +188,7 @@ fn merge_context_ranges(
 }
 
 /// Collect lines from merged ranges, inserting "--" separators between groups.
-fn collect_context_lines(all_lines: &[&str], ranges: &[(usize, usize)]) -> Vec<String> {
+fn collect_context_lines(all_lines: &[String], ranges: &[(usize, usize)]) -> Vec<String> {
     let mut result = Vec::new();
     for (i, &(start, end)) in ranges.iter().enumerate() {
         if i > 0 {
@@ -205,27 +207,39 @@ fn collect_context_lines(all_lines: &[&str], ranges: &[(usize, usize)]) -> Vec<S
 /// When `search` is present, windowing (next/head/tail) limits the number
 /// of *matches*, not raw lines. `next+search` scans forward from cursor,
 /// consuming non-matching lines along the way.
+///
+/// A line without its newline shows in reads, but no read consumes it until
+/// `output_done`, so a later `next` still finds it once it ends.
 fn apply_read_params(
     output: &str,
+    output_done: bool,
     cursor: &mut usize,
     params: &ReadParams,
 ) -> ReadResult {
-    let all_lines: Vec<&str> = if output.is_empty() {
-        Vec::new()
-    } else {
-        output.lines().collect()
-    };
+    // The terminal adds `\r` to each `\n`, and shells injected with an older
+    // PS0 line send readline's `\x01`/`\x02` markers; neither is the command's.
+    let text = output.replace(['\x01', '\x02'], "");
+    let all_lines: Vec<String> =
+        text.split_terminator('\n').map(|line| line.trim_end_matches('\r').to_string()).collect();
     let total_lines = all_lines.len();
+    let consumable = if output_done || text.ends_with('\n') {
+        total_lines
+    } else {
+        total_lines.saturating_sub(1)
+    };
+    let context_pending = |selected: &[usize]| {
+        selected.last().is_some_and(|&m| params.after > 0 && m + params.after >= consumable)
+    };
 
     if let Some(re) = &params.search {
         let has_context = params.before > 0 || params.after > 0;
 
         if let Some(n) = params.next {
             // Scan from cursor, collect up to N matches, advance cursor past all scanned.
-            let start = (*cursor).min(total_lines);
+            let start = (*cursor).min(consumable);
             let mut match_indices = Vec::new();
             let mut scanned = 0;
-            for (i, line) in all_lines[start..].iter().enumerate() {
+            for (i, line) in all_lines[start..consumable].iter().enumerate() {
                 scanned = i + 1;
                 if re.is_match(line) {
                     match_indices.push(start + i);
@@ -239,14 +253,15 @@ fn apply_read_params(
             let lines = if has_context {
                 let ranges = merge_context_ranges(&match_indices, params.before, params.after, total_lines);
                 let display_end = ranges.last().map(|(_, e)| e + 1).unwrap_or(start + scanned);
-                *cursor = (start + scanned).max(display_end);
+                *cursor = (start + scanned).max(display_end).min(consumable);
                 collect_context_lines(&all_lines, &ranges)
             } else {
                 *cursor = start + scanned;
-                match_indices.iter().map(|&i| all_lines[i].to_string()).collect()
+                match_indices.iter().map(|&i| all_lines[i].clone()).collect()
             };
 
-            ReadResult { lines, total_lines, skipped: start, matched: Some(matched) }
+            let context_pending = context_pending(&match_indices);
+            ReadResult { lines, total_lines, skipped: start, matched: Some(matched), context_pending }
         } else {
             // head/tail/bare: collect all match indices, then window.
             let all_match_indices: Vec<usize> = all_lines.iter()
@@ -272,7 +287,7 @@ fn apply_read_params(
                 (&all_match_indices[final_start..], final_start)
             } else {
                 // bare + search: all matches, advance cursor
-                *cursor = total_lines;
+                *cursor = consumable;
                 (&all_match_indices[..], 0)
             };
 
@@ -280,17 +295,18 @@ fn apply_read_params(
                 let ranges = merge_context_ranges(selected_indices, params.before, params.after, total_lines);
                 collect_context_lines(&all_lines, &ranges)
             } else {
-                selected_indices.iter().map(|&i| all_lines[i].to_string()).collect()
+                selected_indices.iter().map(|&i| all_lines[i].clone()).collect()
             };
 
-            ReadResult { lines, total_lines, skipped, matched: Some(total_matches) }
+            let context_pending = context_pending(selected_indices);
+            ReadResult { lines, total_lines, skipped, matched: Some(total_matches), context_pending }
         }
     } else {
         // No search: window raw lines.
         let (selected, skipped) = if let Some(n) = params.next {
-            let start = *cursor;
-            let end = total_lines.min(start + n);
-            let lines = all_lines.get(start..end).unwrap_or(&[]).to_vec();
+            let start = (*cursor).min(consumable);
+            let end = consumable.min(start + n);
+            let lines = all_lines[start..end].to_vec();
             *cursor = end;
             (lines, start)
         } else if let Some(n) = params.head {
@@ -305,15 +321,10 @@ fn apply_read_params(
             (all_lines[start..].to_vec(), start)
         } else {
             // bare: all output, advance cursor
-            *cursor = total_lines;
+            *cursor = consumable;
             (all_lines, 0)
         };
-        ReadResult {
-            lines: selected.into_iter().map(|s| s.to_string()).collect(),
-            total_lines,
-            skipped,
-            matched: None,
-        }
+        ReadResult { lines: selected, total_lines, skipped, matched: None, context_pending: false }
     }
 }
 
@@ -333,9 +344,11 @@ enum BareReadPolicy {
 /// default. `command_run` passes the id of the record it pushed.
 ///
 /// Returns as soon as one of:
-///   * the command is completed (status: "completed"),
-///   * `next`/`head` is satisfied — N lines (or, with `search`, N matches) are
-///     available (status: "running"),
+///   * the command has finished — its D marker, or the B marker of the next
+///     prompt (status: "completed"),
+///   * `next`/`head` is satisfied — N lines (or, with `search`, N matches with
+///     their after-context) are available — and the command has not finished
+///     within `WINDOW_SETTLE` after that (status: "running"),
 ///   * a bare read (no next/head/tail/search) with `bare_policy = ReturnNow`
 ///     observes the new record (status: "running"),
 ///   * the deadline elapses (status: "running", with whatever output exists).
@@ -353,6 +366,9 @@ async fn wait_and_read(
     let required_lines = read_params.next.or(read_params.head);
     let is_tail = read_params.tail.is_some();
     let mut rx = pane_handle.subscribe_state();
+    // Set once a next/head window fills: a command that ends at once still
+    // reports its exit code rather than "running".
+    let mut settle_until: Option<tokio::time::Instant> = None;
 
     loop {
         {
@@ -365,9 +381,10 @@ async fn wait_and_read(
             };
 
             if let Some(cmd) = cmd {
-                // Completed commands: always return immediately
-                if cmd.completed {
-                    let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, read_params);
+                // D ends the output and carries the exit code; B follows only
+                // once the next prompt is drawn.
+                if cmd.completed || cmd.output_done {
+                    let result = apply_read_params(&cmd.output, true, &mut cmd.read_cursor, read_params);
                     return Ok(json!({
                         "command_id": cmd.id,
                         "command": cmd.command,
@@ -383,12 +400,12 @@ async fn wait_and_read(
 
                 // Running command: peek without mutating cursor
                 let mut peek_cursor = cmd.read_cursor;
-                let peeked = apply_read_params(&cmd.output, &mut peek_cursor, read_params);
+                let peeked = apply_read_params(&cmd.output, false, &mut peek_cursor, read_params);
 
                 let has_enough = if let Some(n) = required_lines {
                     // When search is active, count matches (not output lines
                     // which may be inflated by before/after context).
-                    peeked.matched.unwrap_or(peeked.lines.len()) >= n
+                    peeked.matched.unwrap_or(peeked.lines.len()) >= n && !peeked.context_pending
                 } else if is_tail || peeked.matched.is_some() {
                     false // tail / bare+search: wait for completion or timeout
                 } else {
@@ -396,7 +413,13 @@ async fn wait_and_read(
                     matches!(bare_policy, BareReadPolicy::ReturnNow)
                 };
 
-                if has_enough {
+                // A filled next/head window first waits out the settle; a bare
+                // read returns at once.
+                let now = tokio::time::Instant::now();
+                if has_enough
+                    && (required_lines.is_none()
+                        || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
+                {
                     // Commit cursor and return
                     cmd.read_cursor = peek_cursor;
                     return Ok(json!({
@@ -451,12 +474,11 @@ async fn wait_and_read(
                 pane_state.commands.front_mut()
             };
             if let Some(cmd) = cmd {
-                let result = apply_read_params(&cmd.output, &mut cmd.read_cursor, read_params);
+                let result = apply_read_params(&cmd.output, cmd.output_done, &mut cmd.read_cursor, read_params);
                 return Ok(json!({
                     "command_id": cmd.id,
                     "command": cmd.command,
                     "status": "running",
-                    "exit_code": cmd.exit_code,
                     "output": result.lines.join("\n"),
                     "total_lines": result.total_lines,
                     "lines_skipped": result.skipped,
@@ -467,12 +489,17 @@ async fn wait_and_read(
             return Err(RpcError::internal("No command found"));
         }
 
+        let wake = settle_until.map_or(deadline, |settle| settle.min(deadline));
         tokio::select! {
             _ = rx.changed() => {}
-            _ = tokio::time::sleep_until(deadline) => {}
+            _ = tokio::time::sleep_until(wake) => {}
         }
     }
 }
+
+/// How long a filled `next`/`head` window waits for the command's D marker, so a
+/// command that ends at once reports its exit code instead of "running".
+const WINDOW_SETTLE: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 
 /// Get the leaf PID for a pane: the foreground process PID, or the shell PID if idle.
 fn get_leaf_pid(shell_pid: u32) -> u32 {
@@ -971,7 +998,7 @@ async fn handle_capture_pane(
     let text = capture_screen(&tp, lines);
 
     // Include active command metadata so MCP layer can steer LLMs toward command_read
-    let active_cmd = tp.processor.state().active_command().map(|cmd| {
+    let active_cmd = tp.processor.state().running_command().map(|cmd| {
         json!({
             "command_id": cmd.id,
             "command": cmd.command,
@@ -989,7 +1016,7 @@ async fn handle_capture_pane(
 pub const OSC133_INJECT_LINES: &[&str] = &[
     " __osc133_exec_ready=true; __osc7_cwd() { printf '\\e]7;file://%s@%s%s\\e\\\\' \"$USER\" \"$(hostname)\" \"$PWD\"; }; __osc133_precmd() { local ret=$?; __osc133_exec_ready=true; printf '\\e]133;D;%d\\e\\\\\\e]133;A\\e\\\\' \"$ret\"; __osc7_cwd; return \"$ret\"; }; PROMPT_COMMAND=\"__osc133_precmd;${PROMPT_COMMAND:-}\"",
     " __osc133_debug() { if $__osc133_exec_ready; then __osc133_exec_ready=false; local cmd; cmd=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]* *//'); [[ -n \"$cmd\" ]] && printf '\\e]133;E;%s\\e\\\\' \"$cmd\"; fi; }; trap '__osc133_debug \"$_\"' DEBUG",
-    " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\[\\e]133;C\\e\\\\\\]'",
+    " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\e]133;C\\e\\\\'",
 ];
 
 async fn handle_inject_osc133(

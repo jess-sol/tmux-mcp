@@ -139,9 +139,16 @@ impl TerminalState {
         id
     }
 
-    /// Get the active (incomplete) command, if any.
+    /// The command whose prompt has not returned yet (no B marker), if any. A
+    /// pane takes the next command only once this is `None`.
     pub fn active_command(&self) -> Option<&CommandRecord> {
         self.commands.front().filter(|c| !c.completed)
+    }
+
+    /// The command still running, if any: it ends at its D marker, or at its B
+    /// marker when no D arrives.
+    pub fn running_command(&self) -> Option<&CommandRecord> {
+        self.commands.front().filter(|c| !c.completed && !c.output_done)
     }
 
     /// Get a mutable ref to the active command.

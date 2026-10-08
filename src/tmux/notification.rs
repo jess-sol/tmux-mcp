@@ -2,7 +2,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notification {
     /// %output %<pane_id> <escaped-data>
-    Output { pane_id: String, data: String },
+    Output { pane_id: String, data: Vec<u8> },
     /// %window-close @<window_id>
     WindowClose { window_id: String },
     /// %session-closed $<session_id>
@@ -97,13 +97,8 @@ fn is_notification_line(line: &str) -> bool {
 
 /// Parse a notification line into a typed Notification.
 pub fn parse_notification(line: &str) -> Notification {
-    // %output %<pane_id> <data>
-    if let Some(rest) = line.strip_prefix("%output ") {
-        if let Some(space_idx) = rest.find(' ') {
-            let pane_id = rest[..space_idx].to_string();
-            let data = rest[space_idx + 1..].to_string();
-            return Notification::Output { pane_id, data };
-        }
+    if let Some(output) = parse_output(line.as_bytes()) {
+        return output;
     }
 
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
@@ -129,6 +124,16 @@ pub fn parse_notification(line: &str) -> Notification {
     }
 }
 
+/// Parse `%output %<pane_id> <data>` from the raw line. The data stays bytes:
+/// tmux escapes only control bytes and `\`, so a multibyte character can span
+/// two `%output` lines and neither half is valid UTF-8 alone.
+pub(crate) fn parse_output(line: &[u8]) -> Option<Notification> {
+    let rest = line.strip_prefix(b"%output ")?;
+    let space = rest.iter().position(|&b| b == b' ')?;
+    let pane_id = String::from_utf8_lossy(&rest[..space]).into_owned();
+    Some(Notification::Output { pane_id, data: rest[space + 1..].to_vec() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,7 +147,7 @@ mod tests {
             n,
             Notification::Output {
                 pane_id: "%0".to_string(),
-                data: "\\033]133;A\\007hello".to_string(),
+                data: b"\\033]133;A\\007hello".to_vec(),
             }
         );
     }
@@ -154,7 +159,7 @@ mod tests {
             n,
             Notification::Output {
                 pane_id: "%42".to_string(),
-                data: "data here".to_string(),
+                data: b"data here".to_vec(),
             }
         );
     }
@@ -167,7 +172,7 @@ mod tests {
             n,
             Notification::Output {
                 pane_id: "%0".to_string(),
-                data: "".to_string(),
+                data: Vec::new(),
             }
         );
     }
@@ -270,7 +275,7 @@ mod tests {
         match msg {
             ReaderMessage::Notification(Notification::Output { pane_id, data }) => {
                 assert_eq!(pane_id, "%0");
-                assert_eq!(data, "hello");
+                assert_eq!(data, b"hello");
             }
             _ => panic!("expected Output notification"),
         }

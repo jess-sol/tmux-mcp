@@ -34,7 +34,10 @@ async fn debug_pane_shows_the_screen_of_an_idle_pane() {
 
     let screen = h.debug_pane(&shell).await;
 
-    assert!(screen.contains("\nmarker\n") && !screen.starts_with("[Command"), "{screen:?}");
+    assert!(
+        screen.lines().any(|row| row == "marker") && !screen.starts_with("[Command"),
+        "{screen:?}"
+    );
 }
 
 #[tokio::test]
