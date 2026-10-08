@@ -584,7 +584,7 @@ impl ServerHandler for TmuxMcp {
                  with command_read(command_id=N). \
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit). \
-                 If a pane is busy (RPC error), use command_read with timeout_secs \
+                 If command_run says a pane is busy, use command_read with timeout_secs \
                  to wait for output, or press_key C-c to cancel. \
                  Build separately from run — build output drowns run output.\n\n\
                  command_read: Stream output from running or completed commands. Use next \

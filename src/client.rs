@@ -138,7 +138,8 @@ pub struct JsonRpcError {
 
 impl std::fmt::Display for JsonRpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RPC error {}: {}", self.code, self.message)
+        // A model reads this text; the code is transport detail it cannot use.
+        f.write_str(&self.message)
     }
 }
 
