@@ -228,7 +228,7 @@ async fn test_command_run_simple() {
         let result = td
             .rpc(
                 "command_run",
-                json!({"pane_id": td.origin_pane.clone(), "command": "echo hello", "timeout_secs": 5}),
+                json!({"pane_id": td.origin_pane.clone(), "command": "echo hello${a:-}", "timeout_secs": 5}),
             )
             .await;
 
@@ -267,13 +267,13 @@ async fn test_command_history() {
         // Run two commands
         td.rpc(
             "command_run",
-            json!({"pane_id": td.origin_pane.clone(), "command": "echo first", "timeout_secs": 5}),
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo first${a:-}", "timeout_secs": 5}),
         )
         .await;
 
         td.rpc(
             "command_run",
-            json!({"pane_id": td.origin_pane.clone(), "command": "echo second", "timeout_secs": 5}),
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo second${a:-}", "timeout_secs": 5}),
         )
         .await;
 
@@ -301,7 +301,7 @@ async fn test_command_read() {
 
         td.rpc(
             "command_run",
-            json!({"pane_id": td.origin_pane.clone(), "command": "echo readtest", "timeout_secs": 5}),
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo readtest${a:-}", "timeout_secs": 5}),
         )
         .await;
 
@@ -483,7 +483,7 @@ async fn test_command_run_stderr_only() {
 async fn test_command_run_ansi_in_output() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
-        let (output, _) = td.run("printf '\\033[31mred\\033[0m\\n'").await;
+        let (output, _) = td.run("printf '\\033[31mred\\033[0m\\n'${a:-}").await;
         // Output contains the raw escape sequences (capture is raw terminal bytes)
         assert!(output.contains("red"), "missing 'red': {:?}", output);
         td.cleanup().await;
@@ -495,7 +495,7 @@ async fn test_command_run_ansi_in_output() {
 async fn test_command_run_special_chars_in_output() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
-        let (output, _) = td.run(r#"echo 'it'\''s "quoted"'"#).await;
+        let (output, _) = td.run(r#"echo 'it'\''s "quoted"'${a:-}"#).await;
         assert!(output.contains("it's"), "missing it's: {:?}", output);
         assert!(output.contains("\"quoted\""), "missing quoted: {:?}", output);
         td.cleanup().await;
@@ -524,11 +524,11 @@ async fn test_command_run_rapid_sequential() {
     with_timeout(async {
         let mut td = TestDaemon::start().await;
 
-        let (out1, _) = td.run("echo rapid1").await;
-        let (out2, _) = td.run("echo rapid2").await;
-        let (out3, _) = td.run("echo rapid3").await;
-        let (out4, _) = td.run("echo rapid4").await;
-        let (out5, _) = td.run("echo rapid5").await;
+        let (out1, _) = td.run("echo rapid1${a:-}").await;
+        let (out2, _) = td.run("echo rapid2${a:-}").await;
+        let (out3, _) = td.run("echo rapid3${a:-}").await;
+        let (out4, _) = td.run("echo rapid4${a:-}").await;
+        let (out5, _) = td.run("echo rapid5${a:-}").await;
 
         assert!(out1.contains("rapid1"), "missing rapid1: {:?}", out1);
         assert!(out2.contains("rapid2"), "missing rapid2: {:?}", out2);
@@ -719,7 +719,7 @@ async fn test_search_filters_matching_lines() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf '1 apple\\n2 banana\\n3 apple pie\\n4 cherry\\n'",
+                    "command": "printf '1 apple\\n2 banana\\n3 apple pie\\n4 cherry\\n'${a:-}",
                     "timeout_secs": 5,
                     "search": "apple"
                 }),
@@ -824,7 +824,7 @@ async fn test_debug_pane_no_redirect_when_idle() {
         let mut td = TestDaemon::start().await;
 
         // Run a command that completes
-        td.run("echo done").await;
+        td.run("echo done${a:-}").await;
 
         let cap = td
             .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone(), "lines": 50}))
@@ -844,7 +844,7 @@ async fn test_capture_pane() {
         let mut td = TestDaemon::start().await;
 
         // Run a command so there's something on screen
-        td.run("echo capture-test-marker").await;
+        td.run("echo capture-test-marker${a:-}").await;
 
         let result = td
             .rpc("capture_pane", json!({"pane_id": td.origin_pane.clone(), "lines": 50}))
@@ -929,7 +929,7 @@ async fn test_list_panes_osc133_status_confirmed() {
         let mut td = TestDaemon::start().await;
 
         // After warm-up + command_run, the shell PID should be confirmed
-        td.run("echo gating-test").await;
+        td.run("echo gating-test${a:-}").await;
 
         let result = td.rpc("list_panes", json!({})).await;
         let panes = result["panes"].as_array().expect("should be array");
@@ -955,7 +955,7 @@ async fn test_inject_skips_if_already_active() {
         let mut td = TestDaemon::start().await;
 
         // Warm-up confirms the shell. Now inject should detect already_active.
-        td.run("echo primed").await;
+        td.run("echo primed${a:-}").await;
 
         let result = td
             .rpc("inject_osc133", json!({"pane_id": td.origin_pane.clone()}))
@@ -1042,7 +1042,7 @@ async fn test_command_run_rejects_when_busy() {
         // Now try to run another command — should be rejected as busy
         let result = td.rpc_err(
             "command_run",
-            json!({"pane_id": td.origin_pane.clone(), "command": "echo should-fail", "timeout_secs": 5}),
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo should-fail${a:-}", "timeout_secs": 5}),
         ).await;
 
         assert!(result.is_err(), "should reject when busy, got: {:?}", result);
@@ -1071,7 +1071,7 @@ async fn test_command_run_rejects_when_typing() {
         // Try to run a command — should be rejected because user is typing
         let result = td.rpc_err(
             "command_run",
-            json!({"pane_id": td.origin_pane.clone(), "command": "echo should-fail", "timeout_secs": 5}),
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo should-fail${a:-}", "timeout_secs": 5}),
         ).await;
 
         assert!(result.is_err(), "should reject when user is typing, got: {:?}", result);
@@ -1103,7 +1103,7 @@ async fn test_command_run_succeeds_after_backspace_clears_input() {
         // Now command_run should succeed — no visible input
         let result = td.rpc_err(
             "command_run",
-            json!({"pane_id": td.origin_pane.clone(), "command": "echo cleared-ok", "timeout_secs": 5}),
+            json!({"pane_id": td.origin_pane.clone(), "command": "echo cleared-ok${a:-}", "timeout_secs": 5}),
         ).await;
 
         assert!(result.is_ok(), "should succeed after input cleared: {:?}", result);
@@ -1184,7 +1184,7 @@ async fn test_read_next_search_scans_forward() {
     // next=1 + search should scan past non-matching lines until a match is found.
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut td = TestDaemon::start().await;
-        let cmd_id = start_bg_command(&mut td, "echo noise; sleep 2; echo MARK_HIT").await;
+        let cmd_id = start_bg_command(&mut td, "echo noise${a:-}; sleep 2; echo MARK_HIT${a:-}").await;
 
         let before = tokio::time::Instant::now();
         let result = td
@@ -1225,7 +1225,7 @@ async fn test_read_head_search_waits() {
     // head=2 + search on a running command should wait until 2 matches accumulate.
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut td = TestDaemon::start().await;
-        let cmd_id = start_bg_command(&mut td, "echo miss; echo HIT_1; sleep 2; echo HIT_2").await;
+        let cmd_id = start_bg_command(&mut td, "echo miss${a:-}; echo HIT_1${a:-}; sleep 2; echo HIT_2${a:-}").await;
 
         let before = tokio::time::Instant::now();
         let result = td
@@ -1302,7 +1302,7 @@ async fn test_read_bare_returns_immediately() {
     // Bare read (no next/head/tail) on a running command returns immediately.
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut td = TestDaemon::start().await;
-        let cmd_id = start_bg_command(&mut td, "echo line1; sleep 10").await;
+        let cmd_id = start_bg_command(&mut td, "echo line1${a:-}; sleep 10").await;
 
         let before = tokio::time::Instant::now();
         let result = td
@@ -1342,7 +1342,7 @@ async fn test_run_next_search_returns_early() {
     // the command should keep running afterwards.
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut td = TestDaemon::start().await;
-        let command = "echo noise; sleep 2; echo MARK_HIT; sleep 30";
+        let command = "echo noise${a:-}; sleep 2; echo MARK_HIT${a:-}; sleep 30";
         let _ = td
             .rpc(
                 "request_approval",
@@ -1430,7 +1430,7 @@ async fn test_run_head_search_returns_early() {
     // accumulate, leaving the command running through the trailing sleep.
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut td = TestDaemon::start().await;
-        let command = "echo miss; echo HIT_1; sleep 2; echo HIT_2; sleep 30";
+        let command = "echo miss${a:-}; echo HIT_1${a:-}; sleep 2; echo HIT_2${a:-}; sleep 30";
         let _ = td
             .rpc(
                 "request_approval",
@@ -1547,7 +1547,7 @@ async fn test_run_no_read_params_waits_for_completion() {
     // return immediately" rule must NOT leak into command_run.
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut td = TestDaemon::start().await;
-        let command = "sleep 2; echo done";
+        let command = "sleep 2; echo done${a:-}";
         let _ = td
             .rpc(
                 "request_approval",
@@ -1600,7 +1600,7 @@ async fn test_search_before_context() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf 'aaa\\nbbb\\nccc\\nMATCH\\nddd\\neee\\n'",
+                    "command": "printf 'aaa\\nbbb\\nccc\\nMATCH\\nddd\\neee\\n'${a:-}",
                     "timeout_secs": 5,
                     "search": "MATCH",
                     "before": 2
@@ -1628,7 +1628,7 @@ async fn test_search_after_context() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf 'aaa\\nbbb\\nMATCH\\nccc\\nddd\\neee\\n'",
+                    "command": "printf 'aaa\\nbbb\\nMATCH\\nccc\\nddd\\neee\\n'${a:-}",
                     "timeout_secs": 5,
                     "search": "MATCH",
                     "after": 2
@@ -1657,7 +1657,7 @@ async fn test_search_context_separator() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf 'HIT1\\naaa\\nbbb\\nccc\\nddd\\nHIT2\\n'",
+                    "command": "printf 'HIT1\\naaa\\nbbb\\nccc\\nddd\\nHIT2\\n'${a:-}",
                     "timeout_secs": 5,
                     "search": "HIT",
                     "after": 1
@@ -1686,7 +1686,7 @@ async fn test_search_context_merged() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf 'HIT1\\naaa\\nHIT2\\nbbb\\n'",
+                    "command": "printf 'HIT1\\naaa\\nHIT2\\nbbb\\n'${a:-}",
                     "timeout_secs": 5,
                     "search": "HIT",
                     "after": 1
@@ -1715,7 +1715,7 @@ async fn test_search_context_with_head() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf 'aaa\\nHIT1\\nbbb\\nccc\\nHIT2\\nddd\\n'",
+                    "command": "printf 'aaa\\nHIT1\\nbbb\\nccc\\nHIT2\\nddd\\n'${a:-}",
                     "timeout_secs": 5,
                     "search": "HIT",
                     "head": 1,
@@ -1745,7 +1745,7 @@ async fn test_search_context_next_cursor_advancement() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "printf 'HIT1\\nctx\\nfiller\\nHIT2\\nend\\n'",
+                    "command": "printf 'HIT1\\nctx\\nfiller\\nHIT2\\nend\\n'${a:-}",
                     "timeout_secs": 5,
                     "next": 1,
                     "search": "HIT",
@@ -1789,7 +1789,7 @@ async fn test_before_after_without_search_errors() {
                 "command_run",
                 json!({
                     "pane_id": td.origin_pane.clone(),
-                    "command": "echo hello",
+                    "command": "echo hello${a:-}",
                     "timeout_secs": 5,
                     "before": 2
                 }),
