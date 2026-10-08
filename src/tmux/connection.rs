@@ -10,6 +10,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::client::TmuxSession;
 use crate::tmux::notification::Notification;
 use crate::tmux::reader;
 
@@ -55,17 +56,12 @@ pub struct TmuxNotifications {
 /// Returns split halves: `TmuxCommands` for sending commands (goes behind mutex)
 /// and `TmuxNotifications` for receiving events (used directly by event loop).
 /// This split makes deadlock structurally impossible.
-pub async fn connect(
-    session: &str,
-    server: Option<&str>,
-) -> Result<(TmuxCommands, TmuxNotifications)> {
+pub async fn connect(session: &TmuxSession) -> Result<(TmuxCommands, TmuxNotifications)> {
     tracing::info!("Connecting to tmux session {}", session);
 
     let mut cmd = Command::new("tmux");
-    if let Some(srv) = server {
-        cmd.args(["-L", srv]);
-    }
-    cmd.args(["-C", "attach-session", "-t", session]);
+    cmd.arg("-S").arg(session.server());
+    cmd.args(["-C", "attach-session", "-t", &session.target()]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
@@ -86,7 +82,7 @@ pub async fn connect(
         cmd_tx,
         _child: child,
         _reader_handle: reader_handle,
-        session: session.to_string(),
+        session: session.target(),
     };
 
     let notifications = TmuxNotifications {

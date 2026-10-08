@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+use crate::client::TmuxSession;
 use crate::pane::registry::{PaneRegistry, SyncAction};
 use crate::parse::escape::unescape_tmux_output;
 use crate::parse::layout::parse_layout;
@@ -23,8 +24,8 @@ use rpc::DaemonState;
 /// Connect to a tmux session, bootstrap pane state, start the socket server,
 /// and run the event loop. Returns when the session closes or the daemon is
 /// cancelled (idle timeout).
-pub async fn run(session: &str, server: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (mut commands, notifications) = connection::connect(session, server).await?;
+pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (mut commands, notifications) = connection::connect(session).await?;
     let mut registry = PaneRegistry::new();
 
     // Bootstrap: discover all existing panes in one query
@@ -73,7 +74,7 @@ pub async fn run(session: &str, server: Option<&str>) -> Result<(), Box<dyn std:
     // Spawn socket server
     let server_state = state.clone();
     let server_cancel = cancel.clone();
-    let session_owned = session.to_string();
+    let session_owned = session.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::serve(&session_owned, server_state, server_cancel).await {
             tracing::error!("Server error: {}", e);

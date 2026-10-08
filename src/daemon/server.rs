@@ -8,19 +8,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::client;
+use crate::client::TmuxSession;
 use crate::daemon::rpc::{self, DaemonState};
 
 /// Run the Unix socket server. Blocks until cancelled.
 pub async fn serve(
-    session: &str,
+    session: &TmuxSession,
     state: Arc<DaemonState>,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sock_path = client::socket_path(session);
+    session.create_dir()?;
+    let sock_path = session.socket();
 
     // Acquire lock file to prevent duplicate daemons
-    let lock_path = client::lock_path(session);
+    let lock_path = session.lock();
     let lock_file = std::fs::File::create(&lock_path)?;
     use fs2::FileExt;
     lock_file.try_lock_exclusive().map_err(|_| {

@@ -1,43 +1,113 @@
 /// Daemon client: connects to a running daemon over a Unix socket,
 /// or spawns one if needed. Uses newline-delimited JSON-RPC.
 
-use std::path::PathBuf;
+use std::fmt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use snafu::Snafu;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-// --- Socket paths ---
+// --- Tmux session ---
 
-pub fn socket_path(session: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/tmux-mcp-{}.sock", sanitize(session)))
+/// One tmux session on one tmux server: what one daemon serves. A session id
+/// alone names nothing, since every server numbers its sessions from `$0`;
+/// the server's pid tells live servers apart.
+#[derive(Clone)]
+pub struct TmuxSession {
+    server: PathBuf,
+    pid: u32,
+    id: u32,
 }
 
-pub fn lock_path(session: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/tmux-mcp-{}.lock", sanitize(session)))
+#[derive(Debug, Snafu)]
+pub enum TmuxSessionError {
+    #[snafu(display("TMUX is not set — tmux-mcp runs inside a tmux pane"))]
+    NotInTmux,
+    #[snafu(display("TMUX={value:?} names no tmux session"))]
+    Malformed { value: String },
 }
 
-/// Sanitize session name for use in file paths.
-fn sanitize(s: &str) -> String {
-    s.replace(['/', '\\', '\0', ' ', '$'], "")
-}
-
-/// Discover the tmux session from the TMUX environment variable.
-/// Returns the session ID (e.g., "$0") or the session name.
-pub fn discover_session() -> Result<String, String> {
-    let tmux_env = std::env::var("TMUX")
-        .map_err(|_| "TMUX environment variable not set — are you inside a tmux session?")?;
-
-    // TMUX format: /path/to/socket,pid,session_number
-    if let Some(session_num) = tmux_env.rsplit(',').next() {
-        if !session_num.is_empty() {
-            return Ok(format!("${}", session_num));
-        }
+impl TmuxSession {
+    pub fn new(server: PathBuf, pid: u32, id: u32) -> TmuxSession {
+        TmuxSession { server, pid, id }
     }
 
-    Err(format!("Could not parse session from TMUX={}", tmux_env))
+    /// The `TmuxSession` named by `$TMUX`: the one the shipped binary serves.
+    pub fn from_env() -> Result<TmuxSession, TmuxSessionError> {
+        std::env::var("TMUX").map_err(|_| TmuxSessionError::NotInTmux)?.parse()
+    }
+
+    /// Where the daemon of this `TmuxSession` listens.
+    pub fn socket(&self) -> PathBuf {
+        self.file("sock")
+    }
+
+    pub(crate) fn lock(&self) -> PathBuf {
+        self.file("lock")
+    }
+
+    pub(crate) fn log(&self) -> PathBuf {
+        self.file("log")
+    }
+
+    /// Creates the tmux-mcp directory, private to this user.
+    pub(crate) fn create_dir(&self) -> std::io::Result<()> {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir())
+    }
+
+    pub(crate) fn server(&self) -> &Path {
+        &self.server
+    }
+
+    /// The tmux target naming this session on its server.
+    pub(crate) fn target(&self) -> String {
+        format!("${}", self.id)
+    }
+
+    /// `<server socket name>-<server pid>-<session id>.<extension>`; the
+    /// socket name only labels the server for a reader.
+    fn file(&self, extension: &str) -> PathBuf {
+        let name = self.server.file_name().unwrap_or_default().to_string_lossy();
+        dir().join(format!("{name}-{}-{}.{extension}", self.pid, self.id))
+    }
+}
+
+impl FromStr for TmuxSession {
+    type Err = TmuxSessionError;
+
+    /// Parses a `$TMUX` value, `<server socket>,<server pid>,<session id>`.
+    /// The socket path may itself hold commas, so fields come off the right.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let malformed = || TmuxSessionError::Malformed { value: value.to_string() };
+        let mut fields = value.rsplitn(3, ',');
+        let id = fields.next().and_then(|id| id.parse().ok()).ok_or_else(malformed)?;
+        let pid = fields.next().and_then(|pid| pid.parse().ok()).ok_or_else(malformed)?;
+        let server = fields.next().filter(|s| !s.is_empty()).ok_or_else(malformed)?;
+        Ok(TmuxSession::new(PathBuf::from(server), pid, id))
+    }
+}
+
+impl fmt::Display for TmuxSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} on {}", self.target(), self.server.display())
+    }
+}
+
+/// `$XDG_RUNTIME_DIR/tmux-mcp`, or `/tmp/tmux-mcp-<uid>` without one.
+fn dir() -> PathBuf {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(runtime) => PathBuf::from(runtime).join("tmux-mcp"),
+        None => {
+            let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
+            std::env::temp_dir().join(format!("tmux-mcp-{uid}"))
+        }
+    }
 }
 
 // --- JSON-RPC types ---
@@ -84,8 +154,8 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     /// Connect to an existing daemon, or spawn one and connect.
-    pub async fn connect(session: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let sock = socket_path(session);
+    pub async fn connect(session: &TmuxSession) -> Result<Self, Box<dyn std::error::Error>> {
+        let sock = session.socket();
 
         // Try connecting to existing daemon
         match UnixStream::connect(&sock).await {
@@ -102,14 +172,15 @@ impl DaemonClient {
         // If two clients race here, both spawn daemons — the second daemon
         // will fail to acquire the lock file and exit. Both clients poll
         // for the socket and connect to whichever daemon wins.
+        // The daemon reads the same `$TMUX` this process inherited.
+        session.create_dir()?;
         let exe = std::env::current_exe()?;
         let mut child = tokio::process::Command::new(&exe)
-            .args(["daemon", session])
+            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr({
-                let log_path = format!("/tmp/tmux-mcp-{}.log", sanitize(session));
-                match std::fs::File::create(&log_path) {
+                match std::fs::File::create(session.log()) {
                     Ok(f) => Stdio::from(f),
                     Err(_) => Stdio::null(),
                 }
@@ -191,5 +262,38 @@ impl DaemonClient {
         }
 
         Ok(resp.result.unwrap_or(Value::Null))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Tmux session ---
+
+    #[test]
+    fn a_tmux_value_names_its_server_and_session() {
+        let cases = [
+            ("/run/user/1000/tmux-1000/default,563061,0", Some("$0 on /run/user/1000/tmux-1000/default")),
+            ("/tmp/odd,name,42,7", Some("$7 on /tmp/odd,name")),
+            ("", None),
+            ("/tmp/tmux-1000/default", None),
+            ("/tmp/tmux-1000/default,42,x", None),
+            ("/tmp/tmux-1000/default,x,0", None),
+            (",42,0", None),
+        ];
+        for (value, want) in cases {
+            let got = value.parse::<TmuxSession>().ok().map(|s| s.to_string());
+            assert_eq!(got.as_deref(), want, "TMUX={value:?}");
+        }
+    }
+
+    #[test]
+    fn each_tmux_server_gets_its_own_daemon_socket() {
+        let a: TmuxSession = "/run/user/1000/tmux-1000/default,4242,0".parse().unwrap();
+        let b: TmuxSession = "/tmp/elsewhere/default,4343,0".parse().unwrap();
+
+        assert_eq!(a.socket().file_name(), Some(std::ffi::OsStr::new("default-4242-0.sock")));
+        assert_ne!(a.socket(), b.socket());
     }
 }

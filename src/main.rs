@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use tmux_mcp::client::TmuxSession;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -11,11 +12,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run as background daemon for a tmux session (internal, spawned automatically)
-    Daemon {
-        /// Session target (name or ID, e.g. "main" or "$0")
-        session: String,
-    },
+    /// Run as background daemon for the tmux session in $TMUX (internal, spawned automatically)
+    Daemon,
     /// Policy hook for Claude Code (PreToolUse hook for command_run)
     PolicyCheck,
 }
@@ -31,7 +29,7 @@ async fn main() {
                 std::process::exit(2);
             }
         }
-        Some(Commands::Daemon { session }) => {
+        Some(Commands::Daemon) => {
             // Daemon mode: logs to stderr
             tracing_subscriber::registry()
                 .with(
@@ -41,7 +39,7 @@ async fn main() {
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                 .init();
 
-            if let Err(e) = tmux_mcp::daemon::run(&session, None).await {
+            if let Err(e) = run_daemon().await {
                 tracing::error!("Daemon error: {}", e);
                 std::process::exit(1);
             }
@@ -76,7 +74,7 @@ async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let session = tmux_mcp::client::discover_session()?;
+    let session = TmuxSession::from_env()?;
     let origin_pane = std::env::var("TMUX_PANE").unwrap_or_default();
     let mut client = tmux_mcp::client::DaemonClient::connect(&session).await?;
 
@@ -136,12 +134,16 @@ fn print_hook_response(decision: &str, reason: Option<&str>) {
     println!("{}", serde_json::json!({"hookSpecificOutput": hook}));
 }
 
+async fn run_daemon() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let session = TmuxSession::from_env()?;
+    tmux_mcp::daemon::run(&session).await
+}
+
 async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
     use rmcp::ServiceExt;
     use rmcp::transport::stdio;
 
-    let session = tmux_mcp::client::discover_session()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let session = TmuxSession::from_env()?;
 
     let origin_pane = std::env::var("TMUX_PANE")
         .map_err(|_| -> Box<dyn std::error::Error> {

@@ -24,3 +24,6 @@ toml = "0.8"
 globset = "0.4"
 notify = "7"
 cel-parser = "0.10"
+
+[dev-dependencies]
+tempfile = "3.27.0"

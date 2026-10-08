@@ -1,18 +1,17 @@
 //! Integration tests: exercise the real daemon against an isolated tmux server.
 //!
-//! Each test gets its own tmux server (via `-L`), session, and daemon.
+//! Each test gets its own tmux server (via `-S` in a temp dir), session, and daemon.
 //! Run with: cargo test --test integration -- --test-threads=1
 
+use std::path::PathBuf;
 use std::process::Command as StdCommand;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
-use tmux_mcp::client::{self, DaemonClient};
+use tmux_mcp::client::{DaemonClient, TmuxSession};
 
-static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 static TRACING_INIT: std::sync::Once = std::sync::Once::new();
 
 fn init_tracing() {
@@ -30,7 +29,11 @@ fn init_tracing() {
 // --- Test harness ---
 
 struct TestDaemon {
-    name: String,
+    /// Held for its `Drop`: the tmux socket lives in it.
+    _dir: tempfile::TempDir,
+    tmux_socket: PathBuf,
+    /// The aborted daemon never removes its files, so the test does.
+    daemon_socket: PathBuf,
     client: Option<DaemonClient>,
     daemon_handle: Option<JoinHandle<()>>,
     origin_pane: String,
@@ -40,34 +43,48 @@ impl TestDaemon {
     /// Start an isolated tmux server, session, and daemon.
     async fn start() -> Self {
         init_tracing();
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tmux-mcp-test-{}-{}", std::process::id(), id);
+        // Under /tmp, so the sockets stay inside the 108-byte `sun_path` limit.
+        let dir = tempfile::Builder::new()
+            .prefix("tmux-mcp-test-")
+            .tempdir_in("/tmp")
+            .expect("failed to create temp dir");
+        let tmux_socket = dir.path().join("tmux");
 
         // Create isolated tmux server + session
         let status = StdCommand::new("tmux")
-            .args(["-L", &name, "new-session", "-d", "-s", &name, "-x", "80", "-y", "24"])
+            .arg("-S")
+            .arg(&tmux_socket)
+            .args(["new-session", "-d", "-x", "80", "-y", "24"])
             .status()
             .expect("failed to start tmux");
         assert!(status.success(), "tmux new-session failed: {}", status);
 
-        // Get the pane ID
+        // Get the server pid, session and pane IDs
         let output = StdCommand::new("tmux")
-            .args(["-L", &name, "display-message", "-t", &name, "-p", "#{pane_id}"])
+            .arg("-S")
+            .arg(&tmux_socket)
+            .args(["display-message", "-p", "#{pid} #{session_id} #{pane_id}"])
             .output()
-            .expect("failed to query pane_id");
-        let origin_pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            .expect("failed to query pid, session_id and pane_id");
+        let ids = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let ids: Vec<&str> = ids.split(' ').collect();
+        let [pid, session_id, origin_pane] = ids[..] else { panic!("unexpected ids: {ids:?}") };
+        let pid: u32 = pid.parse().expect("numeric server pid");
+        let session_id: u32 = session_id.trim_start_matches('$').parse().expect("numeric session id");
+        let origin_pane = origin_pane.to_string();
         assert!(origin_pane.starts_with('%'), "unexpected pane_id: {}", origin_pane);
 
         // Spawn daemon in-process
-        let daemon_name = name.clone();
+        let session = TmuxSession::new(tmux_socket.clone(), pid, session_id);
+        let daemon_socket = session.socket();
+        let sock = daemon_socket.clone();
         let daemon_handle = tokio::spawn(async move {
-            if let Err(e) = tmux_mcp::daemon::run(&daemon_name, Some(&daemon_name)).await {
+            if let Err(e) = tmux_mcp::daemon::run(&session).await {
                 eprintln!("Daemon error: {}", e);
             }
         });
 
         // Poll-connect to daemon socket
-        let sock = client::socket_path(&name);
         let mut client = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(c) = DaemonClient::connect_to_socket(&sock).await {
@@ -93,7 +110,9 @@ impl TestDaemon {
         }
 
         TestDaemon {
-            name,
+            _dir: dir,
+            tmux_socket,
+            daemon_socket,
             client: Some(client),
             daemon_handle: Some(daemon_handle),
             origin_pane,
@@ -149,7 +168,9 @@ impl TestDaemon {
     /// Type literal text into the pane (via tmux send-keys -l).
     fn type_text(&self, text: &str) {
         let status = StdCommand::new("tmux")
-            .args(["-L", &self.name, "send-keys", "-l", "-t", &self.origin_pane, text])
+            .arg("-S")
+            .arg(&self.tmux_socket)
+            .args(["send-keys", "-l", "-t", &self.origin_pane, text])
             .status()
             .expect("failed to send literal keys");
         assert!(status.success(), "tmux send-keys -l failed");
@@ -167,10 +188,12 @@ impl TestDaemon {
 
     fn kill_tmux_server(&self) {
         let _ = StdCommand::new("tmux")
-            .args(["-L", &self.name, "kill-server"])
+            .arg("-S")
+            .arg(&self.tmux_socket)
+            .arg("kill-server")
             .status();
-        let _ = std::fs::remove_file(client::socket_path(&self.name));
-        let _ = std::fs::remove_file(client::lock_path(&self.name));
+        let _ = std::fs::remove_file(&self.daemon_socket);
+        let _ = std::fs::remove_file(self.daemon_socket.with_extension("lock"));
     }
 }
 
