@@ -59,7 +59,7 @@ Command output is captured as a structured log, not a terminal dump. Reading sup
 | `head` | First N lines |
 | `tail` | Last N lines |
 | `next` | Stream N lines from cursor (stateful pagination) |
-| `search` | Regex filter, combinable with any of the above |
+| `search` | Regex filter, applied first: `head`, `tail` and `next` then count matching lines |
 
 For active commands, `next` blocks up to a timeout waiting for new output — no polling. This keeps token usage minimal even for commands with massive output.
 

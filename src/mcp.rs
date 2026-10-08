@@ -45,7 +45,7 @@ pub struct CommandRunParams {
     pub head: Option<i64>,
     #[schemars(description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head.")]
     pub tail: Option<i64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
+    #[schemars(description = "Filter output to lines matching this regex pattern. Applied before next/head/tail, which then count matching lines: search=\"a\" with next=3 shows the next three matches, not the matches within the next three lines. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
     pub search: Option<String>,
     #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
     pub before: Option<i64>,
@@ -67,7 +67,7 @@ pub struct CommandReadParams {
     pub head: Option<i64>,
     #[schemars(description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head.")]
     pub tail: Option<i64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern. Applied after next/head/tail windowing. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
+    #[schemars(description = "Filter output to lines matching this regex pattern. Applied before next/head/tail, which then count matching lines: search=\"a\" with next=3 shows the next three matches, not the matches within the next three lines. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
     pub search: Option<String>,
     #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
     pub before: Option<i64>,
