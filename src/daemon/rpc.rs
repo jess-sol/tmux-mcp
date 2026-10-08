@@ -1073,7 +1073,10 @@ async fn handle_send_keys(
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    // Send keys
+    // Subscribed before the snapshot, so no change between them goes unseen.
+    let mut rx = pane_handle.subscribe_state();
+    let before = pane_view(&*pane_handle.lock().await);
+
     {
         let mut conn = state.conn.lock().await;
         conn.send_raw_keys(pane_id, keys)
@@ -1081,12 +1084,24 @@ async fn handle_send_keys(
             .map_err(|e| RpcError::internal(format!("Failed to send keys: {}", e)))?;
     }
 
-    // Brief pause for terminal to process, then return screen
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // The screen is returned once the pane responds to the key, or after a
+    // second for a key that changes nothing.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+    while pane_view(&*pane_handle.lock().await) == before {
+        if !matches!(tokio::time::timeout_at(deadline, rx.changed()).await, Ok(Ok(()))) {
+            break;
+        }
+    }
 
     let tp = pane_handle.lock().await;
     let screen = capture_screen(&tp, 20);
     Ok(json!({ "screen": screen }))
+}
+
+/// The emulator's view of a pane: its cursor and its rows, exactly as far as
+/// the daemon has processed the pane's output.
+fn pane_view(ps: &crate::pane::registry::PaneState) -> ((usize, usize), Vec<String>) {
+    (ps.processor.cursor_position(), ps.processor.screen_text())
 }
 
 // --- Policy ---

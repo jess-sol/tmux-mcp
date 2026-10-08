@@ -15,7 +15,6 @@ async fn ctrl_c_stops_a_running_command() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — press_key captures a fixed 100 ms after the key, not once the pane responds"]
 async fn press_key_shows_the_panes_response_to_the_key() {
     let h = Harness::new().await;
     let shell = h.shell().await;
