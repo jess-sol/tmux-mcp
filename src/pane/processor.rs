@@ -159,6 +159,21 @@ impl PaneProcessor {
         self.state.input_start.is_some() && !self.read_input().is_empty()
     }
 
+    /// Whether any cell from the end of the prompt to the cursor holds text.
+    pub fn has_input_before_cursor(&self) -> bool {
+        let Some((start_line, start_col)) = self.state.input_start else {
+            return false;
+        };
+        let (cursor_line, cursor_col) = self.cursor_position();
+        (start_line..=cursor_line).any(|line| {
+            let from = if line == start_line { start_col } else { 0 };
+            let to = if line == cursor_line { cursor_col } else { usize::MAX };
+            // One char per column, as in `read_input`.
+            let text = self.screen_line_text(line);
+            text.chars().skip(from).take(to.saturating_sub(from)).any(|c| !c.is_whitespace())
+        })
+    }
+
     /// Resize the headless terminal to new dimensions.
     /// Called when tmux reports changed pane dimensions via `%layout-change`.
     pub fn resize(&mut self, lines: usize, columns: usize) {

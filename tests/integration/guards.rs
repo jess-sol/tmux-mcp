@@ -1,6 +1,6 @@
 //! When `command_run` refuses to touch a pane.
 
-use crate::harness::Harness;
+use crate::harness::{Harness, SETTLE};
 
 #[tokio::test]
 async fn a_pane_the_user_is_typing_in_refuses_commands() {
@@ -11,6 +11,28 @@ async fn a_pane_the_user_is_typing_in_refuses_commands() {
     let reply = h.run(&shell, "ls").await;
 
     assert!(reply.starts_with("User is typing in pane"), "{reply}");
+}
+
+#[tokio::test]
+async fn the_typing_refusal_suggests_ctrl_c_only_when_nothing_sits_before_the_cursor() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    // A background job prints `xyz` at the idle prompt and moves the cursor
+    // back before it: a garbled line, with nothing typed. Octal keeps `xyz`
+    // off the command line itself; the sleep keeps `set -b` from redrawing.
+    shell.say("(sleep 0.5; printf '\\170\\171\\172\\033[3D'; sleep 30) &");
+    shell.wait_until(SETTLE, |s| s.contains("xyz")).unwrap();
+
+    let garbled = h.run(&shell, "seq 1").await;
+    h.press_key(&shell, "C-c").await;
+    shell.type_text("git sta");
+    let typing = h.run(&shell, "seq 1").await;
+
+    assert!(
+        garbled.starts_with("User is typing") && garbled.contains("press_key C-c"),
+        "{garbled}"
+    );
+    assert!(typing.starts_with("User is typing") && !typing.contains("press_key C-c"), "{typing}");
 }
 
 #[tokio::test]
