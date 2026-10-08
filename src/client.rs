@@ -34,10 +34,6 @@ pub enum TmuxSessionError {
 }
 
 impl TmuxSession {
-    pub fn new(server: PathBuf, pid: u32, id: u32) -> TmuxSession {
-        TmuxSession { server, pid, id }
-    }
-
     /// The `TmuxSession` named by `$TMUX`: the one the shipped binary serves.
     pub fn from_env() -> Result<TmuxSession, TmuxSessionError> {
         std::env::var("TMUX").map_err(|_| TmuxSessionError::NotInTmux)?.parse()
@@ -89,7 +85,7 @@ impl FromStr for TmuxSession {
         let id = fields.next().and_then(|id| id.parse().ok()).ok_or_else(malformed)?;
         let pid = fields.next().and_then(|pid| pid.parse().ok()).ok_or_else(malformed)?;
         let server = fields.next().filter(|s| !s.is_empty()).ok_or_else(malformed)?;
-        Ok(TmuxSession::new(PathBuf::from(server), pid, id))
+        Ok(TmuxSession { server: PathBuf::from(server), pid, id })
     }
 }
 
@@ -209,14 +205,6 @@ impl DaemonClient {
                 return Err("Timed out waiting for daemon socket".into());
             }
         }
-    }
-
-    /// Connect directly to a daemon socket (no spawning).
-    pub async fn connect_to_socket(
-        path: &std::path::Path,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let stream = UnixStream::connect(path).await?;
-        Ok(Self::from_stream(stream))
     }
 
     fn from_stream(stream: UnixStream) -> Self {
