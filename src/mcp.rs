@@ -102,7 +102,7 @@ pub struct PressKeyParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
     #[schemars(
-        description = "Key to press. Use tmux key names: Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace. Max 5 chars."
+        description = "Key to press: a tmux key name (Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace), or up to 3 characters of text such as q, y or :wq."
     )]
     pub keys: String,
 }

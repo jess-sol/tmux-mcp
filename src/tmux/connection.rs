@@ -168,6 +168,9 @@ impl TmuxCommands {
     /// Send raw keys to a pane, passing the keys string directly to tmux
     /// for key name interpretation (C-c, Enter, Escape, etc).
     pub async fn send_raw_keys(&mut self, target: &str, keys: &str) -> Result<()> {
+        // Quoted, so `;` or `#` in keys cannot end or comment out the tmux
+        // command; tmux strips the quotes and still reads a key name.
+        let keys = crate::parse::escape::shell_escape(keys);
         self.execute(&format!("send-keys -t {} {}", target, keys)).await?;
         Ok(())
     }

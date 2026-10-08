@@ -1081,6 +1081,10 @@ async fn handle_inject_osc133(
     }
 }
 
+/// The key names press_key's schema documents; they skip its length cap.
+const KEY_NAMES: &[&str] =
+    &["Enter", "Escape", "BSpace", "Tab", "Space", "Up", "Down", "Left", "Right", "C-c", "C-d", "C-z"];
+
 async fn handle_send_keys(
     params: &Value,
     state: &Arc<DaemonState>,
@@ -1092,10 +1096,19 @@ async fn handle_send_keys(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("keys is required"))?;
 
-    if keys.len() > 5 {
-        return Err(RpcError::invalid_params(
-            format!("keys too long: {} chars (max 5). Use command_run for commands.", keys.len()),
-        ));
+    // An escape hatch: key names pass, and other text stays short enough that
+    // commands go through command_run.
+    if keys.chars().any(char::is_control) {
+        return Err(RpcError::invalid_params(format!(
+            "keys {keys:?} holds a control character. Send a key name such as Enter instead."
+        )));
+    }
+    if !KEY_NAMES.contains(&keys) && keys.chars().count() > 3 {
+        return Err(RpcError::invalid_params(format!(
+            "keys too long: {} chars (max 3, or a key name: {}). Use command_run for commands.",
+            keys.chars().count(),
+            KEY_NAMES.join(", "),
+        )));
     }
 
     // Validate window access and get pane handle
