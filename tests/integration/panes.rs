@@ -64,7 +64,6 @@ async fn shell_integration_outlives_a_background_job() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — the MCP server holds its daemon client for a whole command_run"]
 async fn list_panes_answers_while_a_command_runs() {
     let h = Harness::new().await;
     let shell = h.shell().await;

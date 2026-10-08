@@ -1,20 +1,17 @@
 /// MCP server: exposes tmux tools over stdio using rmcp.
 /// Forwards tool calls to the daemon over the Unix socket client.
 
-use std::sync::Arc;
-
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde_json::json;
-use tokio::sync::Mutex;
 
 use crate::client::DaemonClient;
 
 #[derive(Clone)]
 pub struct TmuxMcp {
-    client: Arc<Mutex<DaemonClient>>,
+    client: DaemonClient,
     origin_pane: String,
     tool_router: ToolRouter<Self>,
 }
@@ -22,7 +19,7 @@ pub struct TmuxMcp {
 impl TmuxMcp {
     pub fn new(client: DaemonClient, origin_pane: String) -> Self {
         Self {
-            client: Arc::new(Mutex::new(client)),
+            client,
             origin_pane,
             tool_router: Self::tool_router(),
         }
@@ -363,8 +360,8 @@ impl TmuxMcp {
                        `*` marks the pane you run in; Geometry is WxH+X+Y relative to it."
     )]
     async fn list_panes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request("list_panes", json!({"origin_pane": self.origin_pane}))
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
@@ -391,8 +388,8 @@ impl TmuxMcp {
         if let Some(n) = params.before { rpc_params["before"] = json!(n); }
         if let Some(n) = params.after { rpc_params["after"] = json!(n); }
 
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request("command_run", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
@@ -424,8 +421,8 @@ impl TmuxMcp {
         if let Some(n) = params.before { rpc_params["before"] = json!(n); }
         if let Some(n) = params.after { rpc_params["after"] = json!(n); }
 
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request("command_read", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
@@ -444,8 +441,8 @@ impl TmuxMcp {
         &self,
         Parameters(params): Parameters<DebugPaneParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request(
                 "capture_pane",
                 json!({
@@ -479,8 +476,8 @@ impl TmuxMcp {
         &self,
         Parameters(params): Parameters<InjectOsc133Params>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request(
                 "inject_osc133",
                 json!({
@@ -519,8 +516,8 @@ impl TmuxMcp {
         &self,
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request(
                 "send_keys",
                 json!({
@@ -541,8 +538,8 @@ impl TmuxMcp {
         &self,
         Parameters(params): Parameters<CommandHistoryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mut client = self.client.lock().await;
-        let result = client
+        let result = self
+            .client
             .request(
                 "command_history",
                 json!({

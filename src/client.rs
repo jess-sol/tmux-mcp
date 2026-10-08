@@ -1,17 +1,22 @@
 /// Daemon client: connects to a running daemon over a Unix socket,
 /// or spawns one if needed. Uses newline-delimited JSON-RPC.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::Snafu;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::oneshot;
 
 // --- Tmux session ---
 
@@ -120,8 +125,8 @@ struct JsonRpcRequest {
 struct JsonRpcResponse {
     #[allow(dead_code)]
     jsonrpc: String,
-    #[allow(dead_code)]
-    id: u64,
+    /// The request this answers; null on a reply to a line the daemon could not parse.
+    id: Option<u64>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
 }
@@ -143,10 +148,19 @@ impl std::error::Error for JsonRpcError {}
 
 // --- Daemon Client ---
 
+/// One connection to the daemon, shared by every caller: each request waits
+/// for the reply that carries its own id, so requests overlap.
+#[derive(Clone)]
 pub struct DaemonClient {
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
-    next_id: u64,
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    writer: tokio::sync::Mutex<OwnedWriteHalf>,
+    /// Requests awaiting their reply, by id; `None` once the daemon has closed
+    /// the connection.
+    pending: Mutex<Option<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    next_id: AtomicU64,
 }
 
 impl DaemonClient {
@@ -209,48 +223,62 @@ impl DaemonClient {
 
     fn from_stream(stream: UnixStream) -> Self {
         let (read, write) = stream.into_split();
-        Self {
-            reader: BufReader::new(read),
-            writer: write,
-            next_id: 1,
-        }
+        let shared = Arc::new(Shared {
+            writer: tokio::sync::Mutex::new(write),
+            pending: Mutex::new(Some(HashMap::new())),
+            next_id: AtomicU64::new(1),
+        });
+        tokio::spawn(route_replies(BufReader::new(read), Arc::downgrade(&shared)));
+        Self { shared }
     }
 
     /// Send a JSON-RPC request and wait for the response.
-    pub async fn request(
-        &mut self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: method.to_string(),
-            params,
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value, Box<dyn std::error::Error>> {
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        match self.shared.pending.lock().expect("pending lock").as_mut() {
+            Some(pending) => pending.insert(id, reply_tx),
+            None => return Err("Daemon closed connection".into()),
         };
 
+        let req = JsonRpcRequest { jsonrpc: "2.0", id, method: method.to_string(), params };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.flush().await?;
-
-        let mut response_line = String::new();
-        self.reader.read_line(&mut response_line).await?;
-
-        if response_line.is_empty() {
-            return Err("Daemon closed connection".into());
+        {
+            let mut writer = self.shared.writer.lock().await;
+            writer.write_all(line.as_bytes()).await?;
+            writer.flush().await?;
         }
 
-        let resp: JsonRpcResponse = serde_json::from_str(&response_line)?;
-
+        let resp = reply_rx.await.map_err(|_| "Daemon closed connection")?;
         if let Some(error) = resp.error {
             return Err(error.into());
         }
-
         Ok(resp.result.unwrap_or(Value::Null))
+    }
+}
+
+/// Hands each reply to the request waiting for its id. When the daemon closes
+/// the connection, every waiting request fails, and so does every later one.
+async fn route_replies(mut reader: BufReader<OwnedReadHalf>, shared: Weak<Shared>) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if !matches!(reader.read_line(&mut line).await, Ok(n) if n > 0) {
+            break;
+        }
+        let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&line) else { continue };
+        let Some(shared) = shared.upgrade() else { return };
+        let waiting = resp.id.and_then(|id| {
+            shared.pending.lock().expect("pending lock").as_mut().and_then(|p| p.remove(&id))
+        });
+        if let Some(waiting) = waiting {
+            let _ = waiting.send(resp);
+        }
+    }
+    if let Some(shared) = shared.upgrade() {
+        // Dropping the senders fails every waiting request.
+        shared.pending.lock().expect("pending lock").take();
     }
 }
 

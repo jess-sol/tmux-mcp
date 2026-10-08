@@ -31,12 +31,20 @@ pub struct TrackedPane {
     /// Bumped after every `process_chunk()` — handlers `subscribe_state()`
     /// and `select!` on `changed()` instead of polling with sleep.
     state_tx: watch::Sender<u64>,
+    run: Mutex<()>,
 }
 
 impl TrackedPane {
     /// Lock the mutable pane state.
     pub async fn lock(&self) -> MutexGuard<'_, PaneState> {
         self.state.lock().await
+    }
+
+    /// Lock the pane for one command_run, from its busy check until the pane
+    /// reports the command started; a second command_run waits, then sees
+    /// the pane busy.
+    pub async fn lock_run(&self) -> MutexGuard<'_, ()> {
+        self.run.lock().await
     }
 
     /// Signal that pane state has changed (new output, completion, etc.).
@@ -163,6 +171,7 @@ impl PaneRegistry {
                         processor,
                     }),
                     state_tx,
+                    run: Mutex::new(()),
                 };
                 self.panes.insert(pane_id.clone(), Arc::new(tracked));
                 actions.push(SyncAction::PaneAdded { pane_id: pane_id.clone() });

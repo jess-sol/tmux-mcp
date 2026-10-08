@@ -76,7 +76,7 @@ async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
 
     let session = TmuxSession::from_env()?;
     let origin_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let mut client = tmux_mcp::client::DaemonClient::connect(&session).await?;
+    let client = tmux_mcp::client::DaemonClient::connect(&session).await?;
 
     let result = client
         .request(

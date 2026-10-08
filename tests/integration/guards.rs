@@ -48,6 +48,20 @@ async fn a_cleared_input_line_takes_commands_again() {
 }
 
 #[tokio::test]
+async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+
+    let (first, second) =
+        tokio::join!(h.run(&shell, "sleep 1; seq 1"), h.run(&shell, "sleep 1; seq 2"));
+
+    let replies = [&first, &second];
+    let ran = replies.iter().filter(|r| r.contains("Exit code: 0")).count();
+    let refused = replies.iter().filter(|r| r.contains("busy")).count();
+    assert_eq!((ran, refused), (1, 1), "{first:?}\n{second:?}");
+}
+
+#[tokio::test]
 async fn a_pane_running_a_command_refuses_another() {
     let h = Harness::new().await;
     let shell = h.shell().await;

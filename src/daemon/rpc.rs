@@ -807,6 +807,10 @@ async fn handle_command_run(
 
     let leaf_pid = get_leaf_pid(shell_pid);
 
+    // Held until the C marker shows the command started, so a concurrent
+    // command_run on this pane sees it busy instead of passing the same check.
+    let run_lock = pane_handle.lock_run().await;
+
     // --- Pre-execution guards ---
     // Check for conditions that would cause the OSC 133 probe to timeout
     // with a misleading error. Catch them early with specific messages.
@@ -960,6 +964,7 @@ async fn handle_command_run(
             }
         }
     };
+    drop(run_lock);
 
     // --- Phase 2: shared wait/read loop ---
     // Returns when the command completes, when next/head (± search) is satisfied,
