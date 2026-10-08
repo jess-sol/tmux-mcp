@@ -3,7 +3,7 @@
 /// Given a shell PID (from tmux `#{pane_pid}`), derives:
 /// - CWD: `readlink /proc/{pid}/cwd`
 /// - Process name: `/proc/{pid}/comm`
-/// - Foreground process: walk single-child chains to find the leaf
+/// - Foreground process: the terminal's foreground process group
 
 use std::path::PathBuf;
 
@@ -16,7 +16,8 @@ pub struct ProcInfo {
     pub foreground: Option<ForegroundProcess>,
 }
 
-/// The leaf process in a single-child chain from the shell.
+/// The leader of the terminal's foreground process group, when the shell has
+/// handed the terminal to a job.
 #[derive(Debug, Clone)]
 pub struct ForegroundProcess {
     pub pid: u32,
@@ -45,40 +46,25 @@ fn read_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
-/// Read `/proc/{pid}/task/{pid}/children` — space-separated child PIDs.
-fn read_children(pid: u32) -> Vec<u32> {
-    let path = format!("/proc/{pid}/task/{pid}/children");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return vec![];
-    };
-    contents
-        .split_whitespace()
-        .filter_map(|s| s.parse().ok())
-        .collect()
+/// Read `tpgid` from `/proc/{pid}/stat`: the foreground process group of the
+/// process's controlling terminal.
+fn read_tpgid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // comm is parenthesized and may itself contain spaces or parens.
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    // state ppid pgrp session tty_nr tpgid
+    after_comm.split_whitespace().nth(5)?.parse().ok()
 }
 
-/// Walk single-child chains to find the foreground process.
-///
-/// Starting from `pid`, if it has exactly one child, recurse into that child.
-/// Continue until a process has 0 or 2+ children. If we moved at all from
-/// the starting pid, return the leaf. Returns `None` if the process has
-/// no children (shell is idle at prompt).
+/// The job holding the terminal of the shell `pid`, or `None` while the shell
+/// holds it itself (idle at its prompt). The kernel tracks this, so prompt
+/// helpers and background jobs — children of the shell outside its
+/// foreground group — are never mistaken for it.
 pub fn find_foreground(pid: u32) -> Option<ForegroundProcess> {
-    let mut current = pid;
-
-    loop {
-        let children = read_children(current);
-        match children.len() {
-            1 => current = children[0],
-            _ => break,
-        }
-    }
-
-    if current == pid {
-        // Never moved — shell has no children (idle) or multiple children
+    let tpgid = read_tpgid(pid)?;
+    if tpgid == pid {
         return None;
     }
-
-    let comm = read_comm(current)?;
-    Some(ForegroundProcess { pid: current, comm })
+    let comm = read_comm(tpgid)?;
+    Some(ForegroundProcess { pid: tpgid, comm })
 }

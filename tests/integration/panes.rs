@@ -50,7 +50,6 @@ async fn debug_pane_points_at_command_read_while_a_command_runs() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — find_foreground takes a background job for the foreground"]
 async fn shell_integration_outlives_a_background_job() {
     let h = Harness::new().await;
     let shell = h.shell().await;

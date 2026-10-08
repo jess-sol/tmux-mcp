@@ -15,7 +15,19 @@ async fn ctrl_c_stops_a_running_command() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — capture_screen takes the bottom rows before trimming blanks"]
+#[ignore = "harness: red — press_key captures a fixed 100 ms after the key, not once the pane responds"]
+async fn press_key_shows_the_panes_response_to_the_key() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    // Waits silently for one key, then answers 0.3 s later.
+    h.start(&shell, "read -rsn1; sleep 0.3; seq 1 | sed s/1/got/").await;
+
+    let screen = h.press_key(&shell, "x").await;
+
+    assert!(screen.lines().any(|row| row == "got"), "{screen:?}");
+}
+
+#[tokio::test]
 async fn a_screen_whose_content_sits_at_the_top_still_shows() {
     let h = Harness::new().await;
     let shell = h.shell().await;

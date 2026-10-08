@@ -481,14 +481,13 @@ fn get_leaf_pid(shell_pid: u32) -> u32 {
         .unwrap_or(shell_pid)
 }
 
-/// Capture the last N lines of visible screen text from locked pane state.
+/// Capture the last N lines of visible screen content from locked pane state,
+/// ignoring the blank rows below it.
 fn capture_screen(ps: &crate::pane::registry::PaneState, lines: usize) -> String {
     let all_lines = ps.processor.screen_text();
-    let total = all_lines.len();
-    let start = total.saturating_sub(lines);
-    let selected: Vec<&str> = all_lines[start..].iter().map(|s| s.as_str()).collect();
-    let end = selected.iter().rposition(|l| !l.is_empty()).map(|i| i + 1).unwrap_or(0);
-    selected[..end].join("\n")
+    let end = all_lines.iter().rposition(|l| !l.is_empty()).map(|i| i + 1).unwrap_or(0);
+    let start = end.saturating_sub(lines);
+    all_lines[start..end].join("\n")
 }
 
 /// Probe OSC 133 by sending ` :` and waiting for the full prompt cycle.
