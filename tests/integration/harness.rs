@@ -55,14 +55,12 @@ pub struct PaneTable {
 pub struct Read(Map<String, Value>);
 
 /// What the `policy-check` hook tells Claude Code about a command.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
     /// Claude Code asks the human first.
     Ask,
-    Deny {
-        reason: String,
-    },
+    Deny,
 }
 
 const POLL: Duration = Duration::from_millis(10);
@@ -159,7 +157,7 @@ impl Harness {
 
     /// `command_run` with read parameters, after the hook, as `run`.
     pub async fn run_with(&self, shell: &Shell, command: &str, read: Read) -> String {
-        if let Decision::Deny { reason } = self.decision(shell, command) {
+        if let (Decision::Deny, reason) = self.hook(shell, command) {
             return reason;
         }
         let arguments = read.set("pane_id", shell.pane.as_str()).set("command", command);
@@ -200,15 +198,30 @@ impl Harness {
         PaneTable { text: self.call("list_panes", Map::new()).await }
     }
 
+    /// Writes the project's `.claude/tmux-mcp.toml`, as a user would. The
+    /// daemon reloads it on the next decision.
+    pub fn project_policy(&self, toml: &str) {
+        let dir = self.dir().join(".claude");
+        std::fs::create_dir_all(&dir).expect("a .claude dir");
+        std::fs::write(dir.join("tmux-mcp.toml"), toml).expect("a project policy");
+    }
+
     /// Asks the `policy-check` hook about `command` in `shell`, as Claude Code
     /// does before every `command_run`. An "ask" leaves an approval in the
     /// daemon, which the next `command_run` of that command consumes.
     pub fn decision(&self, shell: &Shell, command: &str) -> Decision {
+        self.hook(shell, command).0
+    }
+
+    /// The hook's decision and its reason. Claude Code reads a deny from
+    /// either channel: exit status 2 with the reason on stderr (a policy
+    /// deny), or a JSON "deny" (a lint refusal).
+    fn hook(&self, shell: &Shell, command: &str) -> (Decision, String) {
         let mut hook = tmux_mcp(&self.env)
             .arg("policy-check")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("the tmux-mcp policy-check hook");
         let input = json!({"tool_input": {"pane_id": shell.pane, "command": command}});
@@ -218,17 +231,20 @@ impl Harness {
             .write_all(input.to_string().as_bytes())
             .expect("hook input");
         let output = hook.wait_with_output().expect("the hook's answer");
+        if output.status.code() == Some(2) {
+            return (Decision::Deny, String::from_utf8_lossy(&output.stderr).into_owned());
+        }
         let answer: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|_| panic!("hook said {:?}", String::from_utf8_lossy(&output.stdout)));
         let answer = &answer["hookSpecificOutput"];
-        match answer["permissionDecision"].as_str() {
+        let reason = answer["permissionDecisionReason"].as_str().unwrap_or_default().to_string();
+        let decision = match answer["permissionDecision"].as_str() {
             Some("allow") => Decision::Allow,
             Some("ask") => Decision::Ask,
-            Some("deny") => Decision::Deny {
-                reason: answer["permissionDecisionReason"].as_str().unwrap_or("denied").to_string(),
-            },
+            Some("deny") => Decision::Deny,
             other => panic!("hook decided {other:?}"),
-        }
+        };
+        (decision, reason)
     }
 }
 

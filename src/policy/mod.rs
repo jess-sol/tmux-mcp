@@ -6,7 +6,8 @@
 //! Architecture:
 //! 1. Parse command with brush-parser → CommandInfo tree
 //! 2. Structural checks (parse failure, expansion-as-command-name) → hard Deny
-//! 3. CEL rules (built-in + user config, ordered, first-match-wins) → Allow/Ask/Deny
+//! 3. CEL rules (built-in + user config): every matching rule counts, the strictest
+//!    wins, and matching *Override rule*s decide alone → Allow/Ask/Deny
 //! 4. Most restrictive result across all commands in tree wins
 
 pub mod approval;

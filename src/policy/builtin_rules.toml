@@ -1,6 +1,7 @@
 # Built-in policy rules — compiled into the tmux-mcp binary.
-# Users override by adding rules with negative order in their config.
-# All rules here are at order 0 (implicit).
+# Every matching rule counts, and the strictest wins: deny, then ask, then
+# allow; no match asks. A user loosens one with an override rule
+# (`override = true`), which decides alone when it matches.
 
 default = "ask"
 
@@ -121,19 +122,12 @@ when = 'command.name == "cargo" && command.args.exists(a, a == "install")'
 action = "ask"
 message = "cargo install downloads and compiles arbitrary code from crates.io"
 
-# --- Write redirect protection (runs before safe commands) ---
-
-[[rules]]
-description = "allow write redirects to device files"
-when = 'command.write_targets.size() > 0 && command.write_targets.all(t, t in ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/stdin", "/dev/stdout", "/dev/stderr"] || startsWith(t, "/dev/fd/"))'
-action = "allow"
-order = -1
+# --- Write redirect protection ---
 
 [[rules]]
 description = "write redirect out-of-project"
-when = 'command.write_targets.exists(t, !in_project(path(t)))'
+when = 'command.write_targets.exists(t, !in_project(path(t)) && !(t in ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/stdin", "/dev/stdout", "/dev/stderr"] || startsWith(t, "/dev/fd/")))'
 action = "ask"
-order = -1
 message = "write redirect targets a file outside project directory"
 
 # --- Safe commands (allow) ---
@@ -158,32 +152,17 @@ description = "file readers (in-project)"
 when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
 
-[[rules]]
-description = "file readers (out-of-project)"
-when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"]'
-action = "ask"
-
 # Search/list tools — contained to project dir
 [[rules]]
 description = "search tools (in-project)"
 when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
 
-[[rules]]
-description = "search tools (out-of-project)"
-when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"]'
-action = "ask"
-
 # File-write tools — contained to project dir
 [[rules]]
 description = "file ops (in-project)"
 when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
 action = "allow"
-
-[[rules]]
-description = "file ops (out-of-project)"
-when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"]'
-action = "ask"
 
 # Dev tools — no path restriction (they manage their own paths)
 [[rules]]
@@ -195,11 +174,6 @@ action = "allow"
 description = "git read-only"
 when = 'command.name == "git" && command.args.exists(a, a in ["status","log","diff","show","branch","tag","remote","config","ls-files","ls-tree","rev-parse","describe","shortlog","blame","reflog"])'
 action = "allow"
-
-[[rules]]
-description = "git write"
-when = 'command.name == "git"'
-action = "ask"
 
 # --- Wrapper definitions ---
 # These drive the generic extraction engine in parse.rs.

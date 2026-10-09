@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use cel_parser::ast as cel;
 use cel_parser::reference::Val;
 
-use super::config::TaggedRule;
+use super::config::RuleConfig;
 use super::parse::{CommandInfo, Effective, InnerExtraction};
 use super::{Decision, PaneContext, PolicyResult};
 
@@ -90,6 +90,8 @@ pub struct CompiledRule {
     pub description: String,
     pub ast: cel::IdedExpr,
     pub action: Decision,
+    /// An *Override rule*: it decides alone when it matches.
+    pub is_override: bool,
     pub message: Option<String>,
     /// True if the CEL expression directly references command.effective_user.
     /// When true, the implicit same-user constraint on `allow` is skipped.
@@ -109,38 +111,39 @@ pub struct RuleSet {
 
 // --- Public API ---
 
-/// Compile tagged rules into a RuleSet. Parses CEL expressions at load time.
-pub fn compile(tagged_rules: &[TaggedRule], default: Decision) -> Result<RuleSet, String> {
-    let mut rules = Vec::with_capacity(tagged_rules.len());
-    for tagged in tagged_rules {
+/// Compile rules into a RuleSet. Parses CEL expressions at load time.
+pub fn compile(configs: &[RuleConfig], default: Decision) -> Result<RuleSet, String> {
+    let mut rules = Vec::with_capacity(configs.len());
+    for config in configs {
         let parser = cel_parser::Parser::new();
-        let ast = parser.parse(&tagged.config.when)
-            .map_err(|e| format!("CEL parse error in rule '{}': {:?}", tagged.config.description, e))?;
-        let action = match tagged.config.action.as_str() {
+        let ast = parser.parse(&config.when)
+            .map_err(|e| format!("CEL parse error in rule '{}': {:?}", config.description, e))?;
+        let action = match config.action.as_str() {
             "allow" => Decision::Allow,
             "deny" => Decision::Deny,
             "ask" => Decision::Ask,
             other => return Err(format!(
                 "Invalid action '{}' in rule '{}' (must be allow/ask/deny)",
-                other, tagged.config.description
+                other, config.description
             )),
         };
         let privilege_aware = references_command_field(&ast.expr, "effective_user");
         let host_aware = references_command_field(&ast.expr, "effective_host");
-        let capture_cwd = match &tagged.config.capture_cwd {
+        let capture_cwd = match &config.capture_cwd {
             Some(expr) => {
                 let cwd_parser = cel_parser::Parser::new();
                 let parsed = cwd_parser.parse(expr)
-                    .map_err(|e| format!("CEL parse error in capture_cwd of '{}': {:?}", tagged.config.description, e))?;
+                    .map_err(|e| format!("CEL parse error in capture_cwd of '{}': {:?}", config.description, e))?;
                 Some(parsed)
             }
             None => None,
         };
         rules.push(CompiledRule {
-            description: tagged.config.description.clone(),
+            description: config.description.clone(),
             ast,
             action,
-            message: tagged.config.message.clone(),
+            is_override: config.is_override,
+            message: config.message.clone(),
             privilege_aware,
             host_aware,
             capture_cwd,
@@ -180,7 +183,11 @@ fn references_command_field(expr: &cel::Expr, field: &str) -> bool {
 }
 
 /// Evaluate a single CommandInfo against the rule set.
-/// First matching rule wins, or returns default.
+///
+/// Every matching rule counts, and the strictest action wins: deny, then ask,
+/// then allow. *Override rule*s are a group of their own: when any matches,
+/// the strictest override decides and the other rules do not count. No match
+/// gives the default.
 ///
 /// `effective_cwd` is the resolved cwd for this command (from sequential
 /// tracking in evaluate_all). It's resolved to TriVal in the pane context,
@@ -193,53 +200,90 @@ fn references_command_field(expr: &cel::Expr, field: &str) -> bool {
 /// author has explicitly considered the context).
 pub fn evaluate(cmd: &CommandInfo, ctx: &PaneContext, rules: &RuleSet, effective_cwd: &Effective, project_dirs: &[String]) -> PolicyResult {
     let eval_ctx = build_context(cmd, ctx, effective_cwd, project_dirs);
+    let strictest = |overrides: bool| {
+        strictest_match(rules.rules.iter().filter(|r| r.is_override == overrides), cmd, ctx, &eval_ctx)
+    };
 
-    for rule in &rules.rules {
-        let result = eval_expr(&rule.ast.expr, &eval_ctx);
-        if result.is_truthy() == TriBool::True {
-            // For `allow` rules: check implicit context constraint.
-            if rule.action == Decision::Allow {
-                if !rule.privilege_aware {
-                    let user_ok = match &cmd.effective_user {
-                        Effective::Unchanged => true,
-                        Effective::Known(u) => ctx.user.as_deref() == Some(u.as_str()),
-                        Effective::Unknown => false,
-                    };
-                    if !user_ok { continue; }
-                }
-                if !rule.host_aware {
-                    let host_ok = match &cmd.effective_host {
-                        Effective::Unchanged => true,
-                        Effective::Known(h) => ctx.hostname.as_deref() == Some(h.as_str()),
-                        Effective::Unknown => false,
-                    };
-                    if !host_ok { continue; }
-                }
-            }
-
-            let rule_desc = match &rule.message {
-                Some(msg) => format!("{}: {}", rule.description, msg),
-                None => rule.description.clone(),
-            };
-            let captured_cwd = rule.capture_cwd.as_ref().map(|expr| {
-                match eval_expr(&expr.expr, &eval_ctx) {
-                    TriVal::String(s) => Effective::Known(s),
-                    _ => Effective::Unknown,
-                }
-            });
-            return PolicyResult {
-                decision: rule.action.clone(),
-                rule: rule_desc,
-                captured_cwd,
-            };
-        }
-        // False or Unknown → rule doesn't match, try next
-    }
-
-    PolicyResult {
+    strictest(true).or_else(|| strictest(false)).unwrap_or_else(|| PolicyResult {
         decision: rules.default.clone(),
         rule: "default".to_string(),
         captured_cwd: None,
+    })
+}
+
+/// How a rule matched: on a True `when`, or on an Unknown one it could not
+/// rule out.
+enum Match {
+    True,
+    Unknown,
+}
+
+/// The result of the strictest matching rule; on a tie, the first one.
+fn strictest_match<'a>(
+    rules: impl Iterator<Item = &'a CompiledRule>,
+    cmd: &CommandInfo,
+    ctx: &PaneContext,
+    eval_ctx: &HashMap<String, TriVal>,
+) -> Option<PolicyResult> {
+    let mut strictest: Option<PolicyResult> = None;
+    for rule in rules {
+        let Some(matched) = rule_match(rule, cmd, ctx, eval_ctx) else { continue };
+        if strictest.as_ref().is_none_or(|s| super::severity(&rule.action) > super::severity(&s.decision)) {
+            strictest = Some(rule_result(rule, matched, eval_ctx));
+        }
+    }
+    strictest
+}
+
+/// Unknown fails closed: it matches a deny or ask rule, never an allow rule,
+/// and never an override, whose match switches the other rules off.
+fn rule_match(rule: &CompiledRule, cmd: &CommandInfo, ctx: &PaneContext, eval_ctx: &HashMap<String, TriVal>) -> Option<Match> {
+    match eval_expr(&rule.ast.expr, eval_ctx).is_truthy() {
+        TriBool::True => {}
+        TriBool::Unknown if rule.action != Decision::Allow && !rule.is_override => return Some(Match::Unknown),
+        _ => return None,
+    }
+    if rule.action == Decision::Allow && !allow_context_holds(rule, cmd, ctx) {
+        return None;
+    }
+    Some(Match::True)
+}
+
+/// The implicit context constraint on `allow` rules (see `evaluate`).
+fn allow_context_holds(rule: &CompiledRule, cmd: &CommandInfo, ctx: &PaneContext) -> bool {
+    let user_ok = rule.privilege_aware || match &cmd.effective_user {
+        Effective::Unchanged => true,
+        Effective::Known(u) => ctx.user.as_deref() == Some(u.as_str()),
+        Effective::Unknown => false,
+    };
+    let host_ok = rule.host_aware || match &cmd.effective_host {
+        Effective::Unchanged => true,
+        Effective::Known(h) => ctx.hostname.as_deref() == Some(h.as_str()),
+        Effective::Unknown => false,
+    };
+    user_ok && host_ok
+}
+
+fn rule_result(rule: &CompiledRule, matched: Match, eval_ctx: &HashMap<String, TriVal>) -> PolicyResult {
+    let mut rule_desc = match &rule.message {
+        Some(msg) => format!("{}: {}", rule.description, msg),
+        None => rule.description.clone(),
+    };
+    if let Match::Unknown = matched {
+        // Tells the model what fired the rule, so it can write the command
+        // with literal words.
+        rule_desc.push_str(" (could not be ruled out)");
+    }
+    let captured_cwd = rule.capture_cwd.as_ref().map(|expr| {
+        match eval_expr(&expr.expr, eval_ctx) {
+            TriVal::String(s) => Effective::Known(s),
+            _ => Effective::Unknown,
+        }
+    });
+    PolicyResult {
+        decision: rule.action.clone(),
+        rule: rule_desc,
+        captured_cwd,
     }
 }
 
@@ -756,10 +800,10 @@ fn eval_add(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVal {
     let b = eval_expr(&args[1].expr, ctx);
     match (&a, &b) {
         (TriVal::Int(a), TriVal::Int(b)) => TriVal::Int(a + b),
-        (TriVal::List { elements: a, .. }, TriVal::List { elements: b, .. }) => {
+        (TriVal::List { elements: a, exhaustive: a_ex }, TriVal::List { elements: b, exhaustive: b_ex }) => {
             let mut result = a.clone();
             result.extend(b.iter().cloned());
-            TriVal::List { elements: result, exhaustive: true }
+            TriVal::List { elements: result, exhaustive: *a_ex && *b_ex }
         }
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
         _ => TriVal::Unknown,
@@ -772,13 +816,14 @@ fn eval_split_at(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVa
     let list = eval_expr(&args[0].expr, ctx);
     let markers = eval_expr(&args[1].expr, ctx);
     match (&list, &markers) {
-        (TriVal::List { elements, .. }, TriVal::List { elements: marker_list, .. }) => {
+        (TriVal::List { elements, exhaustive }, TriVal::List { elements: marker_list, .. }) => {
+            let exhaustive = *exhaustive;
             let marker_strings: Vec<&str> = marker_list.iter().filter_map(|m| {
                 if let TriVal::String(s) = m { Some(s.as_str()) } else { None }
             }).collect();
 
             if elements.is_empty() {
-                return TriVal::List { elements: Vec::new(), exhaustive: true };
+                return TriVal::List { elements: Vec::new(), exhaustive };
             }
 
             let mut groups: Vec<TriVal> = Vec::new();
@@ -792,15 +837,15 @@ fn eval_split_at(args: &[cel::IdedExpr], ctx: &HashMap<String, TriVal>) -> TriVa
                 };
 
                 if is_marker {
-                    groups.push(TriVal::List { elements: current, exhaustive: true });
+                    groups.push(TriVal::List { elements: current, exhaustive });
                     current = vec![el.clone()];
                 } else {
                     current.push(el.clone());
                 }
             }
-            groups.push(TriVal::List { elements: current, exhaustive: true });
+            groups.push(TriVal::List { elements: current, exhaustive });
 
-            TriVal::List { elements: groups, exhaustive: true }
+            TriVal::List { elements: groups, exhaustive }
         }
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
         _ => TriVal::Unknown,
@@ -1144,21 +1189,21 @@ mod tests {
     }
 
     fn compile_rules(specs: &[(&str, &str, &str)]) -> RuleSet {
-        let tagged: Vec<TaggedRule> = specs.iter().enumerate().map(|(i, (desc, when, action))| {
-            TaggedRule {
-                config: crate::policy::config::RuleConfig {
-                    description: desc.to_string(),
-                    when: when.to_string(),
-                    action: action.to_string(),
-                    order: 0,
-                    message: None,
-                    capture_cwd: None,
-                },
-                source: crate::policy::config::RuleSource::Builtin,
-                source_index: i,
-            }
+        let overrides: Vec<_> = specs.iter().map(|&(desc, when, action)| (desc, when, action, false)).collect();
+        compile_override_rules(&overrides)
+    }
+
+    /// `compile_rules` with each rule's `override` flag.
+    fn compile_override_rules(specs: &[(&str, &str, &str, bool)]) -> RuleSet {
+        let configs: Vec<RuleConfig> = specs.iter().map(|&(desc, when, action, is_override)| RuleConfig {
+            description: desc.to_string(),
+            when: when.to_string(),
+            action: action.to_string(),
+            is_override,
+            message: None,
+            capture_cwd: None,
         }).collect();
-        compile(&tagged, Decision::Ask).unwrap()
+        compile(&configs, Decision::Ask).unwrap()
     }
 
     // --- Dependency contract: cel-parser ---
@@ -1256,12 +1301,12 @@ mod tests {
     // --- First match wins ---
 
     #[test]
-    fn first_rule_wins_on_match() {
+    fn the_strictest_matching_rule_wins_wherever_it_sits() {
         let rules = compile_rules(&[
             ("allow ls", r#"command.name == "ls""#, "allow"),
             ("deny ls", r#"command.name == "ls""#, "deny"),
         ]);
-        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Allow);
+        assert_eq!(evaluate(&cmd("ls"), &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Deny);
     }
 
     #[test]
@@ -1290,8 +1335,9 @@ mod tests {
         ]);
         let mut c = cmd("rm");
         c.effective_user = Effective::Unknown;
-        // Unknown == "root" → Unknown → no match → default Ask
-        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        // Unknown == "root" → Unknown → the deny rule fails closed
+        let r = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+        assert_eq!((r.decision, r.rule.as_str()), (Decision::Deny, "root check (could not be ruled out)"));
     }
 
     #[test]
@@ -1336,13 +1382,14 @@ mod tests {
 
     #[test]
     fn unknown_in_and_with_known_true() {
-        // True && Unknown → Unknown → no match
+        // True && Unknown → Unknown → the deny rule fails closed
         let rules = compile_rules(&[
             ("and test", r#"command.name == "rm" && command.effective_user == "root""#, "deny"),
         ]);
         let mut c = cmd("rm");
         c.effective_user = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        let r = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+        assert_eq!((r.decision, r.rule.as_str()), (Decision::Deny, "and test (could not be ruled out)"));
     }
 
     // --- Null (definite absence) ---
@@ -1434,8 +1481,9 @@ mod tests {
         ]);
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
-        // exists returns Unknown (not found in known, list non-exhaustive) → no match
-        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        // exists returns Unknown (not found in known, list non-exhaustive) → fails closed
+        let r = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+        assert_eq!((r.decision, r.rule.as_str()), (Decision::Deny, "has -rf (could not be ruled out)"));
     }
 
     #[test]
@@ -1466,7 +1514,8 @@ mod tests {
         ]);
         let mut c = cmd_with_args("rm", &["-v"]);
         c.args_complete = false;
-        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        let r = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+        assert_eq!((r.decision, r.rule.as_str()), (Decision::Deny, "rf in args (could not be ruled out)"));
     }
 
     #[test]
@@ -1478,6 +1527,34 @@ mod tests {
         c.args_complete = false;
         // !Unknown → Unknown → no match
         assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+    }
+
+    #[test]
+    fn a_rule_that_an_incomplete_command_may_match_fires() {
+        const UNSURE: &str = "rule (could not be ruled out)";
+        // (override, action, when, beside, over incomplete args, over complete args):
+        // each rule sits beside a rule `true` of action `beside`, over `rm x`.
+        let rows = [
+            (false, "ask", r#"command.args.exists(a, a == "-r")"#, "allow",
+                (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
+            (false, "ask", r#"(command.args + ["y"]).exists(a, a == "-r")"#, "allow",
+                (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
+            (false, "ask", r#"split_at(command.args, ["-exec"]).exists(g, g.exists(a, a == "-r"))"#, "allow",
+                (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
+            (false, "deny", r#"command.args.exists(a, a == "-r")"#, "allow",
+                (Decision::Deny, UNSURE), (Decision::Allow, "beside")),
+            (true, "allow", r#"command.args.exists(a, a == "-r")"#, "ask",
+                (Decision::Ask, "beside"), (Decision::Ask, "beside")),
+        ];
+        for (is_override, action, when, beside, incomplete, complete) in rows {
+            let rules = compile_override_rules(&[("rule", when, action, is_override), ("beside", "true", beside, false)]);
+            for (args_complete, want) in [(false, incomplete), (true, complete)] {
+                let mut c = cmd_with_args("rm", &["x"]);
+                c.args_complete = args_complete;
+                let got = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+                assert_eq!((got.decision, got.rule.as_str()), want, "{when}, args_complete={args_complete}");
+            }
+        }
     }
 
     // --- Boolean propagation (Kleene) ---
@@ -1561,27 +1638,24 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Unknown;
-        // Unknown host → glob returns Unknown → no match
-        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        // Unknown host → glob returns Unknown → the deny rule fails closed
+        let r = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+        assert_eq!((r.decision, r.rule.as_str()), (Decision::Deny, "prod (could not be ruled out)"));
     }
 
     // --- Compile errors ---
 
     #[test]
     fn compile_error_reported() {
-        let tagged = vec![TaggedRule {
-            config: crate::policy::config::RuleConfig {
-                description: "bad rule".into(),
-                when: "invalid @@@ syntax".into(),
-                action: "allow".into(),
-                order: 0,
-                message: None,
-                capture_cwd: None,
-            },
-            source: crate::policy::config::RuleSource::Builtin,
-            source_index: 0,
+        let configs = vec![RuleConfig {
+            description: "bad rule".into(),
+            when: "invalid @@@ syntax".into(),
+            action: "allow".into(),
+            is_override: false,
+            message: None,
+            capture_cwd: None,
         }];
-        match compile(&tagged, Decision::Ask) {
+        match compile(&configs, Decision::Ask) {
             Ok(_) => panic!("expected compile error"),
             Err(err) => assert!(err.contains("bad rule"), "error was: {}", err),
         }
@@ -1589,19 +1663,15 @@ mod tests {
 
     #[test]
     fn invalid_action_reported() {
-        let tagged = vec![TaggedRule {
-            config: crate::policy::config::RuleConfig {
-                description: "bad action".into(),
-                when: "true".into(),
-                action: "invalid".into(),
-                order: 0,
-                message: None,
-                capture_cwd: None,
-            },
-            source: crate::policy::config::RuleSource::Builtin,
-            source_index: 0,
+        let configs = vec![RuleConfig {
+            description: "bad action".into(),
+            when: "true".into(),
+            action: "invalid".into(),
+            is_override: false,
+            message: None,
+            capture_cwd: None,
         }];
-        match compile(&tagged, Decision::Ask) {
+        match compile(&configs, Decision::Ask) {
             Ok(_) => panic!("expected compile error"),
             Err(err) => assert!(err.contains("invalid"), "error was: {}", err),
         }
@@ -1626,7 +1696,8 @@ mod tests {
         ]);
         let mut c = cmd("ls");
         c.effective_host = Effective::Unknown;
-        assert_eq!(evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]).decision, Decision::Ask);
+        let r = evaluate(&c, &local_pane(), &rules, &Effective::Unchanged, &[]);
+        assert_eq!((r.decision, r.rule.as_str()), (Decision::Deny, "prod check (could not be ruled out)"));
     }
 
     #[test]
