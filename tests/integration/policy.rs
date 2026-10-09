@@ -82,7 +82,7 @@ async fn an_override_decides_alone() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — path rules skip every argument that starts with -"]
+#[ignore = "commands: red — path rules skip every argument that starts with -"]
 async fn a_path_in_a_flag_value_is_checked() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -99,7 +99,7 @@ async fn a_path_in_a_flag_value_is_checked() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — no rule reads command.read_targets"]
+#[ignore = "commands: red — no rule reads command.read_targets"]
 async fn an_input_redirect_is_a_path_the_command_reads() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -110,7 +110,7 @@ async fn an_input_redirect_is_a_path_the_command_reads() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — the git rules allow config, branch, tag and remote in every mode"]
+#[ignore = "commands: red — the git rules allow config, branch, tag and remote in every mode"]
 async fn a_git_command_that_writes_asks() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -127,7 +127,7 @@ async fn a_git_command_that_writes_asks() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — only awk's system is asked about; pipes and -f scripts pass"]
+#[ignore = "commands: red — only awk's system is asked about; pipes and -f scripts pass"]
 async fn an_awk_or_sed_script_that_can_run_a_command_asks() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -143,7 +143,7 @@ async fn an_awk_or_sed_script_that_can_run_a_command_asks() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — rules see words with their quotes still on"]
+#[ignore = "commands: red — rules see words with their quotes still on"]
 async fn rules_see_words_without_their_quotes() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -162,7 +162,7 @@ async fn rules_see_words_without_their_quotes() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — command substitutions in assignments, ${…}, redirect targets, for words and heredocs go unread"]
+#[ignore = "commands: red — command substitutions in assignments, ${…}, redirect targets, for words and heredocs go unread"]
 async fn a_command_substitution_meets_the_rules() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -180,7 +180,7 @@ async fn a_command_substitution_meets_the_rules() {
 }
 
 #[tokio::test]
-#[ignore = "harness: red — in_project compares path strings, not path components"]
+#[ignore = "commands: red — in_project compares path strings, not path components"]
 async fn a_sibling_directory_is_outside_the_project() {
     let h = Harness::new().await;
     let shell = h.shell().await;
