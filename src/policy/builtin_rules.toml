@@ -759,59 +759,59 @@ global = [                                            # options come before or a
 # =============================================================================
 
 [[rules]]
-description = "eval"
+id = "eval"
 command = "eval"
 action = "deny"
 message = "eval executes arbitrary strings"
 
 [[rules]]
-description = "source"
+id = "source"
 command = "source"
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
-description = ". (source)"
+id = "dot-source"
 command = "."
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
-description = "exec"
+id = "exec"
 command = "exec"
 action = "deny"
 message = "exec replaces the shell process"
 
 [[rules]]
-description = "sh reads standard input"
+id = "sh-reads-stdin"
 command = "sh"
 when = 'args.command == [] && args.file == null'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
 [[rules]]
-description = "bash reads standard input"
+id = "bash-reads-stdin"
 command = "bash"
 when = 'args.command == [] && args.file == null'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
 [[rules]]
-description = "dash reads standard input"
+id = "dash-reads-stdin"
 command = "dash"
 when = 'args.command == [] && args.file == null'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
 [[rules]]
-description = "zsh reads standard input"
+id = "zsh-reads-stdin"
 command = "zsh"
 when = 'args.command == [] && args.file == null'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
 [[rules]]
-description = "git -c"
+id = "git-config-command"
 command = "git"
 when = 'args.config != [] || args.config_env != [] || args.exec_path'
 action = "deny"
@@ -822,16 +822,17 @@ message = "git -c and --exec-path can set a command to run (core.pager, core.ssh
 # =============================================================================
 
 [[rules]]
-description = "a path outside the project"
+id = "outside-project"
 path = '!in_project(path) && !is_device(path)'
 action = "ask"
+message = "a path outside the project"
 
 # =============================================================================
 # Rules: commands that change state (ask)
 # =============================================================================
 
 [[rules]]
-description = "a variable that can run code"
+id = "variable-runs-code"
 when = '''
   variables.exists(v, v in ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV",
                             "PROMPT_COMMAND", "PS4", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
@@ -845,46 +846,63 @@ action = "ask"
 message = "the variable can make a later command run another program"
 
 [[rules]]
-description = "privilege escalation"
+id = "privilege-escalation"
 when = 'command.name in ["su", "doas"]'
 action = "ask"
 
 [[rules]]
-description = "rm -r"
+id = "rm-r"
 command = "rm"
 when = 'args.recursive'
 action = "ask"
 
 [[rules]]
-description = "find -delete"
+id = "find-delete"
 command = "find"
 when = 'args.delete'
 action = "ask"
 
 [[rules]]
-description = "rg runs a program"
+id = "rg-runs-program"
 command = "rg"
 when = 'args.pre != [] || args.hostname_bin != []'
 action = "ask"
 message = "--pre and --hostname-bin run the program they name"
 
+# git push: one rule per way it rewrites or deletes remote branches, so that an exemption names one.
+
 [[rules]]
-description = "git push that rewrites or deletes remote branches"
+id = "git-push-force"
 command = "git push"
-when = '''
-  args.force || args.force_with_lease || args.force_if_includes || args.delete || args.mirror
-  || args.prune || args.refspecs.exists(r, startsWith(r, "+") || startsWith(r, ":"))
-'''
+when = 'args.force || args.force_with_lease || args.force_if_includes || args.refspecs.exists(r, startsWith(r, "+"))'
 action = "ask"
 
 [[rules]]
-description = "git reset --hard"
+id = "git-push-delete"
+command = "git push"
+when = 'args.delete || args.refspecs.exists(r, startsWith(r, ":"))'
+action = "ask"
+
+[[rules]]
+id = "git-push-mirror"
+command = "git push"
+when = 'args.mirror'
+action = "ask"
+
+[[rules]]
+id = "git-push-prune"
+command = "git push"
+when = 'args.prune'
+action = "ask"
+
+[[rules]]
+id = "git-reset-hard"
 command = "git reset"
 when = 'args.hard'
 action = "ask"
 
 [[rules]]
-description = "git clean -f"
+id = "git-clean-force"
 command = "git clean"
 when = 'args.force'
 action = "ask"
@@ -894,7 +912,7 @@ action = "ask"
 # reads only the names that its grammar declares.
 
 [[rules]]
-description = "awk program beyond plain text processing"
+id = "awk-program"
 command = "awk"
 when = '''
   args.file != [] || args.program != null && !awk_is_plain(args.program)
@@ -904,7 +922,7 @@ action = "ask"
 message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
 
 [[rules]]
-description = "gawk program beyond plain text processing"
+id = "gawk-program"
 command = "gawk"
 when = '''
   args.file != [] || args.program != null && !awk_is_plain(args.program)
@@ -914,21 +932,21 @@ action = "ask"
 message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
 
 [[rules]]
-description = "mawk program beyond plain text processing"
+id = "mawk-program"
 command = "mawk"
 when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
 action = "ask"
 message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
 
 [[rules]]
-description = "nawk program beyond plain text processing"
+id = "nawk-program"
 command = "nawk"
 when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
 action = "ask"
 message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
 
 [[rules]]
-description = "sed script beyond plain text processing"
+id = "sed-script"
 command = "sed"
 when = '''
   args.file != [] || args.script != null && !sed_is_plain(args.script)
@@ -938,73 +956,73 @@ action = "ask"
 message = "the sed script can run a command or open a file: e, s///e, w, r, or a script file"
 
 [[rules]]
-description = "disk and filesystem"
+id = "disk-and-filesystem"
 when = 'command.name in ["dd", "mkfs", "fdisk", "mount", "umount"]'
 action = "ask"
 
 [[rules]]
-description = "system power"
+id = "system-power"
 when = 'command.name in ["reboot", "shutdown", "poweroff", "halt"]'
 action = "ask"
 
 [[rules]]
-description = "process signals"
+id = "process-signals"
 when = 'command.name in ["kill", "pkill", "killall"]'
 action = "ask"
 
 [[rules]]
-description = "apt package removal"
+id = "apt-remove"
 command = "apt"
 when = 'subcommand in ["remove", "purge", "autoremove"]'
 action = "ask"
 
 [[rules]]
-description = "apt-get package removal"
+id = "apt-get-remove"
 command = "apt-get"
 when = 'subcommand in ["remove", "purge", "autoremove"]'
 action = "ask"
 
 [[rules]]
-description = "dnf package removal"
+id = "dnf-remove"
 command = "dnf"
 when = 'subcommand in ["remove", "erase", "autoremove"]'
 action = "ask"
 
 [[rules]]
-description = "yum package removal"
+id = "yum-remove"
 command = "yum"
 when = 'subcommand in ["remove", "erase", "autoremove"]'
 action = "ask"
 
 [[rules]]
-description = "pacman package removal"
+id = "pacman-remove"
 command = "pacman"
 when = 'args.remove'
 action = "ask"
 
 [[rules]]
-description = "firewall"
+id = "firewall"
 when = 'command.name in ["iptables", "ufw", "firewall-cmd"]'
 action = "ask"
 
 [[rules]]
-description = "service disruption"
+id = "service-disruption"
 command = "systemctl"
 when = 'subcommand in ["stop", "disable", "mask", "restart"]'
 action = "ask"
 
 [[rules]]
-description = "curl/wget"
+id = "curl-wget"
 when = 'command.name in ["curl", "wget"]'
 action = "ask"
 
 [[rules]]
-description = "permissions"
+id = "permissions"
 when = 'command.name in ["chmod", "chown", "chgrp"]'
 action = "ask"
 
 [[rules]]
-description = "cargo install"
+id = "cargo-install"
 command = "cargo install"
 action = "ask"
 message = "cargo install downloads and compiles arbitrary code from crates.io"
@@ -1014,7 +1032,7 @@ message = "cargo install downloads and compiles arbitrary code from crates.io"
 # =============================================================================
 
 [[rules]]
-description = "info commands"
+id = "info-commands"
 when = '''
   command.name in [null, "echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id",
                    "which", "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type",
@@ -1026,54 +1044,54 @@ action = "allow"
 # the context the outer command gives it.
 
 [[rules]]
-description = "commands that run a command, and export"
+id = "wrappers-and-export"
 when = 'command.name in ["timeout", "nice", "nohup", "xargs", "env", "export"]'
 action = "allow"
 
 [[rules]]
-description = "sudo with a command"
+id = "sudo-with-command"
 command = "sudo"
 when = 'args.command != [] && !args.edit && !args.shell && !args.login'
 action = "allow"
 
 # -o and -F can set a ProxyCommand, which runs on this machine.
 [[rules]]
-description = "ssh with a command"
+id = "ssh-with-command"
 command = "ssh"
 when = 'args.command != [] && args.option == [] && args.config == []'
 action = "allow"
 
 [[rules]]
-description = "sh -c"
+id = "sh-c"
 command = "sh"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
-description = "bash -c"
+id = "bash-c"
 command = "bash"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
-description = "dash -c"
+id = "dash-c"
 command = "dash"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
-description = "zsh -c"
+id = "zsh-c"
 command = "zsh"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
-description = "cd, pushd and popd"
+id = "cd-pushd-popd"
 when = 'command.name in ["cd", "pushd", "popd"]'
 action = "allow"
 
 [[rules]]
-description = "file tools"
+id = "file-tools"
 when = '''
   command.name in ["cat", "less", "more", "wc", "file", "stat", "realpath", "readlink", "diff",
                    "base64", "md5sum", "sha256sum", "uniq", "head", "tail", "ls", "tree", "cut", "sort",
@@ -1083,12 +1101,12 @@ when = '''
 action = "allow"
 
 [[rules]]
-description = "cargo"
+id = "cargo"
 command = "cargo"
 action = "allow"
 
 [[rules]]
-description = "git commands that only read"
+id = "git-reads"
 command = "git"
 when = '''
   subcommand in ["status", "log", "diff", "show", "shortlog", "blame", "ls-files", "ls-tree",
@@ -1097,25 +1115,25 @@ when = '''
 action = "allow"
 
 [[rules]]
-description = "git remote listings"
+id = "git-remote-listings"
 command = "git remote"
 when = 'subcommand in [null, "show", "get-url"]'
 action = "allow"
 
 [[rules]]
-description = "git stash listings"
+id = "git-stash-listings"
 command = "git stash"
 when = 'subcommand in ["list", "show"]'
 action = "allow"
 
 [[rules]]
-description = "git reflog listings"
+id = "git-reflog-listings"
 command = "git reflog"
 when = 'subcommand in [null, "show"]'
 action = "allow"
 
 [[rules]]
-description = "git branch listings"
+id = "git-branch-listings"
 command = "git branch"
 when = '''
   (args.list || args.names == [])
@@ -1125,13 +1143,13 @@ when = '''
 action = "allow"
 
 [[rules]]
-description = "git tag listings"
+id = "git-tag-listings"
 command = "git tag"
 when = '(args.list || args.names == []) && !args.delete'
 action = "allow"
 
 [[rules]]
-description = "git config reads"
+id = "git-config-reads"
 command = "git config"
 when = '''
   !(args.unset || args.unset_all || args.add || args.replace_all || args.edit

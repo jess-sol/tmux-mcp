@@ -6,8 +6,8 @@
 //! Architecture:
 //! 1. Parse the line with brush-parser; each command's grammar parses its words → CommandInfo
 //! 2. Structural checks (parse failure, *Dynamic dispatch*) → hard Deny
-//! 3. Rules: every matching rule counts, the strictest wins, and matching
-//!    *Override rule*s decide alone → Allow/Ask/Deny
+//! 3. Rules: every matching rule that no *Exemption* removes counts, and the
+//!    strictest wins → Allow/Ask/Deny
 //! 4. Most restrictive result across all commands of the line wins
 
 pub mod approval;

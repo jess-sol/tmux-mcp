@@ -29,15 +29,15 @@ fn rules_keep_their_source_order() {
     let (rules, ..) = compile(
         r#"
         [[rules]]
-        description = "first"
+        id = "first"
         action = "allow"
         [[rules]]
-        description = "second"
+        id = "second"
         action = "deny"
         "#,
     )
     .unwrap();
-    let names: Vec<_> = rules.rules.iter().rev().take(2).map(|r| r.description.as_str()).collect();
+    let names: Vec<_> = rules.rules.iter().rev().take(2).map(|r| r.id.as_str()).collect();
     assert_eq!(names, ["second", "first"]);
 }
 
@@ -45,18 +45,26 @@ fn rules_keep_their_source_order() {
 #[test]
 fn a_source_that_breaks_the_format_does_not_load() {
     let rows = [
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = 'args.files == []'", "need a `command`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = 'subcommand == \"x\"'", "need a `command`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\ncommand = \"cat\"\nwhen = 'args.nope'", "`args.nope`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\ncommand = \"git frob\"", "`frob`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\ncommand = \"bench x\"", "no grammar"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\ncommand = \"scripts/bench\"", "`./`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = 'path == \"/\"'", "`path`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\npath = 'host == \"x\"'", "`host`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = 'user == \"root\"'", "`user`"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"maybe\"", "maybe"),
-        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = '@@'", "CEL"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nwhen = 'args.files == []'", "need a `command`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nwhen = 'subcommand == \"x\"'", "need a `command`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = \"cat\"\nwhen = 'args.nope'", "`args.nope`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = \"git frob\"", "`frob`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = \"bench x\"", "no grammar"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = \"scripts/bench\"", "`./`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nwhen = 'path == \"/\"'", "`path`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\npath = 'host == \"x\"'", "`host`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nwhen = 'user == \"root\"'", "`user`"),
+        ("[[rules]]\nid = \"x\"\naction = \"maybe\"", "maybe"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nwhen = '@@'", "CEL"),
         ("[[wrappers]]\nname = \"x\"", "wrappers"),
+        ("[[rules]]\naction = \"allow\"", "`id`"),
+        ("[[rules]]\nid = \"Bad Id\"\naction = \"allow\"", "lowercase"),
+        ("[[rules]]\nid = \"eval\"\naction = \"ask\"", "twice"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nexempts = [\"nope\"]", "`nope`"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nexempts = [\"file-tools\"]", "stricter"),
+        ("[[rules]]\nid = \"x\"\naction = \"ask\"\nexempts = [\"rm-r\"]", "stricter"),
+        ("[[rules]]\nid = \"x\"\ncommand = \"cat\"\naction = \"allow\"\nexempts = [\"outside-project\"]", "per path"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\noverride = true", "override"),
     ];
     for (toml, want) in rows {
         match compile(toml) {
@@ -85,14 +93,14 @@ fn a_policy_file_may_use_toml_1_1_inline_tables() {
     let toml = r#"
         rules = [
           {
-            description = "my tools",
+            id = "my-tools",
             when = 'command.name == "cargo"',
             action = "allow",
           },
         ]
     "#;
     let config = parse_config(toml).unwrap();
-    assert_eq!(config.rules[0].description, "my tools");
+    assert_eq!(config.rules[0].id, "my-tools");
 }
 
 #[test]

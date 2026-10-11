@@ -46,34 +46,53 @@ async fn a_device_redirect_hides_no_rule() {
 }
 
 #[tokio::test]
-async fn an_override_decides_alone() {
+async fn an_exemption_loosens_only_the_rule_it_names() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     h.project_policy(
         r#"
         [[rules]]
-        description = "push freely here"
+        id = "push-force-here"
         command = "git push"
         action = "allow"
-        override = true
+        exempts = ["git-push-force"]
 
         [[rules]]
-        description = "eval is fine here, with a human"
+        id = "eval-asks-here"
         command = "eval"
         action = "ask"
-        override = true
+        exempts = ["eval"]
 
         [[rules]]
-        description = "publishing needs a human"
+        id = "publish-asks"
         command = "cargo publish"
         action = "ask"
+
+        [[rules]]
+        id = "rm-r-build"
+        command = "rm"
+        path = 'path.contains("/build/")'
+        action = "allow"
+        exempts = ["rm-r"]
+
+        [[rules]]
+        id = "hosts-readable"
+        command = "cat"
+        path = 'path == "/etc/hosts"'
+        action = "allow"
+        exempts = ["outside-project"]
         "#,
     );
     let want = [
         ("git push --force origin main", Allow),
+        ("git push --force --delete origin main", Ask),
         ("eval true", Ask),
         ("cargo publish", Ask),
         ("cargo build", Allow),
+        ("rm -r build/x", Allow),
+        ("rm -r build/x /etc/y", Ask),
+        ("cat /etc/hosts", Allow),
+        ("cat /etc/hosts /etc/shadow", Ask),
     ];
 
     let got = want.map(|(command, _)| (command, h.decision(&shell, command)));
@@ -93,7 +112,7 @@ async fn a_rule_reads_the_parts_its_grammar_names() {
         marks.write = ["output"]
 
         [[rules]]
-        description = "staging deploys"
+        id = "staging-deploys"
         command = "deploy"
         when = 'args.targets == ["staging"] && !args.force'
         action = "allow"
@@ -279,7 +298,7 @@ async fn a_command_is_named_by_its_path_from_the_project_root() {
     h.project_policy(
         r#"
         [[rules]]
-        description = "the bench script"
+        id = "the-bench-script"
         command = "./scripts/bench"
         action = "allow"
         "#,
@@ -308,7 +327,7 @@ async fn a_rule_meets_only_this_machine_and_the_shells_own_user_unless_it_says_o
     h.project_policy(
         r#"
         [[rules]]
-        description = "deploys from here"
+        id = "deploys-from-here"
         command = "deploy"
         action = "allow"
         "#,
@@ -316,13 +335,15 @@ async fn a_rule_meets_only_this_machine_and_the_shells_own_user_unless_it_says_o
     h.user_policy(
         r#"
         [[rules]]
-        description = "listing there"
+        id = "listing-there"
         command = "ls"
         host = 'host == "elsewhere"'
+        path = 'true'
         action = "allow"
+        exempts = ["outside-project"]
 
         [[rules]]
-        description = "root may cat"
+        id = "root-may-cat"
         command = "cat"
         user = 'user == "root"'
         action = "allow"
@@ -341,8 +362,14 @@ async fn a_rule_meets_only_this_machine_and_the_shells_own_user_unless_it_says_o
 
     // The prompt reports its host with `hostname`, as a remote shell would.
     h.run(&shell, "hostname() { echo elsewhere; }").await;
-    // `ls` reads a path, and no path there is in the project: the path rule asks on every host.
-    let there = [("deploy", Ask), ("cat notes", Ask), ("ls", Ask), ("eval true", Deny)];
+    // No path there is in the project; the listing rule exempts only the path rule.
+    let there = [
+        ("deploy", Ask),
+        ("cat notes", Ask),
+        ("ls", Allow),
+        ("LD_PRELOAD=x ls", Ask),
+        ("eval true", Deny),
+    ];
     let got_there = there.map(|(command, _)| (command, h.decision(&shell, command)));
 
     assert_eq!(got_here, here);

@@ -1,7 +1,8 @@
-//! Compiling one `[[rules]]` entry: its action, its command path, its CEL,
-//! and the load-time checks of what the CEL reads.
+//! Compiling one `[[rules]]` entry: its id, its action, its command path, its
+//! CEL, and the load-time checks of what the CEL reads; then the ids that
+//! the rules of every source exempt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use cel_parser::ast as cel;
@@ -20,6 +21,9 @@ pub(crate) struct Refs {
 }
 
 pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -> Result<CompiledRule, String> {
+    if !is_id(&config.id) {
+        return Err("an id is lowercase words joined by `-`".into());
+    }
     let action = match config.action.as_str() {
         "allow" => Decision::Allow,
         "deny" => Decision::Deny,
@@ -64,7 +68,7 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
     }
 
     Ok(CompiledRule {
-        description: config.description.clone(),
+        id: config.id.clone(),
         command,
         when,
         path,
@@ -72,10 +76,42 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
         host,
         user,
         action,
-        is_override: config.is_override,
         message: config.message.clone(),
         local_only: is_project,
+        exempts: Vec::new(),
     })
+}
+
+/// Each rule's index by its id, which no two rules of any sources share.
+pub(super) fn ids(rules: &[CompiledRule]) -> Result<HashMap<&str, usize>, String> {
+    let mut ids = HashMap::new();
+    for (i, rule) in rules.iter().enumerate() {
+        if ids.insert(rule.id.as_str(), i).is_some() {
+            return Err(format!("the id `{}` is used twice", rule.id));
+        }
+    }
+    Ok(ids)
+}
+
+/// The rule that rule `i` exempts as `id`: one that exists, is stricter,
+/// and is judged per path only if rule `i` is too.
+pub(super) fn exemption(rules: &[CompiledRule], i: usize, id: &str, ids: &HashMap<&str, usize>) -> Result<usize, String> {
+    let Some(&target) = ids.get(id) else {
+        return Err(format!("`exempts` names `{id}`, which no rule has"));
+    };
+    let (rule, exempted) = (&rules[i], &rules[target]);
+    if crate::policy::severity(&exempted.action) <= crate::policy::severity(&rule.action) {
+        return Err(format!("`{id}` is not stricter: an allow exempts asks and denies, an ask exempts denies"));
+    }
+    if exempted.is_per_path() && !rule.is_per_path() {
+        return Err(format!("`{id}` is judged per path, so the rule that exempts it needs `path` or `write`"));
+    }
+    Ok(target)
+}
+
+fn is_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.split('-').all(|word| !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
 }
 
 /// cel-parser panics on some malformed input (`@@`), so a panic is a parse

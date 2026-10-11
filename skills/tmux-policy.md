@@ -28,7 +28,7 @@ A policy file that does not load denies every command until it is fixed.
 
 ```toml
 [[rules]]
-description = "short name"
+id = "git-stash-listings"              # lowercase words joined by `-`, unique across all sources
 command = "git stash"                  # the command path; matches it and the subcommands below it
 when = 'subcommand in ["list", "show"]'  # CEL over args.<name>, subcommand, command.name, variables
 action = "allow"                       # or "ask" or "deny"
@@ -37,10 +37,12 @@ action = "allow"                       # or "ask" or "deny"
 # host = 'host == "prod"'              # an allow without host matches only this machine; an ask or deny every host
 # user = 'user == "root"'              # an allow without user matches only the shell's own user; an ask or deny every user
 # message = "shown when triggered"
-# override = true                      # an override rule decides alone when it matches
+# exempts = ["outside-project"]        # stricter rules that do not count while this one surely matches
 ```
 
-Every matching rule counts, and the strictest wins: deny, then ask, then allow. Default is `ask`. An Unknown condition fires ask and deny rules, never allow or override rules.
+Every matching rule counts, and the strictest wins: deny, then ask, then allow. Default is `ask`. An Unknown condition fires ask and deny rules, never allow rules. A reason starts with the id of the rule that decided.
+
+To loosen a rule from another file, name its id in `exempts` on a rule that matches only what should pass: an allow exempts asks and denies, an ask exempts denies. To exempt a rule with `path`, the exempting rule needs `path` too, and it exempts only the paths it matches.
 
 A rule reads a command's parts by name (`args.force`), which its grammar (`[commands.<name>]`) declares. To allow a command with conditions on its arguments, check that a built-in grammar exists for it, or add one.
 

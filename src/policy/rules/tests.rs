@@ -73,21 +73,20 @@ fn cel_parser_names_operators_and_macros() {
 // --- Matching and combining ---
 
 #[test]
-fn a_rule_that_may_match_fires_unless_it_allows_or_overrides() {
+fn a_rule_that_may_match_fires_unless_it_allows() {
     const UNSURE: &str = "rule (could not be ruled out)";
-    // (override, action, when, beside, over a non-exhaustive xs, over an exhaustive xs):
+    // (action, when, beside, over a non-exhaustive xs, over an exhaustive xs):
     // each rule sits beside a rule of action `beside`, over xs = ["x"].
     let rows = [
-        ("false", "ask", r#"args.xs.exists(a, a == "-r")"#, "allow", (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
-        ("false", "ask", r#"(args.xs + ["y"]).exists(a, a == "-r")"#, "allow", (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
-        ("false", "deny", r#""-r" in args.xs"#, "allow", (Decision::Deny, UNSURE), (Decision::Allow, "beside")),
-        ("false", "allow", r#"!args.xs.exists(a, a == "-r")"#, "ask", (Decision::Ask, "beside"), (Decision::Ask, "beside")),
-        ("true", "allow", r#"args.xs.exists(a, a == "-r")"#, "ask", (Decision::Ask, "beside"), (Decision::Ask, "beside")),
+        ("ask", r#"args.xs.exists(a, a == "-r")"#, "allow", (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
+        ("ask", r#"(args.xs + ["y"]).exists(a, a == "-r")"#, "allow", (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
+        ("deny", r#""-r" in args.xs"#, "allow", (Decision::Deny, UNSURE), (Decision::Allow, "beside")),
+        ("allow", r#"!args.xs.exists(a, a == "-r")"#, "ask", (Decision::Ask, "beside"), (Decision::Ask, "beside")),
     ];
-    for (is_override, action, when, beside, incomplete, complete) in rows {
+    for (action, when, beside, incomplete, complete) in rows {
         let rules = ruleset(&format!(
-            "[[rules]]\ndescription = \"rule\"\ncommand = \"t\"\nwhen = '{when}'\naction = \"{action}\"\noverride = {is_override}\n\
-             [[rules]]\ndescription = \"beside\"\naction = \"{beside}\"\n"
+            "[[rules]]\nid = \"rule\"\ncommand = \"t\"\nwhen = '{when}'\naction = \"{action}\"\n\
+             [[rules]]\nid = \"beside\"\naction = \"{beside}\"\n"
         ));
         for (exhaustive, want) in [(false, incomplete), (true, complete)] {
             let got = decide(&rules, &facts_with_xs(strings(&["x"], exhaustive)), &env());
@@ -96,13 +95,83 @@ fn a_rule_that_may_match_fires_unless_it_allows_or_overrides() {
     }
 }
 
+/// An *Exemption* removes the rule it names only where its own rule
+/// surely matches: on the command, or on each path.
+#[test]
+fn an_exemption_removes_the_named_rule_only_where_its_rule_surely_matches() {
+    let rules = ruleset(
+        r#"
+        [[rules]]
+        id = "out"
+        path = '!in_project(path)'
+        action = "ask"
+        [[rules]]
+        id = "hosts"
+        path = 'path == "/etc/hosts"'
+        action = "allow"
+        exempts = ["out"]
+        [[rules]]
+        id = "x-flag"
+        command = "t"
+        when = '"-x" in args.xs'
+        action = "deny"
+        [[rules]]
+        id = "x-asks"
+        command = "t"
+        when = 'args.xs.exists(a, a == "-x")'
+        action = "ask"
+        exempts = ["x-flag"]
+        [[rules]]
+        id = "y-allows"
+        command = "t"
+        when = '"-y" in args.xs'
+        action = "allow"
+        exempts = ["x-asks"]
+        "#,
+    );
+    let under_tmp = ruleset(
+        r#"
+        [[rules]]
+        id = "x-flag"
+        command = "t"
+        when = '"-x" in args.xs'
+        action = "deny"
+        [[rules]]
+        id = "under-tmp"
+        command = "t"
+        path = 'path.startsWith("/tmp/")'
+        action = "allow"
+        exempts = ["x-flag"]
+        "#,
+    );
+    // (rules, xs, paths, decision, rule)
+    let rows = [
+        (&rules, strings(&[], true), strings(&["/etc/hosts"], true), Decision::Allow, "hosts"),
+        (&rules, strings(&[], true), strings(&["/etc/hosts", "/etc/shadow"], true), Decision::Ask, "out"),
+        (&rules, strings(&["-x"], true), strings(&[], true), Decision::Ask, "x-asks"),
+        // An exempting rule that may match exempts nothing.
+        (&rules, strings(&[], false), strings(&[], true), Decision::Deny, "x-flag (could not be ruled out)"),
+        // An exempted rule's own exemptions do not apply.
+        (&rules, strings(&["-x", "-y"], true), strings(&[], true), Decision::Deny, "x-flag"),
+        // A path rule exempts a command rule only over every path of an exhaustive list.
+        (&under_tmp, strings(&["-x"], true), strings(&["/tmp/a"], true), Decision::Allow, "under-tmp"),
+        (&under_tmp, strings(&["-x"], true), strings(&["/tmp/a", "/etc/b"], true), Decision::Deny, "x-flag"),
+        (&under_tmp, strings(&["-x"], true), strings(&["/tmp/a"], false), Decision::Deny, "x-flag"),
+    ];
+    for (rules, xs, paths, decision, rule) in rows {
+        let facts = Facts { paths: paths.clone(), ..facts_with_xs(xs.clone()) };
+        let got = decide(rules, &facts, &env());
+        assert_eq!((got.decision, got.rule.as_str()), (decision, rule), "xs={xs:?}, paths={paths:?}");
+    }
+}
+
 /// An ask or deny rule without `host` meets every host; an allow rule
 /// without it only this machine, and `host` loosens it.
 #[test]
 fn a_rule_is_strict_by_default_and_its_host_loosens_an_allow() {
-    let strict = ruleset("[[rules]]\ndescription = \"strict\"\naction = \"deny\"\n");
-    let here = ruleset("[[rules]]\ndescription = \"here\"\naction = \"allow\"\n");
-    let prod = ruleset("[[rules]]\ndescription = \"prod\"\nhost = 'host == \"prod\"'\naction = \"allow\"\n");
+    let strict = ruleset("[[rules]]\nid = \"strict\"\naction = \"deny\"\n");
+    let here = ruleset("[[rules]]\nid = \"here\"\naction = \"allow\"\n");
+    let prod = ruleset("[[rules]]\nid = \"prod\"\nhost = 'host == \"prod\"'\naction = \"allow\"\n");
     // (host, strict, here, prod)
     let rows = [
         (Host::Here, Decision::Deny, Decision::Allow, Decision::Ask),
@@ -120,9 +189,9 @@ fn a_rule_is_strict_by_default_and_its_host_loosens_an_allow() {
 /// without it only the shell's own user, and `user` loosens it.
 #[test]
 fn a_rule_is_strict_by_default_and_its_user_loosens_an_allow() {
-    let strict = ruleset("[[rules]]\ndescription = \"strict\"\naction = \"ask\"\n");
-    let own = ruleset("[[rules]]\ndescription = \"own\"\naction = \"allow\"\n");
-    let root = ruleset("[[rules]]\ndescription = \"root\"\nuser = 'user == \"root\"'\naction = \"allow\"\n");
+    let strict = ruleset("[[rules]]\nid = \"strict\"\naction = \"ask\"\n");
+    let own = ruleset("[[rules]]\nid = \"own\"\naction = \"allow\"\n");
+    let root = ruleset("[[rules]]\nid = \"root\"\nuser = 'user == \"root\"'\naction = \"allow\"\n");
     let u = |name: &str| TriVal::String(name.into());
     // (user, own_user, strict, own, root)
     let rows = [
@@ -140,7 +209,7 @@ fn a_rule_is_strict_by_default_and_its_user_loosens_an_allow() {
 
 #[test]
 fn a_project_rule_applies_only_on_this_machine() {
-    let config = parse_config("[[rules]]\ndescription = \"p\"\naction = \"deny\"").unwrap();
+    let config = parse_config("[[rules]]\nid = \"p\"\naction = \"deny\"").unwrap();
     let rules = compile(&[(config.rules[0].clone(), true)], Decision::Ask, &Grammars::default()).unwrap();
     assert_eq!(decide(&rules, &on(Host::There("prod".into())), &env()).decision, Decision::Ask);
     assert_eq!(decide(&rules, &on(Host::Here), &env()).decision, Decision::Deny);
@@ -148,7 +217,7 @@ fn a_project_rule_applies_only_on_this_machine() {
 
 #[test]
 fn a_path_rule_holds_for_any_path_and_is_unsure_over_an_open_list() {
-    let rules = ruleset("[[rules]]\ndescription = \"out\"\npath = '!in_project(path)'\naction = \"ask\"\n");
+    let rules = ruleset("[[rules]]\nid = \"out\"\npath = '!in_project(path)'\naction = \"ask\"\n");
     let rows = [
         (strings(&["/src/proj/a"], true), "default"),
         (strings(&["/src/proj/a", "/etc/x"], true), "out"),

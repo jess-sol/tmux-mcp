@@ -22,7 +22,8 @@ pub struct PolicyConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleConfig {
-    pub description: String,
+    /// Lowercase words joined by `-`, unique across all sources.
+    pub id: String,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -36,12 +37,11 @@ pub struct RuleConfig {
     #[serde(default)]
     pub user: Option<String>,
     pub action: String,
-    /// An *Override rule*: when any matches, the strictest matching override
-    /// decides and the other rules do not count.
-    #[serde(default, rename = "override")]
-    pub is_override: bool,
     #[serde(default)]
     pub message: Option<String>,
+    /// The ids of the stricter rules it exempts: its *Exemption*s.
+    #[serde(default)]
+    pub exempts: Vec<String>,
 }
 
 /// One level of a grammar: `[commands.<name>]` or `[commands.<name>.<word>]`.

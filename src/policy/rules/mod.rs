@@ -4,7 +4,8 @@
 //! the command runs as, `command` the command path, `when` its parts, `path`
 //! and `write` the paths it touches. CEL is evaluated with three-valued logic
 //! (True/False/Unknown): `Unknown == "root"` → Unknown, `Unknown != "root"`
-//! → Unknown. The evaluator also serves the grammars' `with` keys.
+//! → Unknown. The evaluator also serves the grammars' `with` keys. A rule
+//! loosens a stricter one only through an *Exemption* of its id.
 
 mod compile;
 mod eval;
@@ -12,7 +13,7 @@ mod identity;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use cel_parser::ast as cel;
@@ -31,7 +32,7 @@ pub(crate) use identity::resolve;
 // --- Types ---
 
 pub struct CompiledRule {
-    pub description: String,
+    pub id: String,
     /// The command path: an identity, then subcommand words.
     command: Option<Vec<String>>,
     when: Option<cel::IdedExpr>,
@@ -40,11 +41,11 @@ pub struct CompiledRule {
     host: Option<cel::IdedExpr>,
     user: Option<cel::IdedExpr>,
     pub action: Decision,
-    /// An *Override rule*: it decides alone when it matches.
-    pub is_override: bool,
     pub message: Option<String>,
     /// A project rule, which applies only on this machine.
     local_only: bool,
+    /// The indices of the stricter rules it exempts.
+    exempts: Vec<usize>,
 }
 
 pub struct RuleSet {
@@ -97,24 +98,61 @@ enum Match {
     Unknown,
 }
 
+/// How one rule meets one command: its keys judged on the command, and its
+/// `path` and `write` keys judged on each path.
+struct Meeting {
+    command: TriBool,
+    path: Option<PathTruths>,
+    write: Option<PathTruths>,
+}
+
+/// One key judged on each path of a list.
+struct PathTruths {
+    each: Vec<(TriVal, TriBool)>,
+    exhaustive: bool,
+}
+
+/// Where an *Exemption* stops a rule counting: on the command, or on paths.
+#[derive(Default, Clone)]
+struct Exempted {
+    whole: bool,
+    paths: HashSet<String>,
+}
+
 // --- Public API ---
 
-/// Compiles rules, each paired with whether it comes from the project, and
-/// checks what each reads against the grammars.
+/// Compiles rules, each paired with whether it comes from the project:
+/// checks what each reads against the grammars, and resolves the ids that
+/// each exempts across all sources.
 pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Grammars) -> Result<RuleSet, String> {
-    let rules = configs
+    let mut rules: Vec<CompiledRule> = configs
         .iter()
         .map(|(config, is_project)| {
-            compile::rule(config, *is_project, grammars).map_err(|e| format!("rule `{}`: {e}", config.description))
+            compile::rule(config, *is_project, grammars).map_err(|e| format!("rule `{}`: {e}", config.id))
         })
         .collect::<Result<_, _>>()?;
+    let ids = compile::ids(&rules)?;
+    let exempts = configs
+        .iter()
+        .enumerate()
+        .map(|(i, (config, _))| {
+            config
+                .exempts
+                .iter()
+                .map(|id| compile::exemption(&rules, i, id, &ids))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("rule `{}`: {e}", config.id))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (rule, exempts) in rules.iter_mut().zip(exempts) {
+        rule.exempts = exempts;
+    }
     Ok(RuleSet { rules, default })
 }
 
-/// The decision of `rules` for one command. Every matching rule counts, and
-/// the strictest action wins: deny, then ask, then allow. *Override rule*s
-/// are a group of their own: when any matches, the strictest override
-/// decides and the other rules do not count. No match gives the default.
+/// The decision of `rules` for one command. Every rule that matches and is
+/// not exempted counts, and the strictest action wins: deny, then ask, then
+/// allow. No match gives the default.
 pub(crate) fn evaluate(cmd: &CommandInfo, env: &Env, rules: &RuleSet) -> PolicyResult {
     decide(rules, &Facts::of(cmd, env), env)
 }
@@ -171,62 +209,159 @@ impl Facts {
     }
 }
 
+/// The result of the strictest rule that matches and is not exempted; on a
+/// tie, the first one. No match gives the default.
 fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> PolicyResult {
-    let strictest = |overrides: bool| {
-        strictest_match(rules.rules.iter().filter(|r| r.is_override == overrides), facts, env)
-    };
-
-    strictest(true).or_else(|| strictest(false)).unwrap_or_else(|| PolicyResult {
-        decision: rules.default.clone(),
-        rule: "default".to_string(),
-    })
-}
-
-/// The result of the strictest matching rule; on a tie, the first one.
-fn strictest_match<'a>(
-    rules: impl Iterator<Item = &'a CompiledRule>,
-    facts: &Facts,
-    env: &Env,
-) -> Option<PolicyResult> {
+    let meetings: Vec<Meeting> = rules.rules.iter().map(|rule| meet(rule, facts, env)).collect();
+    let exempted = exemptions(rules, &meetings, facts);
     let mut strictest: Option<PolicyResult> = None;
-    for rule in rules {
-        let Some(matched) = rule_match(rule, facts, env) else { continue };
+    for ((rule, meeting), exempted) in rules.rules.iter().zip(&meetings).zip(&exempted) {
+        if exempted.whole {
+            continue;
+        }
+        let Some(matched) = rule_match(rule, meeting.truth(&exempted.paths)) else { continue };
         if strictest.as_ref().is_none_or(|s| super::severity(&rule.action) > super::severity(&s.decision)) {
             strictest = Some(rule_result(rule, matched));
         }
     }
-    strictest
+    strictest.unwrap_or_else(|| PolicyResult { decision: rules.default.clone(), rule: "default".to_string() })
 }
 
-/// Unknown fails closed: it matches a deny or ask rule, never an allow rule,
-/// and never an override, whose match switches the other rules off.
-fn rule_match(rule: &CompiledRule, facts: &Facts, env: &Env) -> Option<Match> {
-    match rule_truth(rule, facts, env) {
+/// The *Exemption*s that apply, loosest rules first: allows exempt asks and
+/// denies, then the asks that still count exempt denies. A rule exempts only
+/// while it surely matches, and an exempted rule's own exemptions do not
+/// apply where it is exempted.
+fn exemptions(rules: &RuleSet, meetings: &[Meeting], facts: &Facts) -> Vec<Exempted> {
+    let mut exempted = vec![Exempted::default(); rules.rules.len()];
+    let paths: Vec<&str> = match &facts.paths {
+        TriVal::List { elements, .. } => elements.iter().filter_map(text).collect(),
+        _ => Vec::new(),
+    };
+    for action in [Decision::Allow, Decision::Ask] {
+        for (i, rule) in rules.rules.iter().enumerate().filter(|(_, r)| r.action == action) {
+            let own = exempted[i].clone();
+            if own.whole || meetings[i].truth(&own.paths) != TriBool::True {
+                continue;
+            }
+            for &target in &rule.exempts {
+                if rules.rules[target].is_per_path() {
+                    let sure = paths.iter().filter(|p| !own.paths.contains(**p) && meetings[i].sure_on(p));
+                    exempted[target].paths.extend(sure.map(|p| p.to_string()));
+                } else if !rule.is_per_path() || own.paths.is_empty() && meetings[i].sure_on_every() {
+                    exempted[target].whole = true;
+                }
+            }
+        }
+    }
+    exempted
+}
+
+/// Unknown fails closed: it matches a deny or ask rule, never an allow rule.
+fn rule_match(rule: &CompiledRule, truth: TriBool) -> Option<Match> {
+    match truth {
         TriBool::True => Some(Match::True),
-        TriBool::Unknown if rule.action != Decision::Allow && !rule.is_override => Some(Match::Unknown),
+        TriBool::Unknown if rule.action != Decision::Allow => Some(Match::Unknown),
         _ => None,
     }
 }
 
-/// A rule matches when every key it has matches.
-fn rule_truth(rule: &CompiledRule, facts: &Facts, env: &Env) -> TriBool {
+/// How `rule` meets the command: every key but `path` and `write` judged on
+/// the command, and those two judged on each path.
+fn meet(rule: &CompiledRule, facts: &Facts, env: &Env) -> Meeting {
     let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
-    let mut truth = host_match(rule, facts, env);
-    if truth != TriBool::False {
-        truth = truth.and(user_match(rule, facts));
+    let mut command = host_match(rule, facts, env);
+    if command != TriBool::False {
+        command = command.and(user_match(rule, facts));
     }
-    if truth != TriBool::False {
-        truth = truth.and(command_match(rule, facts));
+    if command != TriBool::False {
+        command = command.and(command_match(rule, facts));
     }
-    if let (Some(when), false) = (&rule.when, truth == TriBool::False) {
-        truth = truth.and(eval_expr(&when.expr, &when_ctx(rule, facts, site)).is_truthy());
+    if let (Some(when), false) = (&rule.when, command == TriBool::False) {
+        command = command.and(eval_expr(&when.expr, &when_ctx(rule, facts, site)).is_truthy());
     }
-    for (key, paths) in [(&rule.path, &facts.paths), (&rule.write, &facts.writes)] {
-        if let (Some(expr), false) = (key, truth == TriBool::False) {
-            truth = truth.and(any_path(expr, paths, site));
+    let judge = |key: &Option<cel::IdedExpr>, paths: &TriVal| key.as_ref().map(|expr| PathTruths::judge(expr, paths, site));
+    Meeting { command, path: judge(&rule.path, &facts.paths), write: judge(&rule.write, &facts.writes) }
+}
+
+impl CompiledRule {
+    /// It has `path` or `write`, so it is judged on each path.
+    fn is_per_path(&self) -> bool {
+        self.path.is_some() || self.write.is_some()
+    }
+}
+
+impl Meeting {
+    /// The rule matches when every key it has matches; its `path` and
+    /// `write` keys skip the paths it is exempted on.
+    fn truth(&self, exempted: &HashSet<String>) -> TriBool {
+        let mut truth = self.command;
+        for key in [&self.path, &self.write].into_iter().flatten() {
+            truth = truth.and(key.any(exempted));
         }
+        truth
     }
-    truth
+
+    /// Every key surely holds on the command and on `path`.
+    fn sure_on(&self, path: &str) -> bool {
+        self.command == TriBool::True
+            && [&self.path, &self.write].into_iter().flatten().all(|key| key.at(path) == TriBool::True)
+    }
+
+    /// Every key surely holds on the command and on every path of an
+    /// exhaustive list.
+    fn sure_on_every(&self) -> bool {
+        self.command == TriBool::True
+            && [&self.path, &self.write]
+                .into_iter()
+                .flatten()
+                .all(|key| key.exhaustive && key.each.iter().all(|(_, t)| *t == TriBool::True))
+    }
+}
+
+impl PathTruths {
+    fn judge(expr: &cel::IdedExpr, paths: &TriVal, site: Site) -> PathTruths {
+        let TriVal::List { elements, exhaustive } = paths else {
+            return PathTruths { each: Vec::new(), exhaustive: false };
+        };
+        let each = elements
+            .iter()
+            .map(|path| {
+                let vars = HashMap::from([("path".to_string(), path.clone())]);
+                let ctx = Ctx { vars, site: Some(site), home: TriVal::Unknown };
+                (path.clone(), eval_expr(&expr.expr, &ctx).is_truthy())
+            })
+            .collect();
+        PathTruths { each, exhaustive: *exhaustive }
+    }
+
+    /// True when the key holds for any path but the exempted ones; over a
+    /// non-exhaustive list, only a path that holds is certain.
+    fn any(&self, exempted: &HashSet<String>) -> TriBool {
+        let mut truth = TriBool::False;
+        for (path, t) in &self.each {
+            if text(path).is_some_and(|p| exempted.contains(p)) {
+                continue;
+            }
+            truth = truth.or(*t);
+            if truth == TriBool::True {
+                return truth;
+            }
+        }
+        if self.exhaustive { truth } else { TriBool::Unknown }
+    }
+
+    /// The key on `path`; False for a path it does not judge.
+    fn at(&self, path: &str) -> TriBool {
+        self.each.iter().find(|(p, _)| text(p) == Some(path)).map_or(TriBool::False, |(_, t)| *t)
+    }
+}
+
+/// A known path; an Unknown one is never exempted.
+fn text(path: &TriVal) -> Option<&str> {
+    match path {
+        TriVal::String(p) => Some(p),
+        _ => None,
+    }
 }
 
 /// Rules are strict by default: an ask or deny rule without `host` matches
@@ -293,25 +428,11 @@ fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
     Ctx { vars, site: Some(site), home: TriVal::Unknown }
 }
 
-/// True when `expr` holds for any path; over a non-exhaustive list, only a
-/// path that holds is certain.
-fn any_path(expr: &cel::IdedExpr, paths: &TriVal, site: Site) -> TriBool {
-    let TriVal::List { elements, exhaustive } = paths else { return TriBool::Unknown };
-    let mut truth = TriBool::False;
-    for path in elements {
-        let ctx = Ctx { vars: HashMap::from([("path".to_string(), path.clone())]), site: Some(site), home: TriVal::Unknown };
-        truth = truth.or(eval_expr(&expr.expr, &ctx).is_truthy());
-        if truth == TriBool::True {
-            return truth;
-        }
-    }
-    if *exhaustive { truth } else { TriBool::Unknown }
-}
-
+/// The reason starts with the rule's id, the name an *Exemption* uses.
 fn rule_result(rule: &CompiledRule, matched: Match) -> PolicyResult {
     let mut rule_desc = match &rule.message {
-        Some(msg) => format!("{}: {}", rule.description, msg),
-        None => rule.description.clone(),
+        Some(msg) => format!("{}: {}", rule.id, msg),
+        None => rule.id.clone(),
     };
     if let Match::Unknown = matched {
         // Tells the model what fired the rule, so it can write the command
