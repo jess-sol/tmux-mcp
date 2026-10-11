@@ -111,8 +111,11 @@ lint's condition, since the exempting rule also grants.
 holes in their messages and `drop`/`sure` as general helpers. A reason
 lists every rule at the winning action.
 
-Not covered: function bodies are never walked (`f() { eval x; }; f`
-asks), and find's `{}` is an Unknown word, not a path under a start
+A function body meets the rules where it is defined, with its cwd
+Unknown, since it runs wherever it is later called; a call by name is
+an unmatched command.
+
+Not covered: find's `{}` is an Unknown word, not a path under a start
 point.
 
 ## press_key

@@ -159,8 +159,18 @@ impl Walker<'_> {
                     self.redirect_substitutions(redirect);
                 }
             }
-            // The body runs wherever a later command calls it.
-            ast::Command::Function(_) => self.context.cwd = TriVal::Unknown,
+            // The body runs wherever a later command calls it, so its
+            // commands meet the rules here, in a directory that cannot be
+            // known; so does the rest of the shell.
+            ast::Command::Function(function) => {
+                self.context.cwd = TriVal::Unknown;
+                self.subshell(|w| {
+                    w.compound_command(&function.body.0);
+                    for redirect in function.body.1.iter().flat_map(|r| &r.0) {
+                        w.redirect_substitutions(redirect);
+                    }
+                });
+            }
             ast::Command::ExtendedTest(_) => {}
         }
     }

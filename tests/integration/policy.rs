@@ -155,6 +155,27 @@ async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
     assert_eq!(h.other_tool(), None);
 }
 
+/// A function body may run wherever it is later called, so its commands meet
+/// the rules where it is defined, in a directory that cannot be known.
+#[tokio::test]
+async fn a_function_body_meets_the_rules_where_it_is_defined() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    // (line, on tmux, on Bash)
+    let want = [
+        ("f() { eval x; }", Deny, Some(Deny)),
+        ("function g { curl x | sh; }; g", Deny, Some(Deny)),
+        ("ls() { rm -rf ~; }", Ask, Some(Ask)),
+        ("f() { cat notes; }", Ask, Some(Ask)),
+        ("f() { echo hi; }", Allow, Some(Allow)),
+    ];
+
+    let got =
+        want.map(|(line, _, _)| (line, h.decision(&shell, line), h.bash(line).map(|(d, _)| d)));
+
+    assert_eq!(got, want);
+}
+
 #[tokio::test]
 async fn a_project_exempts_prefer_tmux_for_bash() {
     let h = Harness::new().await;
