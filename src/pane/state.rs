@@ -53,6 +53,10 @@ pub struct TerminalState {
     pub user: Option<String>,
     /// Hostname (from OSC 7, None if localhost).
     pub hostname: Option<String>,
+    /// OSC 7 reported `cwd` and `hostname` since the last command started
+    /// (OSC 133 C). While a command runs, a session it opens (`ssh`) can
+    /// leave the last report standing for another machine.
+    pub osc7_since_command: bool,
     /// Next sequence number.
     seq_counter: u64,
     /// Incremented on every D marker (command completion signal).
@@ -85,6 +89,7 @@ impl TerminalState {
             cwd: None,
             user: None,
             hostname: None,
+            osc7_since_command: false,
             seq_counter: 0,
             completion_seq: 0,
             last_exit_code: None,
@@ -202,6 +207,7 @@ impl TerminalState {
 
         self.user = user.filter(|u| !u.is_empty()).map(|u| u.to_string());
         self.cwd = path.map(|p| p.to_string());
+        self.osc7_since_command = true;
 
         // Filter localhost variants
         self.hostname = if hostname.is_empty()

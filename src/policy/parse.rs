@@ -2,47 +2,49 @@
 //!
 //! Parses a command string into a flat list of `CommandInfo` nodes, one per
 //! command that will execute. Pipelines, logical operators, compound commands
-//! and command substitutions produce additional independent entries.
+//! and command substitutions produce additional independent entries. Each
+//! command's words lose their quotes, and its grammar parses them into parts.
+
+use std::collections::BTreeMap;
 
 use brush_parser::ast;
-use brush_parser::word::WordPiece;
+use brush_parser::word::{BraceExpressionOrText, WordPiece};
+
+pub use super::grammar::Grammars;
+use super::rules::TriVal;
 
 // --- Types ---
 
 /// Information about a single command that will execute.
 #[derive(Debug, Clone)]
 pub struct CommandInfo {
-    /// Command name (always a literal string — structural check denies expansions).
+    /// The command name as written, quotes included.
     pub name: String,
-    /// Literal arguments we can see.
-    pub args: Vec<String>,
-    /// False if dynamic/unknown args possible (expansions, stdin args, etc.).
-    pub args_complete: bool,
     /// Shell redirects attached to this command.
     pub redirects: Vec<RedirectInfo>,
+    /// The subcommand words below the command name: a list that ends in
+    /// Unknown when a word cannot be known or is not one the grammar allows.
+    pub subcommands: TriVal,
+    /// The parts of every level that parsed, by name.
+    pub args: BTreeMap<String, TriVal>,
+    /// The directory the command runs in, relative to the shell's: Null when
+    /// the grammar marks none.
+    pub cwd: TriVal,
+    /// The words the grammar marks as read paths, relative to `cwd`.
+    pub reads: TriVal,
+    /// The words the grammar marks as write paths, relative to `cwd`.
+    pub writes: TriVal,
 }
 
 /// A shell redirect (>, >>, <, etc.) attached to a command.
 #[derive(Debug, Clone)]
 pub struct RedirectInfo {
-    /// The target path/word.
+    /// The target path without its quotes; as written when `has_expansion`.
     pub target: String,
-    /// True for write redirects (>, >>, &>, >|). False for read (<, <<, <<<).
+    /// True for write redirects (>, >>, &>, >|). False for read (<).
     pub is_write: bool,
-    /// True if target contains expansions ($(), ${}, etc.).
+    /// True when the target cannot be known before it runs.
     pub has_expansion: bool,
-}
-
-impl CommandInfo {
-    #[cfg(test)]
-    pub(crate) fn simple(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            args: Vec::new(),
-            args_complete: true,
-            redirects: Vec::new(),
-        }
-    }
 }
 
 /// Error returned when brush-parser can't parse the command.
@@ -51,14 +53,54 @@ pub struct ParseError {
     pub message: String,
 }
 
+/// One word of a command after quote removal.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Word {
+    Known(String),
+    /// Expanded at run time. `splits` when it can become several words, or none.
+    Unknown { splits: bool },
+}
+
 // --- Public API ---
 
 /// Parse a command string into the flat list of commands it runs.
-pub fn parse_command(command: &str) -> Result<Vec<CommandInfo>, ParseError> {
+pub fn parse_command(command: &str, grammars: &Grammars) -> Result<Vec<CommandInfo>, ParseError> {
     let program = parse_with_brush(command)?;
     let mut commands = Vec::new();
-    extract_from_program(&program, &mut commands);
+    Walker { grammars, out: &mut commands }.program(&program);
     Ok(commands)
+}
+
+/// The text of a word without its quotes, or None when the shell expands it.
+pub(crate) fn literal(raw: &str) -> Option<String> {
+    match word(raw) {
+        Word::Known(text) => Some(text),
+        Word::Unknown { .. } => None,
+    }
+}
+
+/// A word as the command receives it: quotes removed, or Unknown when the
+/// shell expands it. Glob and `~user` words stay as written; a brace word is
+/// Unknown, since it can become several words.
+pub(crate) fn word(raw: &str) -> Word {
+    let options = brush_parser::ParserOptions::default();
+    if let Ok(Some(pieces)) = brush_parser::word::parse_brace_expansions(raw, &options)
+        && pieces.iter().any(|p| matches!(p, BraceExpressionOrText::Expr(_)))
+    {
+        return Word::Unknown { splits: true };
+    }
+    let Ok(pieces) = brush_parser::word::parse(raw, &options) else {
+        return Word::Unknown { splits: true };
+    };
+    let mut text = String::new();
+    let mut unknown: Option<bool> = None;
+    for piece in &pieces {
+        append_piece(&piece.piece, false, raw, &mut text, &mut unknown);
+    }
+    match unknown {
+        Some(splits) => Word::Unknown { splits },
+        None => Word::Known(text),
+    }
 }
 
 // --- brush-parser integration ---
@@ -71,233 +113,204 @@ fn parse_with_brush(command: &str) -> Result<ast::Program, ParseError> {
         &brush_parser::ParserOptions::default(),
         &brush_parser::SourceInfo::default(),
     );
-    parser
-        .parse_program()
-        .map_err(|e| ParseError { message: format!("{}", e) })
+    parser.parse_program().map_err(|e| ParseError { message: format!("{}", e) })
 }
 
 // --- AST walking ---
 
-fn extract_from_program(program: &ast::Program, out: &mut Vec<CommandInfo>) {
-    for cc in &program.complete_commands {
-        extract_from_compound_list(cc, out);
-    }
+struct Walker<'a> {
+    grammars: &'a Grammars,
+    out: &'a mut Vec<CommandInfo>,
 }
 
-fn extract_from_compound_list(list: &ast::CompoundList, out: &mut Vec<CommandInfo>) {
-    for item in &list.0 {
-        extract_from_and_or_list(&item.0, out);
+impl Walker<'_> {
+    fn program(&mut self, program: &ast::Program) {
+        for cc in &program.complete_commands {
+            self.compound_list(cc);
+        }
     }
-}
 
-fn extract_from_and_or_list(and_or: &ast::AndOrList, out: &mut Vec<CommandInfo>) {
-    extract_from_pipeline(&and_or.first, out);
-    for additional in &and_or.additional {
-        let pipeline = match additional {
-            ast::AndOr::And(p) | ast::AndOr::Or(p) => p,
+    fn compound_list(&mut self, list: &ast::CompoundList) {
+        for item in &list.0 {
+            self.and_or_list(&item.0);
+        }
+    }
+
+    fn and_or_list(&mut self, and_or: &ast::AndOrList) {
+        self.pipeline(&and_or.first);
+        for additional in &and_or.additional {
+            let pipeline = match additional {
+                ast::AndOr::And(p) | ast::AndOr::Or(p) => p,
+            };
+            self.pipeline(pipeline);
+        }
+    }
+
+    fn pipeline(&mut self, pipeline: &ast::Pipeline) {
+        for command in &pipeline.seq {
+            match command {
+                ast::Command::Simple(simple) => self.simple_command(simple),
+                ast::Command::Compound(compound, _) => self.compound_command(compound),
+                ast::Command::Function(_) | ast::Command::ExtendedTest(_) => {}
+            }
+        }
+    }
+
+    /// A simple command, followed by the commands of its substitutions.
+    fn simple_command(&mut self, simple: &ast::SimpleCommand) {
+        let Some(name) = &simple.word_or_name else { return };
+        let prefix = simple.prefix.iter().flat_map(|p| &p.0).map(|item| (item, false));
+        let suffix = simple.suffix.iter().flat_map(|s| &s.0).map(|item| (item, true));
+        let mut words = Vec::new();
+        let mut raw_words = Vec::new();
+        for (item, in_suffix) in prefix.chain(suffix) {
+            match item {
+                ast::CommandPrefixOrSuffixItem::Word(w) => {
+                    if in_suffix {
+                        words.push(word(&w.value));
+                    }
+                    raw_words.push(w.value.clone());
+                }
+                ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
+                    if in_suffix {
+                        words.push(Word::Unknown { splits: false });
+                    }
+                    self.compound_list(&subshell.list);
+                }
+                _ => {}
+            }
+        }
+
+        let parsed = match literal(&name.value) {
+            Some(n) => self.grammars.parse(&n, &words),
+            None => self.grammars.parse("", &[]),
         };
-        extract_from_pipeline(pipeline, out);
+        let items = simple.prefix.iter().flat_map(|p| &p.0).chain(simple.suffix.iter().flat_map(|s| &s.0));
+        self.out.push(CommandInfo {
+            name: name.value.clone(),
+            redirects: redirects(items),
+            subcommands: parsed.subcommands,
+            args: parsed.args,
+            cwd: parsed.cwd,
+            reads: parsed.reads,
+            writes: parsed.writes,
+        });
+        for raw in std::iter::once(&name.value).chain(&raw_words) {
+            self.substitutions(raw);
+        }
     }
-}
 
-fn extract_from_pipeline(pipeline: &ast::Pipeline, out: &mut Vec<CommandInfo>) {
-    for command in &pipeline.seq {
-        extract_from_command(command, out);
-    }
-}
-
-fn extract_from_command(command: &ast::Command, out: &mut Vec<CommandInfo>) {
-    match command {
-        ast::Command::Simple(simple) => extract_from_simple_command(simple, out),
-        ast::Command::Compound(compound, _) => extract_from_compound_command(compound, out),
-        ast::Command::Function(_) | ast::Command::ExtendedTest(_) => {}
-    }
-}
-
-/// Extract a SimpleCommand, followed by the commands of its substitutions.
-fn extract_from_simple_command(simple: &ast::SimpleCommand, out: &mut Vec<CommandInfo>) {
-    let name_word = match &simple.word_or_name {
-        Some(w) => w,
-        None => return,
-    };
-
-    let mut args = Vec::new();
-    let mut args_complete = !word_has_expansion(&name_word.value);
-    let mut cmd_sub_commands = Vec::new();
-
-    // Collect args from suffix
-    if let Some(suffix) = &simple.suffix {
-        for item in &suffix.0 {
-            match item {
-                ast::CommandPrefixOrSuffixItem::Word(word) => {
-                    if word_has_expansion(&word.value) {
-                        args_complete = false;
+    fn compound_command(&mut self, compound: &ast::CompoundCommand) {
+        match compound {
+            ast::CompoundCommand::Subshell(s) => self.compound_list(&s.list),
+            ast::CompoundCommand::BraceGroup(g) => self.compound_list(&g.list),
+            ast::CompoundCommand::IfClause(c) => {
+                self.compound_list(&c.condition);
+                self.compound_list(&c.then);
+                for el in c.elses.iter().flatten() {
+                    if let Some(cond) = &el.condition {
+                        self.compound_list(cond);
                     }
-                    args.push(word.value.clone());
-                    extract_command_subs_from_word(&word.value, &mut cmd_sub_commands);
+                    self.compound_list(&el.body);
                 }
-                ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
-                    extract_from_compound_list(&subshell.list, &mut cmd_sub_commands);
-                    args_complete = false;
-                }
-                _ => {}
             }
-        }
-    }
-
-    // Check prefix for process substitutions
-    if let Some(prefix) = &simple.prefix {
-        for item in &prefix.0 {
-            match item {
-                ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
-                    extract_from_compound_list(&subshell.list, &mut cmd_sub_commands);
-                    args_complete = false;
-                }
-                ast::CommandPrefixOrSuffixItem::Word(word) => {
-                    if word_has_expansion(&word.value) {
-                        args_complete = false;
+            ast::CompoundCommand::WhileClause(c) | ast::CompoundCommand::UntilClause(c) => {
+                self.compound_list(&c.0);
+                self.compound_list(&c.1.list);
+            }
+            ast::CompoundCommand::ForClause(c) => self.compound_list(&c.body.list),
+            ast::CompoundCommand::CaseClause(c) => {
+                for item in &c.cases {
+                    if let Some(cmd) = &item.cmd {
+                        self.compound_list(cmd);
                     }
-                    extract_command_subs_from_word(&word.value, &mut cmd_sub_commands);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Extract redirects from prefix and suffix
-    let mut redirects = Vec::new();
-    if let Some(prefix) = &simple.prefix {
-        extract_redirects(&prefix.0, &mut redirects);
-    }
-    if let Some(suffix) = &simple.suffix {
-        extract_redirects(&suffix.0, &mut redirects);
-    }
-
-    out.push(CommandInfo {
-        name: name_word.value.clone(),
-        args,
-        args_complete,
-        redirects,
-    });
-    out.extend(cmd_sub_commands);
-}
-
-fn extract_from_compound_command(compound: &ast::CompoundCommand, out: &mut Vec<CommandInfo>) {
-    match compound {
-        ast::CompoundCommand::Subshell(s) => extract_from_compound_list(&s.list, out),
-        ast::CompoundCommand::BraceGroup(g) => extract_from_compound_list(&g.list, out),
-        ast::CompoundCommand::IfClause(c) => {
-            extract_from_compound_list(&c.condition, out);
-            extract_from_compound_list(&c.then, out);
-            if let Some(elses) = &c.elses {
-                for el in elses {
-                    if let Some(cond) = &el.condition { extract_from_compound_list(cond, out); }
-                    extract_from_compound_list(&el.body, out);
                 }
             }
+            ast::CompoundCommand::ArithmeticForClause(c) => self.compound_list(&c.body.list),
+            ast::CompoundCommand::Arithmetic(_) => {}
         }
-        ast::CompoundCommand::WhileClause(c) | ast::CompoundCommand::UntilClause(c) => {
-            extract_from_compound_list(&c.0, out);
-            extract_from_compound_list(&c.1.list, out);
-        }
-        ast::CompoundCommand::ForClause(c) => extract_from_compound_list(&c.body.list, out),
-        ast::CompoundCommand::CaseClause(c) => {
-            for item in &c.cases {
-                if let Some(cmd) = &item.cmd { extract_from_compound_list(cmd, out); }
+    }
+
+    /// The commands of the `$(…)` and backquote substitutions in a word.
+    fn substitutions(&mut self, raw: &str) {
+        let options = brush_parser::ParserOptions::default();
+        if let Ok(pieces) = brush_parser::word::parse(raw, &options) {
+            for p in &pieces {
+                self.substitution_piece(&p.piece);
             }
         }
-        ast::CompoundCommand::ArithmeticForClause(c) => extract_from_compound_list(&c.body.list, out),
-        ast::CompoundCommand::Arithmetic(_) => {}
+    }
+
+    fn substitution_piece(&mut self, piece: &WordPiece) {
+        match piece {
+            WordPiece::CommandSubstitution(text) | WordPiece::BackquotedCommandSubstitution(text) => {
+                if let Ok(program) = parse_with_brush(text) {
+                    self.program(&program);
+                }
+            }
+            WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
+                for ip in inner {
+                    self.substitution_piece(&ip.piece);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-// --- Redirect extraction ---
-
-/// Extract redirect info from prefix/suffix items.
-fn extract_redirects(items: &[ast::CommandPrefixOrSuffixItem], out: &mut Vec<RedirectInfo>) {
+fn redirects<'a>(items: impl Iterator<Item = &'a ast::CommandPrefixOrSuffixItem>) -> Vec<RedirectInfo> {
+    let mut out = Vec::new();
     for item in items {
-        if let ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
-            match redirect {
-                ast::IoRedirect::File(_, kind, target) => {
-                    let is_write = matches!(
-                        kind,
-                        ast::IoFileRedirectKind::Write
-                            | ast::IoFileRedirectKind::Append
-                            | ast::IoFileRedirectKind::Clobber
-                            | ast::IoFileRedirectKind::ReadAndWrite
-                    );
-                    if let ast::IoFileRedirectTarget::Filename(word) = target {
-                        out.push(RedirectInfo {
-                            target: word.value.clone(),
-                            is_write,
-                            has_expansion: word_has_expansion(&word.value),
-                        });
-                    }
-                }
-                ast::IoRedirect::OutputAndError(word, _) => {
-                    out.push(RedirectInfo {
-                        target: word.value.clone(),
-                        is_write: true,
-                        has_expansion: word_has_expansion(&word.value),
-                    });
-                }
-                ast::IoRedirect::HereDocument(_, _) | ast::IoRedirect::HereString(_, _) => {
-                    // Here-docs/strings are input, not file targets — skip
-                }
+        let ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) = item else { continue };
+        let (target, is_write) = match redirect {
+            ast::IoRedirect::File(_, kind, ast::IoFileRedirectTarget::Filename(w)) => {
+                let is_write = matches!(
+                    kind,
+                    ast::IoFileRedirectKind::Write
+                        | ast::IoFileRedirectKind::Append
+                        | ast::IoFileRedirectKind::Clobber
+                        | ast::IoFileRedirectKind::ReadAndWrite
+                );
+                (w, is_write)
             }
-        }
+            ast::IoRedirect::OutputAndError(w, _) => (w, true),
+            _ => continue,
+        };
+        let (target, has_expansion) = match literal(&target.value) {
+            Some(text) => (text, false),
+            None => (target.value.clone(), true),
+        };
+        out.push(RedirectInfo { target, is_write, has_expansion });
     }
+    out
 }
 
 // --- Word analysis ---
 
-/// Check if a word value contains shell expansions ($VAR, $(cmd), etc.).
-pub(crate) fn word_has_expansion(word_value: &str) -> bool {
-    let options = brush_parser::ParserOptions::default();
-    match brush_parser::word::parse(word_value, &options) {
-        Ok(pieces) => pieces.iter().any(|p| match &p.piece {
-            WordPiece::ParameterExpansion(_)
-            | WordPiece::CommandSubstitution(_)
-            | WordPiece::BackquotedCommandSubstitution(_)
-            | WordPiece::ArithmeticExpression(_) => true,
-            WordPiece::DoubleQuotedSequence(inner) => {
-                inner.iter().any(|ip| matches!(
-                    &ip.piece,
-                    WordPiece::ParameterExpansion(_)
-                    | WordPiece::CommandSubstitution(_)
-                    | WordPiece::BackquotedCommandSubstitution(_)
-                    | WordPiece::ArithmeticExpression(_)
-                ))
-            }
-            _ => false,
-        }),
-        Err(_) => true,
-    }
-}
-
-fn extract_command_subs_from_word(word_value: &str, out: &mut Vec<CommandInfo>) {
-    let options = brush_parser::ParserOptions::default();
-    if let Ok(pieces) = brush_parser::word::parse(word_value, &options) {
-        for p in &pieces {
-            extract_command_subs_from_piece(&p.piece, out);
-        }
-    }
-}
-
-fn extract_command_subs_from_piece(piece: &WordPiece, out: &mut Vec<CommandInfo>) {
+/// Appends what `piece` contributes to a word's text. An expansion makes the
+/// word Unknown: one that may split when unquoted, or when it is `$@`-like.
+fn append_piece(piece: &WordPiece, quoted: bool, raw: &str, text: &mut String, unknown: &mut Option<bool>) {
     match piece {
-        WordPiece::CommandSubstitution(cmd_str)
-        | WordPiece::BackquotedCommandSubstitution(cmd_str) => {
-            if let Ok(inner) = parse_command(cmd_str) {
-                out.extend(inner);
-            }
+        WordPiece::Text(s) | WordPiece::SingleQuotedText(s) => text.push_str(s),
+        WordPiece::AnsiCQuotedText(s) if !s.contains('\\') => text.push_str(s),
+        WordPiece::AnsiCQuotedText(_) => *unknown = Some(unknown.unwrap_or(false)),
+        WordPiece::TildePrefix(user) => {
+            text.push('~');
+            text.push_str(user);
         }
-        WordPiece::DoubleQuotedSequence(inner) => {
+        WordPiece::EscapeSequence(s) => text.push_str(s.strip_prefix('\\').unwrap_or(s)),
+        WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
             for ip in inner {
-                extract_command_subs_from_piece(&ip.piece, out);
+                append_piece(&ip.piece, true, raw, text, unknown);
             }
         }
-        _ => {}
+        WordPiece::ParameterExpansion(_)
+        | WordPiece::CommandSubstitution(_)
+        | WordPiece::BackquotedCommandSubstitution(_)
+        | WordPiece::ArithmeticExpression(_) => {
+            let splits = !quoted || raw.contains('@') || raw.contains('*');
+            *unknown = Some(unknown.unwrap_or(false) || splits);
+        }
     }
 }
 
@@ -337,37 +350,17 @@ mod tests {
     }
 
     #[test]
-    fn brush_parses_command_substitution_in_word() {
-        let pieces = brush_parser::word::parse("$(date)", &brush_parser::ParserOptions::default()).unwrap();
-        assert!(pieces.iter().any(|p| matches!(&p.piece, WordPiece::CommandSubstitution(_))));
+    fn brush_parses_compound_commands() {
+        let first = |line: &str| match &parse_program(line).complete_commands[0].0[0].0.first.seq[0] {
+            ast::Command::Compound(c, _) => std::mem::discriminant(c),
+            _ => panic!("{line}: expected a compound command"),
+        };
+        assert_ne!(first("(ls)"), first("{ ls; }"));
+        assert_ne!(first("if true; then echo yes; fi"), first("for x in a b; do echo $x; done"));
     }
 
     #[test]
-    fn brush_parses_subshell() {
-        let pipeline = &parse_program("(ls)").complete_commands[0].0[0].0.first;
-        assert!(matches!(&pipeline.seq[0], ast::Command::Compound(ast::CompoundCommand::Subshell(_), _)));
-    }
-
-    #[test]
-    fn brush_parses_brace_group() {
-        let pipeline = &parse_program("{ ls; }").complete_commands[0].0[0].0.first;
-        assert!(matches!(&pipeline.seq[0], ast::Command::Compound(ast::CompoundCommand::BraceGroup(_), _)));
-    }
-
-    #[test]
-    fn brush_parses_if_clause() {
-        let pipeline = &parse_program("if true; then echo yes; fi").complete_commands[0].0[0].0.first;
-        assert!(matches!(&pipeline.seq[0], ast::Command::Compound(ast::CompoundCommand::IfClause(_), _)));
-    }
-
-    #[test]
-    fn brush_parses_for_clause() {
-        let pipeline = &parse_program("for x in a b; do echo $x; done").complete_commands[0].0[0].0.first;
-        assert!(matches!(&pipeline.seq[0], ast::Command::Compound(ast::CompoundCommand::ForClause(_), _)));
-    }
-
-    #[test]
-    fn brush_parses_quoted_string_not_split() {
+    fn brush_keeps_a_quoted_pipe_in_one_word() {
         let pipeline = &parse_program("echo 'hello | world'").complete_commands[0].0[0].0.first;
         assert_eq!(pipeline.seq.len(), 1);
     }
@@ -378,139 +371,74 @@ mod tests {
     }
 
     #[test]
-    fn brush_detects_expansion_in_word() {
-        let pieces = brush_parser::word::parse("$VAR", &brush_parser::ParserOptions::default()).unwrap();
-        assert!(pieces.iter().any(|p| matches!(&p.piece, WordPiece::ParameterExpansion(_))));
+    fn brush_finds_brace_expressions_outside_quotes_only() {
+        let options = brush_parser::ParserOptions::default();
+        let has_expr = |w: &str| {
+            brush_parser::word::parse_brace_expansions(w, &options)
+                .unwrap()
+                .is_some_and(|p| p.iter().any(|p| matches!(p, BraceExpressionOrText::Expr(_))))
+        };
+        assert!(has_expr("{a,b}"));
+        assert!(has_expr("x{1..3}"));
+        assert!(!has_expr("'{a,b}'"));
+        assert!(!has_expr("{}"));
+        assert!(!has_expr("@{u}"));
+    }
+
+    // --- Words ---
+
+    #[test]
+    fn a_word_loses_its_quotes_and_an_expansion_is_unknown() {
+        let known = |w: &str| Word::Known(w.to_string());
+        let rows = [
+            ("plain", known("plain")),
+            ("'eval'", known("eval")),
+            ("\"/etc/shadow\"", known("/etc/shadow")),
+            ("a\\ b", known("a b")),
+            ("src/*.rs", known("src/*.rs")),
+            ("~/x", known("~/x")),
+            ("~bob/x", known("~bob/x")),
+            ("{}", known("{}")),
+            ("@{u}..", known("@{u}..")),
+            ("$X", Word::Unknown { splits: true }),
+            ("\"$X\"", Word::Unknown { splits: false }),
+            ("\"$@\"", Word::Unknown { splits: true }),
+            ("a$(date)", Word::Unknown { splits: true }),
+            ("{notes,/etc/shadow}", Word::Unknown { splits: true }),
+        ];
+        for (raw, want) in rows {
+            assert_eq!(word(raw), want, "{raw}");
+        }
+    }
+
+    // --- Commands of a line ---
+
+    fn names(line: &str) -> Vec<String> {
+        parse_command(line, &Grammars::default()).unwrap().into_iter().map(|c| c.name).collect()
     }
 
     #[test]
-    fn brush_detects_command_sub_in_word() {
-        let pieces = brush_parser::word::parse("$(cmd)", &brush_parser::ParserOptions::default()).unwrap();
-        assert!(pieces.iter().any(|p| matches!(&p.piece, WordPiece::CommandSubstitution(_))));
-    }
-
-    // --- Helper to find command by name in flat list ---
-
-    fn find_cmd<'a>(cmds: &'a [CommandInfo], name: &str) -> &'a CommandInfo {
-        cmds.iter().find(|c| c.name == name)
-            .unwrap_or_else(|| panic!("command '{}' not found in {:?}", name, cmds.iter().map(|c| &c.name).collect::<Vec<_>>()))
-    }
-
-    // --- Simple commands ---
-
-    #[test]
-    fn simple_command_extracts_name_and_args() {
-        let cmds = parse_command("ls -la /tmp").unwrap();
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].name, "ls");
-        assert_eq!(cmds[0].args, vec!["-la", "/tmp"]);
-        assert!(cmds[0].args_complete);
+    fn a_line_holds_every_command_it_runs() {
+        let rows: [(&str, &[&str]); 7] = [
+            ("ls | grep foo | wc -l", &["ls", "grep", "wc"]),
+            ("ls && echo done || echo failed", &["ls", "echo", "echo"]),
+            ("echo 'hello | world'", &["echo"]),
+            ("echo $(date)", &["echo", "date"]),
+            ("(ls && pwd)", &["ls", "pwd"]),
+            ("{ ls; pwd; }", &["ls", "pwd"]),
+            ("time make -j4", &["make"]),
+        ];
+        for (line, want) in rows {
+            assert_eq!(names(line), want, "{line}");
+        }
+        assert!(parse_command("", &Grammars::default()).unwrap().is_empty());
+        assert!(parse_command("echo 'hello", &Grammars::default()).is_err());
     }
 
     #[test]
-    fn command_with_no_args() {
-        let cmds = parse_command("pwd").unwrap();
-        assert_eq!(cmds[0].name, "pwd");
-        assert!(cmds[0].args.is_empty());
-    }
-
-    // --- Pipelines ---
-
-    #[test]
-    fn pipeline_extracts_each_segment() {
-        let cmds = parse_command("ls | grep foo").unwrap();
-        assert!(cmds.iter().any(|c| c.name == "ls"));
-        assert!(cmds.iter().any(|c| c.name == "grep"));
-    }
-
-    #[test]
-    fn pipeline_three_segments() {
-        let cmds = parse_command("ls | grep foo | wc -l").unwrap();
-        assert!(cmds.iter().any(|c| c.name == "wc"));
-    }
-
-    #[test]
-    fn quoted_pipe_is_not_pipeline() {
-        let cmds = parse_command("echo 'hello | world'").unwrap();
-        assert_eq!(cmds.len(), 1);
-    }
-
-    // --- Logical operators ---
-
-    #[test]
-    fn and_list_extracts_both() {
-        let cmds = parse_command("ls && echo done").unwrap();
-        assert!(cmds.iter().any(|c| c.name == "ls"));
-        assert!(cmds.iter().any(|c| c.name == "echo"));
-    }
-
-    #[test]
-    fn or_list_extracts_both() {
-        let cmds = parse_command("ls || echo failed").unwrap();
-        assert_eq!(cmds.len(), 2);
-    }
-
-    // --- Command substitution ---
-
-    #[test]
-    fn arg_with_command_substitution() {
-        let cmds = parse_command("echo $(date)").unwrap();
-        assert!(cmds.iter().any(|c| c.name == "echo"));
-        assert!(cmds.iter().any(|c| c.name == "date"));
-    }
-
-    #[test]
-    fn command_substitution_sets_args_incomplete() {
-        let cmds = parse_command("rm $(find . -name '*.tmp')").unwrap();
-        let rm = find_cmd(&cmds, "rm");
-        assert!(!rm.args_complete);
-    }
-
-    #[test]
-    fn expansion_in_arg_marks_incomplete() {
-        let cmds = parse_command("rm -rf $DIR").unwrap();
-        assert!(!cmds[0].args_complete);
-    }
-
-    #[test]
-    fn literal_args_are_complete() {
-        let cmds = parse_command("rm -rf /tmp").unwrap();
-        assert!(cmds[0].args_complete);
-    }
-
-    // --- Compound commands ---
-
-    #[test]
-    fn subshell_extracts_inner() {
-        let cmds = parse_command("(ls && pwd)").unwrap();
-        assert!(cmds.iter().any(|c| c.name == "ls"));
-        assert!(cmds.iter().any(|c| c.name == "pwd"));
-    }
-
-    #[test]
-    fn brace_group_extracts_inner() {
-        let cmds = parse_command("{ ls; pwd; }").unwrap();
-        assert!(cmds.iter().any(|c| c.name == "ls"));
-        assert!(cmds.iter().any(|c| c.name == "pwd"));
-    }
-
-    // --- Parse failures ---
-
-    #[test]
-    fn empty_string_parses_as_empty() {
-        assert!(parse_command("").unwrap().is_empty());
-    }
-
-    #[test]
-    fn unclosed_quote_fails() {
-        assert!(parse_command("echo 'hello").is_err());
-    }
-
-    // --- time is a keyword ---
-
-    #[test]
-    fn time_is_keyword() {
-        let cmds = parse_command("time make -j4").unwrap();
-        assert_eq!(cmds[0].name, "make"); // brush-parser handles time as keyword
+    fn a_redirect_target_loses_its_quotes() {
+        let cmds = parse_command("echo hi > '/tmp/evil' 2>&1 < \"in\" >> $X", &Grammars::default()).unwrap();
+        let got: Vec<_> = cmds[0].redirects.iter().map(|r| (r.target.as_str(), r.is_write, r.has_expansion)).collect();
+        assert_eq!(got, [("/tmp/evil", true, false), ("in", false, false), ("$X", true, true)]);
     }
 }

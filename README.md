@@ -65,16 +65,20 @@ For active commands, `next` blocks up to a timeout waiting for new output — no
 
 ### CEL policy engine
 
-This isn't a sandbox against adversarial agents — it's guardrails for good-faith ones that occasionally reach for `rm -rf` or `curl | sh` without thinking twice. Every command is parsed into a structured tree (via [brush](https://github.com/reubeno/brush)), then evaluated against CEL rules. The evaluator uses **three-valued logic** (true / false / unknown) because some properties — like what a variable expands to — can't be known statically. When any command in a pipeline is unknown, the engine falls through to human approval rather than guessing.
+This isn't a sandbox against adversarial agents — it's guardrails for good-faith ones that occasionally reach for `rm -rf` or `curl | sh` without thinking twice. Every command line is parsed into its commands (via [brush](https://github.com/reubeno/brush)); each command's grammar parses its words into named parts and marks the paths it reads and writes; CEL rules then decide. The evaluator uses **three-valued logic** (true / false / unknown) because some properties — like what a variable expands to — can't be known statically. When a rule cannot be ruled out, it asks or denies rather than allows.
 
-Rules are loaded from three tiers (built-in < user < project) and hot-reload on file change:
+Grammars and rules are loaded from three tiers (built-in < user < project) and hot-reload on file change:
 
 ```toml
+[commands.deploy]
+parser = "gnu"
+arguments = ["targets...", "--force|-f"]
+
 [[rules]]
-description = "no kubectl here"
-when = 'command.name == "kubectl"'
-action = "deny"
-message = "use the dev cluster scripts"
+description = "staging deploys"
+command = "deploy"
+when = 'args.targets == ["staging"] && !args.force'
+action = "allow"
 ```
 
 Use `/tmux-policy` for interactive rule generation.
@@ -199,7 +203,7 @@ This is useful for autonomous sessions where no human is in the loop.
 
 ## Policy Configuration
 
-Policy rules are CEL expressions in TOML files. Three sources are merged (built-in < user < project):
+Policy files hold command grammars and CEL rules. Three sources are merged (built-in < user < project); a file that does not load denies every command until it is fixed:
 
 | Source | Path | Purpose |
 |--------|------|---------|

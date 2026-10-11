@@ -206,6 +206,14 @@ impl Harness {
         std::fs::write(dir.join("tmux-mcp.toml"), toml).expect("a project policy");
     }
 
+    /// Writes the user's `~/.claude/tmux-mcp.toml`, as `project_policy` does
+    /// the project's.
+    pub fn user_policy(&self, toml: &str) {
+        let dir = self.dir().join("home").join(".claude");
+        std::fs::create_dir_all(&dir).expect("a ~/.claude dir");
+        std::fs::write(dir.join("tmux-mcp.toml"), toml).expect("a user policy");
+    }
+
     /// Asks the `policy-check` hook about `command` in `shell`, as Claude Code
     /// does before every `command_run`. An "ask" leaves an approval in the
     /// daemon, which the next `command_run` of that command consumes.

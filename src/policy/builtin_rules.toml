@@ -1,3 +1,907 @@
 # Built-in policy, compiled into the tmux-mcp binary.
+#
+# A grammar declares what its rules read, every option whose value is a path or a command, and
+# the flags agents commonly use with a command the rules allow. Anything else is undeclared,
+# which only makes a line ask.
 
 default = "ask"
+
+# =============================================================================
+# Readers
+# =============================================================================
+
+[commands.cat]
+parser = "gnu"
+arguments = [
+  "files...", "--number|-n", "--number-nonblank|-b", "--show-all|-A", "--show-ends|-E",
+  "--show-tabs|-T", "--squeeze-blank|-s", "--show-nonprinting|-v",
+]
+marks.read = ["files"]
+
+[commands.less]
+parser = "gnu"
+arguments = [
+  "files...", "--log-file|-o|--LOG-FILE|-O:", "--pattern|-p:", "--tag|-t:",
+  "raw_ansi=-R", "chop=-S", "line_numbers=-N", "quit_if_one_screen=-F", "no_init=-X", "ignore_case=-i",
+]
+marks.read = ["files"]
+marks.write = ["log_file"]
+
+[commands.more]
+parser = "gnu"
+arguments = ["files...", "--lines|-n:"]
+marks.read = ["files"]
+
+[commands.wc]
+parser = "gnu"
+arguments = [
+  "files...", "--files0-from:", "--lines|-l", "--words|-w", "--bytes|-c", "--chars|-m",
+  "--max-line-length|-L",
+]
+marks.read = ["files", "files0_from"]
+
+[commands.file]
+parser = "gnu"
+arguments = ["files...", "--files-from|-f:", "--magic-file|-m:", "--brief|-b", "--mime|-i", "--mime-type", "--dereference|-L"]
+marks.read = ["files", "files_from", "magic_file"]
+
+[commands.stat]
+parser = "gnu"
+arguments = ["files...", "--format|-c:", "--printf:", "--dereference|-L", "--file-system|-f", "--terse|-t"]
+marks.read = ["files"]
+
+[commands.realpath]
+parser = "gnu"
+arguments = [
+  "files...", "--relative-to:", "--relative-base:", "--canonicalize-existing|-e",
+  "--canonicalize-missing|-m", "--no-symlinks|-s", "--quiet|-q",
+]
+marks.read = ["files", "relative_to", "relative_base"]
+
+[commands.readlink]
+parser = "gnu"
+arguments = ["files...", "--canonicalize|-f", "--canonicalize-existing|-e", "--canonicalize-missing|-m", "--no-newline|-n"]
+marks.read = ["files"]
+
+[commands.diff]
+parser = "gnu"
+arguments = [
+  "files...", "--from-file:", "--to-file:", "--exclude-from|-X:", "--exclude|-x:",
+  "--unified|-U:", "--context|-C:", "--label|-L:",
+  "-u", "-c", "--recursive|-r", "--new-file|-N", "--brief|-q", "--side-by-side|-y",
+  "--ignore-all-space|-w", "--ignore-space-change|-b", "--ignore-blank-lines|-B", "--ignore-case|-i",
+  "--text|-a", "--color",
+]
+marks.read = ["files", "from_file", "to_file", "exclude_from"]
+
+[commands.base64]
+parser = "gnu"
+arguments = ["files...", "--wrap|-w:", "--decode|-d", "--ignore-garbage|-i"]
+marks.read = ["files"]
+
+[commands.md5sum]
+parser = "gnu"
+arguments = ["files...", "--check|-c", "--binary|-b", "--quiet", "--status", "--tag"]
+marks.read = ["files"]
+
+[commands.sha256sum]
+parser = "gnu"
+arguments = ["files...", "--check|-c", "--binary|-b", "--quiet", "--status", "--tag"]
+marks.read = ["files"]
+
+[commands.head]
+parser = { name = "gnu", leading_number = "lines" }    # head reads a first-argument -5 as --lines 5
+arguments = ["files...", "--lines|-n:", "--bytes|-c:", "--quiet|--silent|-q", "--verbose|-v"]
+marks.read = ["files"]
+
+[commands.tail]
+parser = { name = "gnu", leading_number = "lines" }    # tail also reads +5
+arguments = [
+  "files...", "--lines|-n:", "--bytes|-c:", "--follow|-f", "follow_retry=-F", "--quiet|--silent|-q",
+  "--verbose|-v",
+]
+marks.read = ["files"]
+
+[commands.uniq]
+parser = "gnu"
+arguments = [
+  "input", "output", "--count|-c", "--repeated|-d", "--unique|-u", "--ignore-case|-i",
+  "--skip-fields|-f:", "--skip-chars|-s:", "--check-chars|-w:",
+]
+marks.read = ["input"]
+marks.write = ["output"]
+
+[commands.cut]
+parser = "gnu"
+arguments = [
+  "files...", "--fields|-f:", "--delimiter|-d:", "--bytes|-b:", "--characters|-c:",
+  "--only-delimited|-s", "--complement", "--output-delimiter:",
+]
+marks.read = ["files"]
+
+[commands.sort]
+parser = "gnu"
+arguments = [
+  "files...", "--output|-o:", "--temporary-directory|-T:", "--files0-from:", "--key|-k:",
+  "--field-separator|-t:", "--numeric-sort|-n", "--reverse|-r", "--unique|-u",
+  "--human-numeric-sort|-h", "--version-sort|-V", "--ignore-case|-f", "--ignore-leading-blanks|-b",
+  "--stable|-s", "--general-numeric-sort|-g", "--zero-terminated|-z", "--check|-c",
+]
+marks.read = ["files", "files0_from"]
+marks.write = ["output", "temporary_directory"]
+
+[commands.ls]
+parser = "gnu"
+arguments = [
+  "files...", "--ignore|-I:", "--sort:", "--all|-a", "--almost-all|-A", "-l", "--human-readable|-h",
+  "-t", "--reverse|-r", "--recursive|-R", "one_per_line=-1", "--directory|-d", "size_sort=-S",
+  "--inode|-i", "--classify|-F", "--numeric-uid-gid|-n", "--size|-s", "--color",
+  "--group-directories-first",
+]
+argument.files.default = ["."]
+marks.read = ["files"]
+
+[commands.tree]
+parser = "gnu"
+arguments = [
+  "files...", "output=-o:", "level=-L:", "pattern=-P:", "ignore=-I:", "all=-a", "dirs_only=-d",
+  "full_path=-f", "human=-h", "colorize=-C", "json=-J", "--gitignore", "--noreport", "--dirsfirst",
+]
+argument.files.default = ["."]
+marks.read = ["files"]
+marks.write = ["output"]
+
+# --- Search: grep, egrep, fgrep are three entries on purpose ---
+
+[commands.grep]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--exclude-from:", "--include:", "--exclude:", "--exclude-dir:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--recursive|-r", "--dereference-recursive|-R", "--line-number|-n", "--ignore-case|-i",
+  "--files-with-matches|-l", "--files-without-match|-L", "--invert-match|-v", "--word-regexp|-w",
+  "--line-regexp|-x", "--count|-c", "--only-matching|-o", "--with-filename|-H", "--no-filename|-h",
+  "--extended-regexp|-E", "--fixed-strings|-F", "--perl-regexp|-P", "--no-messages|-s",
+  "--quiet|--silent|-q", "--null-data|-z", "--text|-a", "binary_skip=-I", "--color|--colour",
+]
+marks.read = ["files", "file", "exclude_from"]
+
+[commands.egrep]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--exclude-from:", "--include:", "--exclude:", "--exclude-dir:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--recursive|-r", "--dereference-recursive|-R", "--line-number|-n", "--ignore-case|-i",
+  "--files-with-matches|-l", "--files-without-match|-L", "--invert-match|-v", "--word-regexp|-w",
+  "--line-regexp|-x", "--count|-c", "--only-matching|-o", "--with-filename|-H", "--no-filename|-h",
+  "--extended-regexp|-E", "--fixed-strings|-F", "--perl-regexp|-P", "--no-messages|-s",
+  "--quiet|--silent|-q", "--null-data|-z", "--text|-a", "binary_skip=-I", "--color|--colour",
+]
+marks.read = ["files", "file", "exclude_from"]
+
+[commands.fgrep]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--exclude-from:", "--include:", "--exclude:", "--exclude-dir:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--recursive|-r", "--dereference-recursive|-R", "--line-number|-n", "--ignore-case|-i",
+  "--files-with-matches|-l", "--files-without-match|-L", "--invert-match|-v", "--word-regexp|-w",
+  "--line-regexp|-x", "--count|-c", "--only-matching|-o", "--with-filename|-H", "--no-filename|-h",
+  "--extended-regexp|-E", "--fixed-strings|-F", "--perl-regexp|-P", "--no-messages|-s",
+  "--quiet|--silent|-q", "--null-data|-z", "--text|-a", "binary_skip=-I", "--color|--colour",
+]
+marks.read = ["files", "file", "exclude_from"]
+
+[commands.rg]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--ignore-file:", "--pre:", "--hostname-bin:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--glob|-g:", "--iglob:", "--type|-t:", "--type-not|-T:", "--max-depth|-d:", "--replace|-r:",
+  "--sort:", "--sortr:", "--color:",
+  "--ignore-case|-i", "--smart-case|-S", "--case-sensitive|-s", "--word-regexp|-w", "--line-regexp|-x",
+  "--line-number|-n", "--no-line-number|-N", "--files-with-matches|-l", "--count|-c",
+  "--invert-match|-v", "--unrestricted|-u", "--fixed-strings|-F", "--only-matching|-o", "--hidden",
+  "--no-ignore", "list_files=--files", "--json", "--follow|-L", "--multiline|-U", "--text|-a", "--heading",
+  "--no-heading", "--vimgrep", "--with-filename|-H", "--no-filename", "--pretty|-p", "--quiet|-q",
+]
+argument.files.default = ["."]                        # with no path, rg searches the directory
+marks.read = ["files", "file", "ignore_file"]
+
+[commands.find]
+parser = "find"                                       # spellings are single-dash words
+arguments = [
+  "files...",                                         # the start points
+  "follow_links=-L", "follow_args=-H", "no_follow=-P",
+  "-delete",
+  "-newer:", "-anewer:", "-cnewer:", "-samefile:", "-files0-from:",
+  "-fprint:", "-fprint0:", "-fls:", "-fprintf:",
+  "-name:", "-iname:", "-path:", "-ipath:", "-wholename:", "-iwholename:",
+  "-regex:", "-iregex:", "-lname:", "-ilname:",
+  "-type:", "-xtype:", "-perm:", "-size:", "-user:", "-group:", "-uid:", "-gid:",
+  "-mtime:", "-mmin:", "-atime:", "-amin:", "-ctime:", "-cmin:", "-maxdepth:", "-mindepth:",
+  "-newermt:", "-printf:", "-regextype:",
+  "-print", "-print0", "-ls", "-prune", "-quit", "-empty", "-executable", "-readable", "-writable",
+  "-depth", "-xdev", "-mount", "-follow", "-true", "-false", "-nouser", "-nogroup", "-daystart",
+  # stage 2: -exec, -execdir, -ok, -okdir end at ";" or "{} +"
+]
+argument.files.default = ["."]
+marks.read = ["files", "newer", "anewer", "cnewer", "samefile", "files0_from"]
+marks.write = ["fprint", "fprint0", "fls", "fprintf"]
+
+# =============================================================================
+# Writers
+# =============================================================================
+
+[commands.rm]
+parser = "gnu"
+arguments = [
+  "files...", "--recursive|-r|-R", "--force|-f", "--interactive|-i", "once=-I", "--verbose|-v",
+  "--dir|-d",
+]
+marks.write = ["files"]
+
+[commands.rmdir]
+parser = "gnu"
+arguments = ["files...", "--parents|-p", "--verbose|-v", "--ignore-fail-on-non-empty"]
+marks.write = ["files"]
+
+[commands.mkdir]
+parser = "gnu"
+arguments = ["files...", "--mode|-m:", "--parents|-p", "--verbose|-v"]
+marks.write = ["files"]
+
+[commands.touch]
+parser = "gnu"
+arguments = [
+  "files...", "--reference|-r:", "--date|-d:", "stamp=-t:", "-a", "-m", "--no-create|-c",
+  "--no-dereference|-h",
+]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+[commands.tee]
+parser = "gnu"
+arguments = ["files...", "--append|-a", "--ignore-interrupts|-i"]
+marks.write = ["files"]
+
+[commands.cp]
+parser = "gnu"
+arguments = [
+  "files...", ["dest", "--target-directory|-t:"], "--suffix|-S:",
+  "--recursive|-r|-R", "--archive|-a", "--force|-f", "--interactive|-i", "--no-clobber|-n", "-p",
+  "--preserve", "--verbose|-v", "--update|-u", "--dereference|-L", "--no-dereference|-P",
+  "--link|-l", "--symbolic-link|-s", "--no-target-directory|-T", "--parents",
+]
+marks.read = ["files"]
+marks.write = ["dest", "target_directory"]
+
+[commands.mv]
+parser = "gnu"
+arguments = [
+  "files...", ["dest", "--target-directory|-t:"], "--suffix|-S:",
+  "--force|-f", "--interactive|-i", "--no-clobber|-n", "--verbose|-v", "--update|-u",
+  "--no-target-directory|-T",
+]
+marks.write = ["files", "dest", "target_directory"]   # a moved source is removed
+
+[commands.ln]
+parser = "gnu"
+arguments = [
+  "files...", ["dest", "--target-directory|-t:"], "--suffix|-S:",
+  "--symbolic|-s", "--force|-f", "--no-dereference|-n", "--verbose|-v", "--relative|-r",
+  "--no-target-directory|-T", "--logical|-L", "--physical|-P",
+]
+marks.read = ["files"]
+marks.write = ["dest", "target_directory"]
+
+[commands.chmod]
+parser = "gnu"
+arguments = [["mode", "--reference:"], "files...", "--recursive|-R", "--verbose|-v", "--changes|-c", "--silent|--quiet|-f"]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+[commands.chown]
+parser = "gnu"
+arguments = [["owner", "--reference:"], "files...", "--recursive|-R", "--verbose|-v", "--changes|-c", "--silent|--quiet|-f"]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+[commands.chgrp]
+parser = "gnu"
+arguments = [["group", "--reference:"], "files...", "--recursive|-R", "--verbose|-v", "--changes|-c", "--silent|--quiet|-f"]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+# --- Programs with their own language ---
+
+[commands.sed]
+parser = "gnu"
+arguments = [
+  ["script", "--expression|-e:", "--file|-f:"], "files...", "--line-length|-l:",
+  "--quiet|--silent|-n", "--regexp-extended|-E|-r", "--in-place|-i", "--separate|-s",
+  "--null-data|-z", "--unbuffered|-u", "--posix", "--debug", "--sandbox",
+]
+marks.read = ["files", "file"]
+
+[commands.awk]
+parser = "gnu"
+arguments = [
+  ["program", "--source|-e:", "--file|-f|--include|-i:"],
+  "files...", "--field-separator|-F:", "--assign|-v:",
+]
+marks.read = ["files", "file"]
+
+[commands.gawk]
+parser = "gnu"
+arguments = [
+  ["program", "--source|-e:", "--file|-f|--include|-i:"],
+  "files...", "--field-separator|-F:", "--assign|-v:",
+]
+marks.read = ["files", "file"]
+
+[commands.mawk]
+parser = "gnu"
+arguments = [["program", "--file|-f:"], "files...", "--field-separator|-F:", "--assign|-v:"]
+marks.read = ["files", "file"]
+
+[commands.nawk]
+parser = "posix"
+arguments = [["program", "file=-f:"], "files...", "field_separator=-F:", "assign=-v:"]
+marks.read = ["files", "file"]
+
+# =============================================================================
+# Tools with subcommands
+# =============================================================================
+
+[commands.git]
+parser = "gnu"
+arguments = [
+  "dir=-C:", "--git-dir:", "--work-tree:", "config=-c:", "--config-env:", "--namespace:",
+  "--exec-path", "--no-pager|-P", "--paginate|-p", "--bare", "--no-replace-objects",
+  "--literal-pathspecs", "--no-optional-locks", "subcommand",
+]
+argument.dir.default = ["."]                          # git reads the repository of its directory
+argument.subcommand.words = [
+  "add", "rm", "mv", "checkout", "switch", "restore", "merge", "rebase", "pull", "fetch",
+  "clone", "init", "worktree", "cherry-pick", "revert", "am", "apply", "bisect", "submodule",
+  "gc", "prune",
+]
+marks.cwd = ["dir"]
+marks.read = ["git_dir", "work_tree"]
+
+[commands.git.status]
+arguments = [
+  "files...", "--short|-s", "--branch|-b", "--porcelain", "--long", "--verbose|-v", "--ignored",
+  "-z", "--show-stash", "--ahead-behind",
+]
+marks.read = ["files"]
+
+[commands.git.blame]
+arguments = ["files...", "line_range=-L:", "-w", "-e", "-s", "-l", "--porcelain", "--line-porcelain"]
+marks.read = ["files"]
+
+[commands.git.ls-files]
+arguments = [
+  "files...", "--others|-o", "--modified|-m", "--deleted|-d", "--cached|-c", "--exclude-standard",
+  "--ignored|-i", "-z", "--stage|-s", "--full-name", "--directory", "--error-unmatch",
+]
+marks.read = ["files"]
+
+[commands.git.ls-tree]
+arguments = ["tree", "files...", "-r", "-t", "-d", "--name-only", "--long|-l", "-z", "--full-name", "--full-tree"]
+marks.read = ["files"]
+
+[commands.git.grep]
+arguments = [
+  ["pattern", "--regexp|-e:", "file=-f:"], "files...",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--line-number|-n", "--ignore-case|-i", "--files-with-matches|-l", "--word-regexp|-w",
+  "--invert-match|-v", "--count|-c", "--extended-regexp|-E", "--fixed-strings|-F",
+  "--perl-regexp|-P", "--cached", "--untracked", "--no-index", "-h", "with_filename=-H", "--heading", "--break",
+  "--show-function|-p",
+]
+marks.read = ["files", "file"]
+
+[commands.git.shortlog]
+arguments = ["revisions...", "--summary|-s", "--numbered|-n", "--email|-e", "--all"]
+
+[commands.git.rev-parse]
+arguments = [
+  "revisions...", "--show-toplevel", "--abbrev-ref", "show_git_dir=--git-dir", "--short", "--verify",
+  "--quiet|-q", "--is-inside-work-tree", "--show-prefix", "--show-cdup", "--absolute-git-dir",
+  "--symbolic-full-name", "--git-common-dir", "--is-bare-repository",
+]
+
+[commands.git.describe]
+arguments = ["commits...", "--tags", "--always", "--dirty", "--long", "--abbrev", "--all", "--exact-match", "--contains"]
+
+[commands.git.cat-file]
+arguments = ["objects...", "-t", "-s", "-p", "-e"]
+
+[commands.git.log]
+parser = { name = "gnu", number = "max_count" }       # git log reads -5 anywhere as --max-count 5
+arguments = [
+  "files...",
+  "--output:",
+  "find_copies=-C", "combined=-c",                    # log's own -C, not git's -C <dir>
+  "--max-count|-n:", "--skip:", "--since|--after:", "--until|--before:", "--author:", "--committer:",
+  "--grep:", "pickaxe_regex=-G:", "pickaxe=-S:", "line_range=-L:", "--format:", "--date:",
+  "--oneline", "--graph", "--stat", "--all", "--decorate", "--no-decorate", "--patch|-p",
+  "--no-patch|-s", "--name-only", "--name-status", "--no-merges", "--merges", "--reverse",
+  "--first-parent", "--follow", "--abbrev-commit", "--shortstat", "--numstat", "--summary",
+  "--pretty", "--color", "--no-color", "--topo-order", "--date-order", "--left-right",
+  "--branches", "--tags", "--remotes", "--source", "--regexp-ignore-case|-i",
+]
+marks.read = ["files"]
+marks.write = ["output"]
+
+[commands.git.diff]
+arguments = [
+  "files...", "--output:", "find_copies=-C", "pickaxe_regex=-G:", "pickaxe=-S:", "--diff-filter:",
+  "--stat", "--cached|--staged", "--name-only", "--name-status", "--patch|-p", "--numstat",
+  "--shortstat", "--summary", "--color", "--no-color", "--ignore-all-space|-w", "--word-diff",
+  "--check", "reverse=-R", "--exit-code", "--quiet", "--no-index", "--relative", "--no-renames",
+]
+marks.read = ["files"]
+marks.write = ["output"]
+
+[commands.git.show]
+arguments = [
+  "files...", "--output:", "--format:", "--stat", "--name-only", "--name-status", "--oneline",
+  "--patch|-p", "--no-patch|-s", "--pretty", "--color", "--no-color", "--abbrev-commit",
+  "--summary", "--shortstat", "--numstat", "--quiet",
+]
+marks.read = ["files"]
+marks.write = ["output"]
+
+[commands.git.commit]
+arguments = [
+  "--file|-F:", "--template|-t:", "--message|-m:", "--reuse-message|-C:", "--reedit-message|-c:",
+  "--author:", "--date:", "--fixup:", "--squash:", "--trailer:",
+]
+marks.read = ["file", "template"]
+
+[commands.git.config]
+arguments = [
+  "names...", "--file|-f:", "--type:", "--default:", "--blob:",
+  "--list|-l", "--get", "--get-all", "--get-regexp",
+  "--unset", "--unset-all", "--add", "--replace-all", "--edit|-e", "--rename-section", "--remove-section",
+  "--global", "--local", "--system", "--worktree", "--show-origin", "--show-scope", "--name-only",
+  "--null|-z", "--includes", "--no-includes",
+]
+marks.read = ["file"]
+
+[commands.git.branch]
+arguments = [
+  "names...",
+  "--list|-l", "--delete|-d", "force_delete=-D", "--move|-m", "force_move=-M", "--copy|-c", "force_copy=-C",
+  "--unset-upstream", "--edit-description", "--set-upstream-to|-u:",
+  "--contains:", "--no-contains:", "--merged:", "--no-merged:", "--points-at:", "--sort:", "--format:",
+  "--all|-a", "--remotes|-r", "--verbose|-v", "--show-current", "--column", "--no-column",
+  "--ignore-case|-i",
+]
+
+[commands.git.tag]
+arguments = [
+  "names...", "--list|-l", "--delete|-d", "--file|-F:", "--message|-m:", "--local-user|-u:",
+  "--contains:", "--no-contains:", "--merged:", "--no-merged:", "--points-at:", "--sort:", "--format:",
+  "lines=-n", "--column", "--ignore-case|-i",
+]
+marks.read = ["file"]
+
+[commands.git.remote]
+arguments = ["subcommand", "names...", "--verbose|-v"]
+argument.subcommand.words = [
+  "add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "show", "get-url",
+  "prune", "update",
+]
+
+[commands.git.stash]
+arguments = ["subcommand", "names..."]
+argument.subcommand.words = [
+  "list", "show", "push", "pop", "apply", "drop", "clear", "branch", "create", "store",
+]
+global = ["--patch|-p", "--stat", "--name-only", "--include-untracked|-u", "--quiet|-q"]   # after the word
+
+[commands.git.reflog]
+arguments = ["subcommand", "names..."]
+argument.subcommand.words = ["show", "expire", "delete", "exists"]
+
+[commands.git.push]
+arguments = [
+  "repository", "refspecs...",
+  "--force|-f", "--force-with-lease", "--force-if-includes", "--delete|-d", "--mirror", "--prune",
+  "--push-option|-o:", "--repo:", "--receive-pack:", "--exec:",
+]
+
+[commands.git.reset]
+arguments = ["--soft", "--mixed", "--hard", "--merge", "--keep"]
+
+[commands.git.clean]
+arguments = ["--force|-f", "--exclude|-e:"]
+
+[commands.cargo]
+parser = "gnu"
+arguments = ["toolchain", "dir=-C:", "subcommand", "rest..."]
+argument.toolchain.match = "+*"
+argument.dir.default = ["."]                          # cargo reads the package of its directory
+argument.subcommand.words = [
+  "build", "check", "test", "run", "bench", "doc", "clippy", "fmt", "clean", "update", "add",
+  "remove", "tree", "metadata", "search", "uninstall", "publish", "new", "init", "fetch", "fix",
+  "vendor", "package", "login", "logout", "owner", "yank",
+]
+global = [                                            # subcommand options come after the word
+  "--config:", "unstable=-Z:", "--color:", "--manifest-path:", "--target-dir:",
+  "--package|-p:", "--features|-F:", "--target:", "--bin:", "--example:", "--test:", "--bench:",
+  "--jobs|-j:", "--profile:", "--message-format:",
+  "--release|-r", "--all-targets", "--all-features", "--no-default-features", "--workspace", "--all",
+  "--lib", "--bins", "--tests", "--benches", "--examples", "--doc", "--no-run", "--no-fail-fast",
+  "--keep-going", "--locked", "--offline", "--frozen", "--verbose|-v", "--quiet|-q",
+]
+marks.cwd = ["dir"]
+marks.read = ["manifest_path"]
+marks.write = ["target_dir"]
+
+[commands.cargo.install]
+arguments = ["crates...", "--path:", "--root:", "--git:", "--version:"]
+marks.read = ["path"]
+marks.write = ["root"]
+
+[commands.apt]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "purge", "autoremove", "update", "upgrade", "full-upgrade", "search",
+  "show", "list", "policy",
+]
+global = ["--config-file|-c:", "--option|-o:"]        # options come before or after the word
+marks.read = ["config_file"]
+
+[commands.apt-get]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "purge", "autoremove", "update", "upgrade", "dist-upgrade", "source",
+  "build-dep", "clean", "autoclean", "check",
+]
+global = ["--config-file|-c:", "--option|-o:"]
+marks.read = ["config_file"]
+
+[commands.dnf]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "erase", "autoremove", "update", "upgrade", "search", "info", "list",
+]
+
+[commands.yum]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "erase", "autoremove", "update", "upgrade", "search", "info", "list",
+]
+
+[commands.pacman]
+parser = "gnu"
+arguments = [
+  "targets...", "--sync|-S", "--remove|-R", "--query|-Q", "--upgrade|-U", "--database|-D",
+  "--files|-F", "--deptest|-T",
+]
+
+[commands.systemctl]
+parser = "gnu"
+arguments = ["subcommand", "units..."]
+argument.subcommand.words = [
+  "status", "start", "stop", "restart", "reload", "enable", "disable", "mask", "unmask",
+  "is-active", "is-enabled", "list-units", "daemon-reload", "show", "cat",
+]
+global = [                                            # options come before or after the word
+  "--host|-H:", "--machine|-M:", "--property|-p:", "--type|-t:", "--signal|-s:", "--lines|-n:",
+  "--output|-o:", "--state:",
+]
+
+# =============================================================================
+# Rules: code from text (deny, on every host)
+# =============================================================================
+
+[[rules]]
+description = "eval"
+command = "eval"
+host = 'true'
+action = "deny"
+message = "eval executes arbitrary strings"
+
+[[rules]]
+description = "source"
+when = 'command.name in ["source", "."]'
+host = 'true'
+action = "deny"
+message = "source executes file contents"
+
+[[rules]]
+description = "exec"
+command = "exec"
+host = 'true'
+action = "deny"
+message = "exec replaces the shell process"
+
+[[rules]]
+description = "git -c"
+command = "git"
+when = 'args.config != [] || args.config_env != [] || args.exec_path'
+host = 'true'
+action = "deny"
+message = "git -c and --exec-path can set a command to run (core.pager, core.sshCommand, …); set it in the repository's config instead"
+
+# =============================================================================
+# Rules: paths
+# =============================================================================
+
+[[rules]]
+description = "a path outside the project"
+path = '!in_project(path) && !is_device(path)'
+action = "ask"
+
+# =============================================================================
+# Rules: commands that change state (ask)
+# =============================================================================
+
+[[rules]]
+description = "cd/pushd/popd"
+when = 'command.name in ["cd", "pushd", "popd"]'
+action = "ask"
+
+[[rules]]
+description = "privilege escalation"
+when = 'command.name in ["sudo", "su", "doas"]'
+action = "ask"
+
+[[rules]]
+description = "rm -r"
+command = "rm"
+when = 'args.recursive'
+action = "ask"
+
+[[rules]]
+description = "find -delete"
+command = "find"
+when = 'args.delete'
+action = "ask"
+
+[[rules]]
+description = "rg runs a program"
+command = "rg"
+when = 'args.pre != [] || args.hostname_bin != []'
+action = "ask"
+message = "--pre and --hostname-bin run the program they name"
+
+[[rules]]
+description = "git push that rewrites or deletes remote branches"
+command = "git push"
+when = '''
+  args.force || args.force_with_lease || args.force_if_includes || args.delete || args.mirror
+  || args.prune || args.refspecs.exists(r, startsWith(r, "+") || startsWith(r, ":"))
+'''
+action = "ask"
+
+[[rules]]
+description = "git reset --hard"
+command = "git reset"
+when = 'args.hard'
+action = "ask"
+
+[[rules]]
+description = "git clean -f"
+command = "git clean"
+when = 'args.force'
+action = "ask"
+
+# awk_is_plain / sed_is_plain: true only for a program that neither runs a command nor opens a
+# file of its own; anything they cannot vouch for is false. One rule per command, since each
+# reads only the names that its grammar declares.
+
+[[rules]]
+description = "awk program beyond plain text processing"
+command = "awk"
+when = '''
+  args.file != [] || args.program != null && !awk_is_plain(args.program)
+  || args.source.exists(p, !awk_is_plain(p))
+'''
+action = "ask"
+message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
+
+[[rules]]
+description = "gawk program beyond plain text processing"
+command = "gawk"
+when = '''
+  args.file != [] || args.program != null && !awk_is_plain(args.program)
+  || args.source.exists(p, !awk_is_plain(p))
+'''
+action = "ask"
+message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
+
+[[rules]]
+description = "mawk program beyond plain text processing"
+command = "mawk"
+when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
+action = "ask"
+message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
+
+[[rules]]
+description = "nawk program beyond plain text processing"
+command = "nawk"
+when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
+action = "ask"
+message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
+
+[[rules]]
+description = "sed script beyond plain text processing"
+command = "sed"
+when = '''
+  args.file != [] || args.script != null && !sed_is_plain(args.script)
+  || args.expression.exists(s, !sed_is_plain(s))
+'''
+action = "ask"
+message = "the sed script can run a command or open a file: e, s///e, w, r, or a script file"
+
+[[rules]]
+description = "disk and filesystem"
+when = 'command.name in ["dd", "mkfs", "fdisk", "mount", "umount"]'
+action = "ask"
+
+[[rules]]
+description = "system power"
+when = 'command.name in ["reboot", "shutdown", "poweroff", "halt"]'
+action = "ask"
+
+[[rules]]
+description = "process signals"
+when = 'command.name in ["kill", "pkill", "killall"]'
+action = "ask"
+
+[[rules]]
+description = "apt package removal"
+command = "apt"
+when = 'subcommand in ["remove", "purge", "autoremove"]'
+action = "ask"
+
+[[rules]]
+description = "apt-get package removal"
+command = "apt-get"
+when = 'subcommand in ["remove", "purge", "autoremove"]'
+action = "ask"
+
+[[rules]]
+description = "dnf package removal"
+command = "dnf"
+when = 'subcommand in ["remove", "erase", "autoremove"]'
+action = "ask"
+
+[[rules]]
+description = "yum package removal"
+command = "yum"
+when = 'subcommand in ["remove", "erase", "autoremove"]'
+action = "ask"
+
+[[rules]]
+description = "pacman package removal"
+command = "pacman"
+when = 'args.remove'
+action = "ask"
+
+[[rules]]
+description = "firewall"
+when = 'command.name in ["iptables", "ufw", "firewall-cmd"]'
+action = "ask"
+
+[[rules]]
+description = "service disruption"
+command = "systemctl"
+when = 'subcommand in ["stop", "disable", "mask", "restart"]'
+action = "ask"
+
+[[rules]]
+description = "curl/wget"
+when = 'command.name in ["curl", "wget"]'
+action = "ask"
+
+[[rules]]
+description = "permissions"
+when = 'command.name in ["chmod", "chown", "chgrp"]'
+action = "ask"
+
+[[rules]]
+description = "cargo install"
+command = "cargo install"
+action = "ask"
+message = "cargo install downloads and compiles arbitrary code from crates.io"
+
+# =============================================================================
+# Rules: allowed (the rules above ask when these reach too far)
+# =============================================================================
+
+[[rules]]
+description = "info commands"
+when = '''
+  command.name in ["echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id", "which",
+                   "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type", "man", "tr"]
+'''
+action = "allow"
+
+[[rules]]
+description = "file tools"
+when = '''
+  command.name in ["cat", "less", "more", "wc", "file", "stat", "realpath", "readlink", "diff",
+                   "base64", "md5sum", "sha256sum", "uniq", "head", "tail", "ls", "tree", "cut", "sort",
+                   "grep", "egrep", "fgrep", "rg", "find", "mkdir", "rmdir", "touch", "tee", "cp", "mv",
+                   "ln", "rm", "sed", "awk", "gawk", "mawk", "nawk"]
+'''
+action = "allow"
+
+[[rules]]
+description = "cargo"
+command = "cargo"
+action = "allow"
+
+[[rules]]
+description = "git commands that only read"
+command = "git"
+when = '''
+  subcommand in ["status", "log", "diff", "show", "shortlog", "blame", "ls-files", "ls-tree",
+                 "rev-parse", "describe", "cat-file", "grep"]
+'''
+action = "allow"
+
+[[rules]]
+description = "git remote listings"
+command = "git remote"
+when = 'subcommand in [null, "show", "get-url"]'
+action = "allow"
+
+[[rules]]
+description = "git stash listings"
+command = "git stash"
+when = 'subcommand in ["list", "show"]'
+action = "allow"
+
+[[rules]]
+description = "git reflog listings"
+command = "git reflog"
+when = 'subcommand in [null, "show"]'
+action = "allow"
+
+[[rules]]
+description = "git branch listings"
+command = "git branch"
+when = '''
+  (args.list || args.names == [])
+  && !(args.delete || args.force_delete || args.move || args.force_move || args.copy || args.force_copy
+       || args.unset_upstream || args.edit_description || args.set_upstream_to != [])
+'''
+action = "allow"
+
+[[rules]]
+description = "git tag listings"
+command = "git tag"
+when = '(args.list || args.names == []) && !args.delete'
+action = "allow"
+
+[[rules]]
+description = "git config reads"
+command = "git config"
+when = '''
+  !(args.unset || args.unset_all || args.add || args.replace_all || args.edit
+    || args.rename_section || args.remove_section)
+  && (args.list || args.get || args.get_all || args.get_regexp
+      || args.names.size() == 1 || args.names.size() > 0 && args.names[0] in ["get", "list"])
+'''
+action = "allow"

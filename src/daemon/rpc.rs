@@ -1006,7 +1006,7 @@ async fn handle_capture_pane(
 /// OSC 133 + OSC 7 injection script for bash.
 /// Each line has leading space for history suppression.
 pub const OSC133_INJECT_LINES: &[&str] = &[
-    " __osc133_exec_ready=true; __osc7_cwd() { printf '\\e]7;file://%s@%s%s\\e\\\\' \"$USER\" \"$(hostname)\" \"$PWD\"; }; __osc133_precmd() { local ret=$?; __osc133_exec_ready=true; printf '\\e]133;D;%d\\e\\\\\\e]133;A\\e\\\\' \"$ret\"; __osc7_cwd; return \"$ret\"; }; PROMPT_COMMAND=\"__osc133_precmd;${PROMPT_COMMAND:-}\"",
+    " __osc133_exec_ready=true; __osc7_cwd() { printf '\\e]7;file://%s@%s%s\\e\\\\' \"$USER\" \"$(hostname)\" \"$PWD\"; }; __osc133_precmd() { local ret=$?; __osc133_exec_ready=true; __osc7_cwd; printf '\\e]133;D;%d\\e\\\\\\e]133;A\\e\\\\' \"$ret\"; return \"$ret\"; }; PROMPT_COMMAND=\"__osc133_precmd;${PROMPT_COMMAND:-}\"",
     " __osc133_debug() { if $__osc133_exec_ready; then __osc133_exec_ready=false; local cmd; cmd=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]* *//'); [[ -n \"$cmd\" ]] && printf '\\e]133;E;%s\\e\\\\' \"$cmd\"; fi; }; trap '__osc133_debug \"$_\"' DEBUG",
     " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\e]133;C\\e\\\\'",
 ];
@@ -1158,9 +1158,12 @@ async fn read_pane_context(
     };
     let tp = handle.lock().await;
     let term_state = tp.processor.state();
+    // Only a report since the running command started tells where the next
+    // command runs.
+    let reported = term_state.osc7_since_command;
     Ok(policy::PaneContext {
-        hostname: term_state.hostname.clone(),
-        cwd: term_state.cwd.clone(),
+        hostname: term_state.hostname.clone().filter(|_| reported),
+        cwd: term_state.cwd.clone().filter(|_| reported),
         foreground: tp.pid.and_then(|pid| {
             proc::proc_info(pid).and_then(|info| info.foreground.map(|f| f.comm.clone()))
         }),
