@@ -529,4 +529,21 @@ mod tests {
         let path = project_config_path_always("/home/user/project");
         assert_eq!(path, PathBuf::from("/home/user/project/.claude/tmux-mcp.toml"));
     }
+
+    // --- Dependency contract: toml ---
+
+    #[test]
+    fn a_policy_file_may_use_toml_1_1_inline_tables() {
+        let toml = r#"
+            rules = [
+              {
+                description = "my tools",
+                when = 'command.name == "cargo"',
+                action = "allow",
+              },
+            ]
+        "#;
+        let config = parse_config(toml).unwrap();
+        assert_eq!(config.rules[0].description, "my tools");
+    }
 }
