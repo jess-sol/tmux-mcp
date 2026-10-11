@@ -48,8 +48,6 @@
               pkgs.prek
               # The licence gate in .pre-commit-config.yaml.
               pkgs.cargo-deny
-              # scripts/bench reads criterion's estimates and keeps their history.
-              pkgs.jq
             ];
           };
         });

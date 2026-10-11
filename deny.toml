@@ -1,0 +1,24 @@
+# The licence gate, run by `cargo deny check licenses` from
+# .pre-commit-config.yaml. Every crate linked into tmux-mcp must be available
+# under a permissive licence: Rust links statically, so a copyleft crate binds
+# the whole binary. A dual-licensed crate passes on its permissive arm.
+
+[licenses]
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
