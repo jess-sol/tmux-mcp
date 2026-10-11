@@ -12,6 +12,12 @@ fn ruleset(rules_toml: &str) -> RuleSet {
     compile(&rules, Decision::Ask, &grammars).unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// The decision for one command, its reasons joined as a line's are.
+fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> crate::policy::PolicyResult {
+    let (decision, reasons) = super::decide(rules, facts, env);
+    crate::policy::PolicyResult { decision, rule: reasons.join("\n") }
+}
+
 fn env() -> Env {
     Env { this_host: "here".into(), anchor: Some("/src/proj".into()), project_dirs: vec!["/src/proj".into()] }
 }
@@ -29,6 +35,8 @@ fn facts_with_xs(xs: TriVal) -> Facts {
         host: Host::Here,
         user: TriVal::String("u".into()),
         own_user: true,
+        line: "t".into(),
+        place: HashMap::new(),
     }
 }
 
@@ -162,6 +170,43 @@ fn an_exemption_removes_the_named_rule_only_where_its_rule_surely_matches() {
         let facts = Facts { paths: paths.clone(), ..facts_with_xs(xs.clone()) };
         let got = decide(rules, &facts, &env());
         assert_eq!((got.decision, got.rule.as_str()), (decision, rule), "xs={xs:?}, paths={paths:?}");
+    }
+}
+
+/// A reason lists every rule at the winning action, each with its message,
+/// whose `{{ }}` holes render CEL.
+#[test]
+fn a_reason_lists_every_rule_at_the_winning_action_with_its_rendered_message() {
+    let rules = ruleset(
+        r#"
+        [[rules]]
+        id = "first"
+        command = "t"
+        action = "deny"
+        message = 'xs {{ args.xs }}, {{ 1 + 2 }}, {{ null }}, {{ unknown }}, {{ "a" }}'
+        [[rules]]
+        id = "second"
+        action = "deny"
+        [[rules]]
+        id = "looser"
+        action = "ask"
+        "#,
+    );
+    let got = decide(&rules, &facts_with_xs(strings(&["a", "b"], true)), &env());
+    assert_eq!(got.rule, "first: xs a b, 3, …, …, a\nsecond");
+}
+
+#[test]
+fn sure_counts_only_what_is_certain() {
+    let rows = [
+        ("sure(true)", TriVal::Bool(true)),
+        ("sure(false)", TriVal::Bool(false)),
+        ("sure(unknown)", TriVal::Bool(false)),
+        ("sure(unknown == 1)", TriVal::Bool(false)),
+        ("!sure(unknown)", TriVal::Bool(true)),
+    ];
+    for (expr, want) in rows {
+        assert_eq!(eval_cel(expr), want, "{expr}");
     }
 }
 

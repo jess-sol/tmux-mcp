@@ -107,6 +107,31 @@ fn brush_keeps_a_here_document_body_as_a_word() {
     )));
 }
 
+/// A word carries its place in the line, counted in characters. A
+/// command's place covers its words but not its redirects, which have no
+/// place of their own; a redirect's target word has one. A list item
+/// carries its separator.
+#[test]
+fn brush_locates_words_by_character_and_redirects_only_by_their_target() {
+    use brush_parser::ast::SourceLocation;
+    let line = "é | make 2>&1 &";
+    let item = &parse_program(line).complete_commands[0].0[0];
+    let span = |loc: Option<brush_parser::TokenLocation>| loc.map(|l| (l.start.index, l.end.index));
+    let seq = &item.0.first.seq;
+    assert_eq!(span(seq[0].location()), Some((0, 1)));
+    let ast::Command::Simple(make) = &seq[1] else { panic!("{:?}", seq[1]) };
+    assert_eq!(span(make.location()), Some((4, 8)));
+    let redirect = make.suffix.iter().flat_map(|s| &s.0).find_map(|i| match i {
+        ast::CommandPrefixOrSuffixItem::IoRedirect(r) => Some(r),
+        _ => None,
+    });
+    let Some(redirect @ ast::IoRedirect::File(_, _, ast::IoFileRedirectTarget::Duplicate(target))) = redirect else {
+        panic!("{redirect:?}")
+    };
+    assert_eq!((span(redirect.location()), span(target.loc.clone())), (None, Some((12, 13))));
+    assert!(matches!(item.1, ast::SeparatorOperator::Async));
+}
+
 #[test]
 fn brush_finds_brace_expressions_outside_quotes_only() {
     let options = brush_parser::ParserOptions::default();
@@ -228,6 +253,69 @@ fn a_prefix_assignment_is_a_variable_of_its_command() {
     assert_eq!(cmds[0].variables, strings(&["A", "B"]));
 }
 
+// --- A command's place in the line ---
+
+#[test]
+fn a_command_knows_its_text_its_neighbours_and_its_words() {
+    let op = |o: &str| Some(o.to_string());
+    // (line, name, text, top, op_before, op_after)
+    let rows = [
+        ("ls | tail -5", "tail", "tail -5", true, op("|"), None),
+        ("ls | tail -5", "ls", "ls", true, None, op("|")),
+        ("make 2>&1; echo $?", "make", "make 2>&1", true, None, op(";")),
+        ("cd x && cargo test || true", "cargo", "cargo test", true, op("&&"), op("||")),
+        ("a &\nb", "a", "a", true, None, op("&")),
+        ("a\nb", "b", "b", true, op(";"), None),
+        ("(echo hi)", "echo", "echo hi", false, None, None),
+        ("{ echo hi; }", "echo", "echo hi", false, None, None),
+        ("echo $(date)", "date", "date", false, None, None),
+        ("timeout 5 echo hi", "echo", "echo hi", false, None, None),
+    ];
+    for (line, name, text, top, before, after) in rows {
+        let c = command(&parse(line), name);
+        assert_eq!((c.text.as_str(), c.top, c.op_before, c.op_after), (text, top, before, after), "{line}: {name}");
+    }
+    // (line, constant, expands)
+    let words = [
+        ("echo \"x\" 'y' \"*.log\" '$5'", true, vec![]),
+        ("echo", true, vec![]),
+        ("echo *.log", false, vec![]),
+        ("echo {a,b}", false, vec![]),
+        ("echo ~/x", false, vec![]),
+        ("echo $(date)", false, vec![]),
+        ("echo \"rc=$?\" ${HOME} $1", false, vec!["?", "HOME", "1"]),
+        ("echo \"${?}\" ${#x}", false, vec!["?", "x"]),
+    ];
+    for (line, constant, expands) in words {
+        let c = command(&parse(line), "echo");
+        assert_eq!((c.constant, c.expands.iter().map(String::as_str).collect::<Vec<_>>()), (constant, expands), "{line}");
+    }
+    let redirects = command(&parse("make > out 2>&1"), "make").redirects;
+    assert_eq!(redirects.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), ["> out", "2>&1"]);
+}
+
+/// A command goes with the operator that joins it to the command before
+/// it, or after it when it comes first; a redirect goes alone.
+#[test]
+fn a_cut_takes_a_command_with_its_operator_or_a_redirect_alone() {
+    // (line, name, the redirect to cut or None for the command, the line left)
+    let rows = [
+        ("ls | tail -5", "tail", None, "ls"),
+        ("make 2>&1; echo \"rc=$?\"", "echo", None, "make 2>&1"),
+        ("cd /p && cargo test", "cd", None, "cargo test"),
+        ("a && é b && c", "é", None, "a && c"),
+        ("cargo build --quiet && echo BUILD_OK", "echo", None, "cargo build --quiet"),
+        ("make  2>&1", "make", Some(0), "make"),
+        ("make > out 2>&1 | sort", "make", Some(1), "make > out | sort"),
+        ("ls", "ls", None, ""),
+    ];
+    for (line, name, redirect, want) in rows {
+        let c = command(&parse(line), name);
+        let range = redirect.map_or(c.cut, |r| c.redirects[r].cut);
+        assert_eq!(cut(line, range), want, "{line}: {name}");
+    }
+}
+
 // --- Context and paths ---
 
 #[test]
@@ -240,7 +328,9 @@ fn a_command_reads_and_writes_resolved_paths() {
     assert_eq!((git.cwd, git.reads), (s("/p/q/sub"), paths(&[s("/p/q/sub/f"), s("/p/q/sub")])));
     let echo = command(&parse("echo hi > '/tmp/evil' 2>&1 < \"in\" >> $X"), "echo");
     let got: Vec<_> = echo.redirects.iter().map(|r| (r.target.clone(), r.is_write)).collect();
-    assert_eq!(got, [(s("/tmp/evil"), true), (s("/p/q/in"), false), (TriVal::Unknown, true)]);
+    // `2>&1` opens no file: its target is null.
+    let want = [(s("/tmp/evil"), true), (TriVal::Null, false), (s("/p/q/in"), false), (TriVal::Unknown, true)];
+    assert_eq!(got, want);
 }
 
 /// A cd holds for the commands that run only if it succeeded; a subshell,

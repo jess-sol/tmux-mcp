@@ -1,21 +1,27 @@
 //! Walking brush's syntax tree: every command the line runs, in the context
 //! of the shell that runs it, with its substitutions and *Inner command*s.
-//! Each command's paths resolve against its context.
+//! Each command's paths resolve against its context (`context`), and a
+//! command of the line's own shell knows its place in the line (`place`).
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+mod context;
+mod place;
 
 use brush_parser::ast;
 use brush_parser::word::{WordPiece, WordPieceWithSource};
-use cel_parser::ast as cel;
 
+use super::word::{constant, expanded};
 use super::{CommandInfo, Context, Grammars, ParseError, RedirectInfo, Word, parse_with_brush, word};
-use crate::policy::grammar::{Inner, With};
-use crate::policy::rules::{eval_with, resolve};
+use crate::policy::grammar::Inner;
 use crate::policy::value::TriVal;
+use context::{inner_context, join, resolved};
+use place::{Joint, Place, separator};
 
 struct Walker<'a> {
     grammars: &'a Grammars,
+    /// The line, whose syntax tree places by character.
+    line: &'a str,
+    /// The byte offset of each character of `line`, and of its end.
+    bytes: Vec<usize>,
     out: Vec<CommandInfo>,
     /// The context of the shell being walked.
     context: Context,
@@ -30,11 +36,12 @@ struct Walker<'a> {
 /// CDPATH is assumed unset: a line that sets it asks.
 const CHANGES_DIRECTORY: [&str; 3] = ["cd", "pushd", "popd"];
 
-/// The commands that `program` runs, each parsed by its grammar, the first
-/// in `start`.
-pub(super) fn walk(program: &ast::Program, grammars: &Grammars, start: &Context) -> Result<Vec<CommandInfo>, ParseError> {
-    let mut walker = Walker { grammars, out: Vec::new(), context: start.clone(), moved: false, error: None };
-    walker.program(program);
+/// The commands that `program`, the parse of `line`, runs, each parsed by
+/// its grammar, the first in `start`.
+pub(super) fn walk(line: &str, program: &ast::Program, grammars: &Grammars, start: &Context) -> Result<Vec<CommandInfo>, ParseError> {
+    let bytes = line.char_indices().map(|(b, _)| b).chain([line.len()]).collect();
+    let mut walker = Walker { grammars, line, bytes, out: Vec::new(), context: start.clone(), moved: false, error: None };
+    walker.top(program);
     match walker.error {
         Some(err) => Err(err),
         None => Ok(walker.out),
@@ -42,6 +49,18 @@ pub(super) fn walk(program: &ast::Program, grammars: &Grammars, start: &Context)
 }
 
 impl Walker<'_> {
+    /// The line's own shell: its list items, across its lines, in order. A
+    /// newline joins them as `;` does.
+    fn top(&mut self, program: &ast::Program) {
+        let items: Vec<&ast::CompoundListItem> = program.complete_commands.iter().flat_map(|cc| &cc.0).collect();
+        let ops: Vec<_> = items.iter().map(|item| separator(&item.1)).collect();
+        let extents: Vec<_> = items.iter().map(|item| self.and_or_extent(&item.0)).collect();
+        let line = Joint::line(ops.last().copied().filter(|op| *op == "&"));
+        for (k, item) in items.iter().enumerate() {
+            self.and_or_list(&item.0, Some(line.of_part(k, &ops, &extents)));
+        }
+    }
+
     fn program(&mut self, program: &ast::Program) {
         for cc in &program.complete_commands {
             self.compound_list(cc);
@@ -50,24 +69,31 @@ impl Walker<'_> {
 
     fn compound_list(&mut self, list: &ast::CompoundList) {
         for item in &list.0 {
-            self.and_or_list(&item.0);
+            self.and_or_list(&item.0, None);
         }
     }
 
     /// After `||`, and once the list ends (`;`, `&`, a newline), a cd in it
-    /// may have failed, so the cwd is Unknown.
-    fn and_or_list(&mut self, and_or: &ast::AndOrList) {
+    /// may have failed, so the cwd is Unknown. `joint` places a list of the
+    /// line's own shell.
+    fn and_or_list(&mut self, and_or: &ast::AndOrList, joint: Option<Joint>) {
         let outer = std::mem::replace(&mut self.moved, false);
-        self.pipeline(&and_or.first);
+        let mut pipelines = vec![&and_or.first];
+        let mut ops = Vec::new();
         for additional in &and_or.additional {
-            let pipeline = match additional {
-                ast::AndOr::And(p) => p,
-                ast::AndOr::Or(p) => {
-                    self.leave_chain();
-                    p
-                }
+            let (op, pipeline) = match additional {
+                ast::AndOr::And(p) => ("&&", p),
+                ast::AndOr::Or(p) => ("||", p),
             };
-            self.pipeline(pipeline);
+            ops.push(op);
+            pipelines.push(pipeline);
+        }
+        let extents: Vec<_> = pipelines.iter().map(|p| self.pipeline_extent(p)).collect();
+        for (j, pipeline) in pipelines.iter().enumerate() {
+            if j > 0 && ops[j - 1] == "||" {
+                self.leave_chain();
+            }
+            self.pipeline(pipeline, joint.map(|j_| j_.of_part(j, &ops, &extents)));
         }
         self.leave_chain();
         self.moved = outer;
@@ -80,20 +106,23 @@ impl Walker<'_> {
     }
 
     /// Each stage of a pipeline of several runs in a subshell.
-    fn pipeline(&mut self, pipeline: &ast::Pipeline) {
-        let subshells = pipeline.seq.len() > 1;
-        for command in &pipeline.seq {
-            if subshells {
-                self.subshell(|w| w.command(command));
+    fn pipeline(&mut self, pipeline: &ast::Pipeline, joint: Option<Joint>) {
+        let stages = pipeline.seq.len();
+        let ops = vec!["|"; stages.saturating_sub(1)];
+        let extents: Vec<_> = pipeline.seq.iter().map(|c| self.command_extent(c)).collect();
+        for (i, command) in pipeline.seq.iter().enumerate() {
+            let joint = joint.map(|outer| outer.of_part(i, &ops, &extents));
+            if stages > 1 {
+                self.subshell(|w| w.command(command, joint));
             } else {
-                self.command(command);
+                self.command(command, joint);
             }
         }
     }
 
-    fn command(&mut self, command: &ast::Command) {
+    fn command(&mut self, command: &ast::Command, joint: Option<Joint>) {
         match command {
-            ast::Command::Simple(simple) => self.simple_command(simple),
+            ast::Command::Simple(simple) => self.simple_command(simple, joint),
             ast::Command::Compound(compound, redirects) => {
                 self.compound_command(compound);
                 for redirect in redirects.iter().flat_map(|r| &r.0) {
@@ -109,12 +138,13 @@ impl Walker<'_> {
     /// A simple command, the commands of its substitutions, and its
     /// *Inner command*s. Words after the name that brush reads as
     /// assignments are plain words to the command.
-    fn simple_command(&mut self, simple: &ast::SimpleCommand) {
+    fn simple_command(&mut self, simple: &ast::SimpleCommand, joint: Option<Joint>) {
         let prefix = || simple.prefix.iter().flat_map(|p| &p.0);
         let suffix = || simple.suffix.iter().flat_map(|s| &s.0);
         let home = self.context.home.clone();
         let mut variables = Vec::new();
         let mut words = Vec::new();
+        let mut constant_words = true;
         let mut raws: Vec<&str> = simple.word_or_name.iter().map(|n| n.value.as_str()).collect();
         for item in prefix() {
             match item {
@@ -131,22 +161,31 @@ impl Walker<'_> {
             match item {
                 ast::CommandPrefixOrSuffixItem::Word(w) | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
                     words.push(word(&w.value, &home));
+                    constant_words &= constant(&w.value);
                     raws.push(&w.value);
                 }
                 ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, s) => {
                     words.push(Word::Unknown { splits: false });
+                    constant_words = false;
                     self.subshell(|w| w.compound_list(&s.list));
                 }
                 ast::CommandPrefixOrSuffixItem::IoRedirect(r) => self.redirect_substitutions(r),
             }
         }
-        for raw in raws {
+        let mut expands: Vec<String> = Vec::new();
+        for raw in &raws {
             self.substitutions(raw);
+            for name in expanded(raw) {
+                if !expands.contains(&name) {
+                    expands.push(name);
+                }
+            }
         }
 
+        let place = Place { constant: constant_words, expands, ..self.place(simple, joint) };
         let name = simple.word_or_name.as_ref().map(|n| word(&n.value, &home));
-        let redirects = redirects(prefix().chain(suffix()), &self.context);
-        let marked_cwd = self.run(name.clone(), &words, variables, redirects);
+        let redirects = self.redirects(prefix().chain(suffix()), place.top);
+        let marked_cwd = self.run(name.clone(), &words, variables, redirects, place);
         if matches!(&name, Some(Word::Known(n)) if CHANGES_DIRECTORY.contains(&n.as_str())) {
             self.context.cwd = marked_cwd.unwrap_or(TriVal::Unknown);
             self.moved = true;
@@ -156,7 +195,7 @@ impl Walker<'_> {
     /// One command in the shell's context, then its *Inner command*s in the
     /// context that its `with` gives them. Returns the cwd that the command's
     /// `marks.cwd` gives, if it gives one.
-    fn run(&mut self, name: Option<Word>, words: &[Word], mut variables: Vec<TriVal>, redirects: Vec<RedirectInfo>) -> Option<TriVal> {
+    fn run(&mut self, name: Option<Word>, words: &[Word], mut variables: Vec<TriVal>, redirects: Vec<RedirectInfo>, place: Place) -> Option<TriVal> {
         let context = self.context.clone();
         let parsed = match &name {
             Some(Word::Known(n)) => self.grammars.parse(n, words, &context.home),
@@ -186,6 +225,13 @@ impl Walker<'_> {
             cwd: cwd.clone(),
             variables: TriVal::List { elements: variables, exhaustive },
             context,
+            text: place.text,
+            top: place.top,
+            op_before: place.op_before,
+            op_after: place.op_after,
+            constant: place.constant,
+            expands: place.expands,
+            cut: place.cut,
         });
 
         for inner in parsed.inner {
@@ -193,11 +239,18 @@ impl Walker<'_> {
             match inner {
                 Inner::Words(words) => {
                     if let Some((name, rest)) = words.split_first() {
-                        self.run(Some(name.clone()), rest, Vec::new(), Vec::new());
+                        let text = words.iter().map(|w| match w {
+                            Word::Known(w) => w.as_str(),
+                            Word::Unknown { .. } => "…",
+                        });
+                        let place = Place::away(text.collect::<Vec<_>>().join(" "));
+                        self.run(Some(name.clone()), rest, Vec::new(), Vec::new(), place);
                     }
                 }
                 Inner::Line(Some(line)) => self.line(&line),
-                Inner::Line(None) => _ = self.run(Some(Word::Unknown { splits: true }), &[], Vec::new(), Vec::new()),
+                Inner::Line(None) => {
+                    _ = self.run(Some(Word::Unknown { splits: true }), &[], Vec::new(), Vec::new(), Place::away("…".into()))
+                }
             }
             self.context = outer;
         }
@@ -323,84 +376,6 @@ impl Walker<'_> {
     }
 }
 
-/// The context of a command's *Inner command*s: its own, with the fields
-/// that its `with` keys set, evaluated in the order host, user, cwd. Each key
-/// reads the command's args, its own cwd, user and host, and the fields
-/// already evaluated. A string sets the field, null keeps it, and anything
-/// else makes it Unknown. A host or user that changes leaves the home Unknown,
-/// and a user that changes ends the shell's own user.
-fn inner_context(outer: &Context, cwd: &TriVal, args: &BTreeMap<String, TriVal>, with: &With) -> Context {
-    let args = TriVal::Map(args.clone().into_iter().collect());
-    // The value a key gives its field; None keeps the field.
-    let value = |key: &Option<cel::IdedExpr>, evaluated: &HashMap<String, TriVal>, home: &TriVal| {
-        let vars = HashMap::from([
-            ("args".to_string(), args.clone()),
-            ("cwd".to_string(), cwd.clone()),
-            ("user".to_string(), outer.user.clone()),
-            ("host".to_string(), outer.host.clone()),
-            ("with".to_string(), TriVal::Map(evaluated.clone())),
-        ]);
-        match eval_with(key.as_ref()?, vars, home.clone()) {
-            TriVal::Null => None,
-            v @ TriVal::String(_) => Some(v),
-            _ => Some(TriVal::Unknown),
-        }
-    };
-    let same = |new: &TriVal, old: &TriVal| matches!(new, TriVal::String(_)) && new == old;
-
-    let mut inner = outer.clone();
-    let mut evaluated = HashMap::new();
-    if let Some(host) = value(&with.host, &evaluated, &inner.home) {
-        if !same(&host, &inner.host) {
-            inner.home = TriVal::Unknown;
-        }
-        inner.host = host;
-    }
-    if with.host.is_some() {
-        evaluated.insert("host".to_string(), inner.host.clone());
-    }
-    if let Some(user) = value(&with.user, &evaluated, &inner.home) {
-        if !same(&user, &inner.user) {
-            inner.home = TriVal::Unknown;
-            inner.own_user = false;
-        }
-        inner.user = user;
-    }
-    if with.user.is_some() {
-        evaluated.insert("user".to_string(), inner.user.clone());
-    }
-    if let Some(dir) = value(&with.cwd, &evaluated, &inner.home) {
-        inner.cwd = join(cwd, &dir);
-    }
-    inner
-}
-
-/// `dir` from the directory `base`: `base` itself when `dir` is Null.
-fn join(base: &TriVal, dir: &TriVal) -> TriVal {
-    match dir {
-        TriVal::Null => base.clone(),
-        TriVal::String(d) => resolve(d, as_dir(base)),
-        _ => TriVal::Unknown,
-    }
-}
-
-/// Each path of a list, from the directory `cwd`.
-fn resolved(paths: &TriVal, cwd: &TriVal) -> TriVal {
-    match paths {
-        TriVal::List { elements, exhaustive } => {
-            TriVal::List { elements: elements.iter().map(|p| join(cwd, p)).collect(), exhaustive: *exhaustive }
-        }
-        _ => TriVal::Unknown,
-    }
-}
-
-fn as_dir(cwd: &TriVal) -> Option<&Path> {
-    match cwd {
-        TriVal::String(d) => Some(Path::new(d)),
-        _ => None,
-    }
-}
-
 /// A here-document body expands as a double-quoted word in which `"` is
 /// plain text. Every backslash is kept, so an escaped `$(` still counts.
 fn here_document_word(body: &str) -> String {
@@ -411,32 +386,4 @@ fn variable_name(name: &ast::AssignmentName) -> String {
     match name {
         ast::AssignmentName::VariableName(n) | ast::AssignmentName::ArrayElementName(n, _) => n.clone(),
     }
-}
-
-/// The redirects of a command, their targets resolved in the shell's context.
-fn redirects<'a>(items: impl Iterator<Item = &'a ast::CommandPrefixOrSuffixItem>, context: &Context) -> Vec<RedirectInfo> {
-    let mut out = Vec::new();
-    for item in items {
-        let ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) = item else { continue };
-        let (target, is_write) = match redirect {
-            ast::IoRedirect::File(_, kind, ast::IoFileRedirectTarget::Filename(w)) => {
-                let is_write = matches!(
-                    kind,
-                    ast::IoFileRedirectKind::Write
-                        | ast::IoFileRedirectKind::Append
-                        | ast::IoFileRedirectKind::Clobber
-                        | ast::IoFileRedirectKind::ReadAndWrite
-                );
-                (w, is_write)
-            }
-            ast::IoRedirect::OutputAndError(w, _) => (w, true),
-            _ => continue,
-        };
-        let target = match word(&target.value, &context.home) {
-            Word::Known(text) => resolve(&text, as_dir(&context.cwd)),
-            Word::Unknown { .. } => TriVal::Unknown,
-        };
-        out.push(RedirectInfo { target, is_write });
-    }
-    out
 }

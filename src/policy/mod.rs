@@ -93,7 +93,7 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         return result;
     }
 
-    evaluate_all(&commands, &env, &compiled.rules)
+    evaluate_all(&commands, command, &env, &compiled.rules)
 }
 
 // --- Internal ---
@@ -137,24 +137,21 @@ fn this_host() -> String {
     HOST.get_or_init(|| hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()).clone()
 }
 
-/// Evaluate all commands in the flat list. Most restrictive result wins.
-/// Deny > Ask > Allow.
-fn evaluate_all(commands: &[parse::CommandInfo], env: &rules::Env, ruleset: &rules::RuleSet) -> PolicyResult {
-    let mut worst: Option<PolicyResult> = None;
-
-    for cmd in commands {
-        let result = rules::evaluate(cmd, env, ruleset);
-
-        if result.decision == Decision::Deny {
-            return result;
+/// Every command of `line` meets the rules; the most restrictive decision
+/// wins (deny, ask, allow), and its reason lists, once each, the reasons of
+/// every command at that decision.
+fn evaluate_all(commands: &[parse::CommandInfo], line: &str, env: &rules::Env, ruleset: &rules::RuleSet) -> PolicyResult {
+    let results: Vec<_> = commands.iter().map(|cmd| rules::evaluate(cmd, line, env, ruleset)).collect();
+    let Some(decision) = results.iter().map(|(d, _)| d).max_by_key(|d| severity(d)).cloned() else {
+        return PolicyResult { decision: ruleset.default.clone(), rule: "default".into() };
+    };
+    let mut reasons: Vec<String> = Vec::new();
+    for reason in results.into_iter().filter(|(d, _)| *d == decision).flat_map(|(_, r)| r) {
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
         }
-        worst = Some(match worst {
-            Some(w) if severity(&w.decision) >= severity(&result.decision) => w,
-            _ => result,
-        });
     }
-
-    worst.unwrap_or(PolicyResult { decision: ruleset.default.clone(), rule: "default".into() })
+    PolicyResult { decision, rule: reasons.join("\n") }
 }
 
 fn severity(d: &Decision) -> u8 {

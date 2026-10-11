@@ -36,13 +36,15 @@ action = "allow"                       # or "ask" or "deny"
 # write = '...'                        # CEL over each path it writes
 # host = 'host == "prod"'              # an allow without host matches only this machine; an ask or deny every host
 # user = 'user == "root"'              # an allow without user matches only the shell's own user; an ask or deny every user
-# message = "shown when triggered"
+# message = "Try: {{ drop(command) }}"  # shown with the decision; {{ }} holes render CEL
 # exempts = ["outside-project"]        # stricter rules that do not count while this one surely matches
 ```
 
 Every matching rule counts, and the strictest wins: deny, then ask, then allow. Default is `ask`. An Unknown condition fires ask and deny rules, never allow rules. A reason starts with the id of the rule that decided.
 
 To loosen a rule from another file, name its id in `exempts` on a rule that matches only what should pass: an allow exempts asks and denies, an ask exempts denies. To exempt a rule with `path`, the exempting rule needs `path` too, and it exempts only the paths it matches.
+
+A lint is a deny rule whose message tells Claude how to fix the command. It reads the command's place in the line (`command.top`, `command.op_before`, `command.op_after`, `command.constant`, `command.expands`, `command.redirects`) and renders the fix with `drop(command)` or `drop(command, "2>&1")`; `sure(b)` keeps it from firing on Unknown. A deny reaches Claude as a JSON deny, without asking the user.
 
 A rule reads a command's parts by name (`args.force`), which its grammar (`[commands.<name>]`) declares. To allow a command with conditions on its arguments, check that a built-in grammar exists for it, or add one.
 

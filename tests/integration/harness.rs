@@ -221,10 +221,8 @@ impl Harness {
         self.hook(shell, command).0
     }
 
-    /// The hook's decision and its reason. Claude Code reads a deny from
-    /// either channel: exit status 2 with the reason on stderr (a policy
-    /// deny), or a JSON "deny" (a lint refusal).
-    fn hook(&self, shell: &Shell, command: &str) -> (Decision, String) {
+    /// The hook's decision and its reason, which a deny shows to Claude.
+    pub fn hook(&self, shell: &Shell, command: &str) -> (Decision, String) {
         let mut hook = tmux_mcp(&self.env)
             .arg("policy-check")
             .stdin(Stdio::piped())
@@ -239,9 +237,6 @@ impl Harness {
             .write_all(input.to_string().as_bytes())
             .expect("hook input");
         let output = hook.wait_with_output().expect("the hook's answer");
-        if output.status.code() == Some(2) {
-            return (Decision::Deny, String::from_utf8_lossy(&output.stderr).into_owned());
-        }
         let answer: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|_| panic!("hook said {:?}", String::from_utf8_lossy(&output.stdout)));
         let answer = &answer["hookSpecificOutput"];

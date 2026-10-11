@@ -259,7 +259,7 @@ async fn the_builtin_policy_decides_common_lines() {
         ("cd src; cat notes", Ask),
         ("cd src || cat notes", Ask),
         ("popd && cat notes", Ask),
-        ("cd src && echo hi", Allow),
+        ("cd src && pwd", Allow),
         ("(cd src) && cat notes", Allow),
         ("cd src | cat notes", Allow),
         ("{ cd src; } && cat notes", Ask),
@@ -492,4 +492,113 @@ async fn a_sibling_directory_is_outside_the_project() {
     let decision = h.decision(&shell, &format!("rm {beside}"));
 
     assert_eq!(decision, Ask);
+}
+
+const LINTS: [&str; 14] = [
+    "pipe-to-tail", "pipe-to-head", "pipe-to-grep", "pipe-to-egrep", "pipe-to-fgrep", "pipe-to-rg",
+    "pipe-to-tee", "echo-status", "echo-status-alone", "constant-echo", "constant-success-echo",
+    "stderr-to-stdout", "background", "redundant-cd",
+];
+
+/// The test inputs of the lints that were Rust code: each line a lint
+/// denies, with the fix its message names; None where no lint fires.
+#[tokio::test]
+async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    let dir = h.dir().display().to_string();
+    let (cd_dir, cd_dir_slash) = (format!("cd {dir} && cargo test"), format!("cd {dir}/ && cargo test"));
+    let cd_alone = format!("cd {dir}");
+    let rows: Vec<(&str, Option<&str>)> = vec![
+        ("ls | tail -5", Some("tail=5")),
+        ("cat file | tail -n 10", Some("tail=10")),
+        ("tail -f /var/log/syslog", None),
+        ("ls | tail -5 | sort", None),
+        ("ls | head -20", Some("head=20")),
+        ("head -20 file.txt", None),
+        ("ls | head -20 | sort", None),
+        ("cat file | head -5 | wc -l", None),
+        ("ps aux | grep python", Some("search=\"python\"")),
+        ("make | grep -i error", Some("search=\"error\"")),
+        ("cat file | egrep 'foo|bar'", Some("search=\"foo|bar\"")),
+        ("ls -la | rg pattern", Some("search=\"pattern\"")),
+        ("grep pattern file.txt", None),
+        ("rg pattern .", None),
+        ("ps aux | grep python | wc -l", None),
+        ("make 2>&1", Some("command_run(command=\"make\")")),
+        ("make 2>&1 | sort", None),
+        ("ls | tee out.txt", Some("command_run(command=\"ls\")")),
+        ("tee output.log", None),
+        ("make | tee build.log | wc -l", None),
+        ("helmfile -e localsync; echo \"HELMFILE_EXIT=$?\"", Some("command_run(command=\"helmfile -e localsync\")")),
+        ("make; echo $?", Some("command_run(command=\"make\")")),
+        ("cargo test && echo \"rc=$?\"", Some("command_run(command=\"cargo test\")")),
+        ("helmfile -e localsync 2>&1; echo \"HELMFILE_EXIT=$?\"", Some("command_run(command=\"helmfile -e localsync 2>&1\")")),
+        ("make; printf 'exit %d\\n' $?", Some("echo-status")),
+        ("make; echo \"${?}\"", Some("echo-status")),
+        ("echo $?", Some("command_history")),
+        ("printf '%d\\n' $?", Some("command_history")),
+        ("echo $? > /tmp/rc", None),
+        ("make; echo $? > /tmp/rc", None),
+        ("make; echo \"$summary\"", None),
+        ("make; echo $?; deploy", None),
+        ("make; [ $? -eq 0 ] && echo \"$msg\"", None),
+        ("make; RC=$?; echo $RC", None),
+        ("echo \"=== Building ===\"", Some("constant text")),
+        ("echo \"Building\"; cargo build", Some("Marker:    echo \"Building\"")),
+        ("cargo build; echo done", Some("constant-echo")),
+        ("echo \"start\" && cargo build", Some("constant-echo")),
+        ("printf '=== %s ===\\n' Building", Some("constant-echo")),
+        ("echo", Some("constant-echo")),
+        ("echo \"$HOME\"", None),
+        ("echo $PATH", None),
+        ("echo \"$(date)\"", None),
+        ("echo `hostname`", None),
+        ("echo *.log", None),
+        ("echo {a,b}", None),
+        ("echo ~/projects", None),
+        ("echo \"*** ERROR ***\"", Some("constant-echo")),
+        ("echo \"{a,b}\"", Some("constant-echo")),
+        ("echo \"~\"", Some("constant-echo")),
+        ("echo '*** done ***'", Some("constant-echo")),
+        ("echo \"result: $RESULT\"", None),
+        ("echo \"content\" > config.txt", None),
+        ("echo hello | base64", None),
+        ("cargo build && echo ok", Some("exit code")),
+        (
+            "cargo update -p microlp && cargo build 2>/dev/null; cargo build --quiet && echo BUILD_OK",
+            Some("command_run(command=\"cargo update -p microlp && cargo build 2>/dev/null; cargo build --quiet\")"),
+        ),
+        ("cargo build || echo failed", None),
+        ("cargo build && echo \"$RESULT\"", None),
+        ("make && echo ok; deploy", None),
+        ("git commit -m \"fix: stuff\"", None),
+        ("echo 'price is $5'", Some("constant-echo")),
+        ("sleep 60 &", Some("separate pane")),
+        ("make&", Some("background")),
+        ("cargo build &  ", Some("background")),
+        ("make && make install", None),
+        ("make &> /dev/null", None),
+        ("make &>> log.txt", None),
+        ("curl 'http://example.com?a=1&b=2'", None),
+        ("ls -la", None),
+        ("cargo build", None),
+        ("git status", None),
+        ("make -j8", None),
+        (&cd_dir, Some("command_run(command=\"cargo test\")")),
+        (&cd_dir_slash, Some("redundant-cd")),
+        ("cd . && make", Some("redundant-cd")),
+        ("cd . ; make", Some("redundant-cd")),
+        ("cd /tmp && ls", None),
+        ("cd src && cargo test", None),
+        (&cd_alone, None),
+    ];
+
+    for (command, want) in rows {
+        let (decision, reason) = h.hook(&shell, command);
+        match want {
+            Some(text) => assert!(decision == Deny && reason.contains(text), "{command}: {decision:?} {reason}"),
+            None => assert!(!LINTS.iter().any(|id| reason.contains(id)), "{command}: {reason}"),
+        }
+    }
 }

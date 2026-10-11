@@ -8,7 +8,8 @@ use cel_parser::ast as cel;
 use cel_parser::reference::Val;
 
 use super::identity::resolve;
-use super::{Env, Host};
+use super::{CUT, Env, Host, REDIRECT_CUTS};
+use crate::policy::parse::cut;
 use crate::policy::programs;
 use crate::policy::value::{TriBool, TriVal};
 
@@ -115,6 +116,8 @@ fn eval_call(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
         "awk_is_plain" => eval_string_test(call, ctx, programs::awk_is_plain),
         "sed_is_plain" => eval_string_test(call, ctx, programs::sed_is_plain),
         "last" => eval_last(call, ctx),
+        "sure" => TriVal::Bool(one_operand(call, ctx).is_truthy() == TriBool::True),
+        "drop" => eval_drop(call, ctx),
         "host_of" => eval_destination(call, ctx, |(_, host)| Some(host)),
         "user_of" => eval_destination(call, ctx, |(user, _)| user),
         "home" => eval_home(call, ctx),
@@ -330,6 +333,39 @@ fn eval_last(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
         TriVal::List { exhaustive: false, .. } => TriVal::Unknown,
         TriVal::List { elements, .. } => elements.last().cloned().unwrap_or(TriVal::Null),
         TriVal::Null => TriVal::Null,
+        _ => TriVal::Unknown,
+    }
+}
+
+/// `drop(command)`: the line without the command and the operator that joins
+/// it to its neighbour. `drop(command, r)`: the line without its redirect
+/// written `r`. Unknown for anything but a command of the line's own shell.
+fn eval_drop(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
+    let (Some(TriVal::String(line)), [command, redirect @ ..]) = (ctx.vars.get("line"), &call.args[..]) else {
+        return TriVal::Unknown;
+    };
+    let TriVal::Map(command) = eval_expr(&command.expr, ctx) else { return TriVal::Unknown };
+    let range = match redirect {
+        [] => command.get(CUT).cloned(),
+        [r] => {
+            let r = eval_expr(&r.expr, ctx);
+            match command.get(REDIRECT_CUTS) {
+                Some(TriVal::List { elements, .. }) => elements.iter().find_map(|e| match e {
+                    TriVal::List { elements, .. } if elements.first() == Some(&r) => elements.get(1).cloned(),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match range {
+        Some(TriVal::List { elements, .. }) => match elements[..] {
+            [TriVal::Int(start), TriVal::Int(end)] if end > 0 => {
+                TriVal::String(cut(line, (start as usize, end as usize)))
+            }
+            _ => TriVal::Unknown,
+        },
         _ => TriVal::Unknown,
     }
 }

@@ -99,13 +99,9 @@ async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
 
     match decision {
         "allow" => print_hook_response("allow", None),
-        "deny" => {
-            eprintln!(
-                "Policy denied: {}\n  pane {}  host: {}  cwd: {}  rule: {}",
-                command, pane_id, hostname, cwd, rule
-            );
-            std::process::exit(2);
-        }
+        // Claude reads the reason, which says how to fix the command; the
+        // user is not asked.
+        "deny" => print_hook_response("deny", Some(rule)),
         _ => {
             let reason = format!(
                 "{}\n  pane {}  user: {}  host: {}  cwd: {}  shell: {}  rule: {}",

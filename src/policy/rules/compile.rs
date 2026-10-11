@@ -7,8 +7,8 @@ use std::path::{Component, Path};
 
 use cel_parser::ast as cel;
 
-use super::CompiledRule;
 use super::eval::UNKNOWN;
+use super::{CompiledRule, Part};
 use super::identity::normalize;
 use crate::policy::Decision;
 use crate::policy::config::RuleConfig;
@@ -40,9 +40,14 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
     let write = config.write.as_deref().map(parse_cel).transpose()?;
     let host = config.host.as_deref().map(parse_cel).transpose()?;
     let user = config.user.as_deref().map(parse_cel).transpose()?;
+    let message = config.message.as_deref().map(message).transpose()?;
+    let holes = message.iter().flatten().filter_map(|part| match part {
+        Part::Hole(expr) => Some(("when", expr)),
+        Part::Text(_) => None,
+    });
 
-    for (key, expr) in [("when", &when), ("path", &path), ("write", &write), ("host", &host), ("user", &user)] {
-        let Some(expr) = expr else { continue };
+    let keys = [("when", &when), ("path", &path), ("write", &write), ("host", &host), ("user", &user)];
+    for (key, expr) in keys.into_iter().filter_map(|(key, expr)| Some((key, expr.as_ref()?))).chain(holes) {
         let refs = Refs::of(&expr.expr);
         if refs.idents.contains("path") && !matches!(key, "path" | "write") {
             return Err("`path` is only for the `path` and `write` keys".into());
@@ -78,10 +83,27 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
         host,
         user,
         action,
-        message: config.message.clone(),
+        message,
         local_only: is_project,
         exempts: Vec::new(),
     })
+}
+
+/// A message's text and its `{{ expr }}` holes; a hole reads what `when`
+/// reads.
+fn message(text: &str) -> Result<Vec<Part>, String> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let Some(close) = rest[open..].find("}}") else {
+            return Err("the message has a `{{` without its `}}`".into());
+        };
+        parts.push(Part::Text(rest[..open].to_string()));
+        parts.push(Part::Hole(parse_cel(rest[open + 2..open + close].trim())?));
+        rest = &rest[open + close + 2..];
+    }
+    parts.push(Part::Text(rest.to_string()));
+    Ok(parts)
 }
 
 /// Each rule's index by its id, which no two rules of any sources share.

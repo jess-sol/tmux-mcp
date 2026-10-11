@@ -820,6 +820,209 @@ action = "deny"
 message = "git -c and --exec-path can set a command to run (core.pager, core.sshCommand, …); set it in the repository's config instead"
 
 # =============================================================================
+# Rules: lints (deny, with a message that says how to fix the command)
+# =============================================================================
+
+# A command at the end of a pipeline: `command.op_before == "|"` and nothing piped on.
+
+[[rules]]
+id = "pipe-to-tail"
+command = "tail"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to tail — use the tail parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", tail={{ or(last(args.lines), "20") }})
+
+This preserves full output in history. Use command_read(search=...) to search it later.'''
+
+[[rules]]
+id = "pipe-to-head"
+command = "head"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to head — use the head parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", head={{ or(last(args.lines), "20") }})
+
+This preserves full output in history. Use command_read(search=...) to search it later.'''
+
+[[rules]]
+id = "pipe-to-grep"
+command = "grep"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to grep — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-egrep"
+command = "egrep"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to egrep — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-fgrep"
+command = "fgrep"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to fgrep — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-rg"
+command = "rg"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to rg — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-tee"
+command = "tee"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to tee — output is already saved in command history.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}")
+
+Use command_read to access full output as many times as needed.'''
+
+# echo/printf of `$?` as the line's last command, alone in its pipeline, with no redirect (which
+# would keep the value somewhere).
+
+[[rules]]
+id = "echo-status"
+when = '''
+  command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
+  && command.op_after == null && command.op_before != null && command.op_before != "|"
+'''
+action = "deny"
+message = '''
+Don't echo $? — command_run already reports each command's exit code.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}")
+
+The exit status of the last command is captured and shown automatically; reading it back with echo just duplicates it. To branch on the status, use it directly (e.g. `cmd && on_success || on_failure`).'''
+
+[[rules]]
+id = "echo-status-alone"
+when = '''
+  command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
+  && command.op_before == null && command.op_after == null
+'''
+action = "deny"
+message = '''
+Don't re-run a command to read $? — use the command_history tool.
+
+Rejected:    command_run(command="{{ line }}")
+
+command_history lists recent commands with their exit codes, captured directly when each command finished. A bare `echo $?` in a new command_run is fragile: the shell prompt runs between runs and can reset $?.'''
+
+# A constant echo/printf: a progress marker that runs unconditionally, or a success marker that
+# only restates the exit code. `|| echo fail` changes the exit code, so it passes.
+
+[[rules]]
+id = "constant-echo"
+when = '''
+  command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
+  && !(command.op_before in ["|", "&&", "||"]) && command.op_after != "|"
+'''
+action = "deny"
+message = '''
+Don't run echo/printf with only constant text — its output is already known.
+
+Rejected:  command_run(command="{{ line }}")
+Marker:    {{ command.text }}
+
+A top-level echo of a fixed string is almost always a leftover progress marker (e.g. "=== Building ==="). command_run tracks each command separately — output, exit code, and a command_history entry — so markers between commands add nothing. Run the real commands as separate command_run calls. To inspect a value, echo the variable itself (e.g. echo "$VAR"), which this lint allows.'''
+
+[[rules]]
+id = "constant-success-echo"
+when = '''
+  command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
+  && command.op_before == "&&" && command.op_after == null
+'''
+action = "deny"
+message = '''
+Don't echo a constant success marker — command_run reports the exit code.
+
+Rejected:  command_run(command="{{ line }}")
+Try:       command_run(command="{{ drop(command) }}")
+
+A trailing `&& echo …` runs only when the preceding command succeeds, so it just restates the exit status that command_run already captures for the last command. Drop it — the reported exit code tells you whether the command succeeded. (`|| echo fail` isn't needed either; a non-zero exit code is shown automatically.)'''
+
+[[rules]]
+id = "stderr-to-stdout"
+when = 'command.top && command.op_after == null && "2>&1" in command.redirects'
+action = "deny"
+message = '''
+Don't redirect stderr — it's already captured.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command, "2>&1") }}")
+
+Both stdout and stderr are visible in the terminal and captured automatically.'''
+
+[[rules]]
+id = "background"
+when = 'command.top && command.op_after == "&"'
+action = "deny"
+message = '''
+Don't background commands with & — use a separate pane instead.
+
+Rejected:    command_run(command="{{ line }}")
+
+Background jobs bypass output capture and can't be monitored reliably. Use list_panes to find or create another pane and run the command there.'''
+
+# `cd <the pane's directory> && …`: the cd changes nothing. `sure`: never on an Unknown directory.
+
+[[rules]]
+id = "redundant-cd"
+command = "cd"
+when = '''
+  command.top && command.op_before == null && command.op_after in ["&&", ";"]
+  && sure(command.cwd == command.shell_cwd)
+'''
+action = "deny"
+message = '''
+Redundant cd — the pane is already in that directory.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}")
+
+The pane's working directory is already {{ command.shell_cwd }}.'''
+
+# =============================================================================
 # Rules: paths
 # =============================================================================
 

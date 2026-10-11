@@ -766,10 +766,7 @@ async fn handle_command_run(
         match result.decision {
             policy::Decision::Allow => { /* proceed */ }
             policy::Decision::Deny => {
-                return Err(RpcError {
-                    code: -32001,
-                    message: format!("Policy denied (rule: {})", result.rule),
-                });
+                return Err(RpcError { code: -32001, message: result.rule });
             }
             policy::Decision::Ask => {
                 let live_ctx = read_pane_context(state, pane_id).await?;

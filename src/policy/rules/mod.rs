@@ -22,7 +22,7 @@ use super::config::RuleConfig;
 use super::grammar::Grammars;
 use super::parse::CommandInfo;
 use super::value::{TriBool, TriVal};
-use super::{Decision, PolicyResult};
+use super::Decision;
 use eval::{Ctx, Site, eval_expr, tri_eq};
 use identity::identity;
 
@@ -41,7 +41,7 @@ pub struct CompiledRule {
     host: Option<cel::IdedExpr>,
     user: Option<cel::IdedExpr>,
     pub action: Decision,
-    pub message: Option<String>,
+    message: Option<Vec<Part>>,
     /// A project rule, which applies only on this machine.
     local_only: bool,
     /// The indices of the stricter rules it exempts.
@@ -90,6 +90,17 @@ struct Facts {
     user: TriVal,
     /// It runs as the shell's own user.
     own_user: bool,
+    /// The whole line.
+    line: String,
+    /// The command's place in the line, as `command.*` shows it, with the
+    /// bytes that `drop` cuts under keys no rule can read.
+    place: HashMap<String, TriVal>,
+}
+
+/// A rule's message: text, and CEL holes that render into it.
+pub(crate) enum Part {
+    Text(String),
+    Hole(cel::IdedExpr),
 }
 
 /// How a rule matched: on True, or on an Unknown it could not rule out.
@@ -150,11 +161,12 @@ pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Gra
     Ok(RuleSet { rules, default })
 }
 
-/// The decision of `rules` for one command. Every rule that matches and is
-/// not exempted counts, and the strictest action wins: deny, then ask, then
-/// allow. No match gives the default.
-pub(crate) fn evaluate(cmd: &CommandInfo, env: &Env, rules: &RuleSet) -> PolicyResult {
-    decide(rules, &Facts::of(cmd, env), env)
+/// The decision of `rules` for one command of `line`, and the reasons of
+/// every rule at that action. Every rule that matches and is not exempted
+/// counts, and the strictest action wins: deny, then ask, then allow. No
+/// match gives the default.
+pub(crate) fn evaluate(cmd: &CommandInfo, line: &str, env: &Env, rules: &RuleSet) -> (Decision, Vec<String>) {
+    decide(rules, &Facts::of(cmd, line, env), env)
 }
 
 /// Evaluates the CEL of a grammar's `with` key over `vars`. `home(u)` gives
@@ -166,7 +178,7 @@ pub(crate) fn eval_with(expr: &cel::IdedExpr, vars: HashMap<String, TriVal>, hom
 // --- Deciding ---
 
 impl Facts {
-    fn of(cmd: &CommandInfo, env: &Env) -> Facts {
+    fn of(cmd: &CommandInfo, line: &str, env: &Env) -> Facts {
         let as_dir = |cwd: &TriVal| match cwd {
             TriVal::String(d) => Some(PathBuf::from(d)),
             _ => None,
@@ -178,7 +190,8 @@ impl Facts {
         let (mut paths, reads_exhaustive) = list(&cmd.reads);
         let (mut writes, writes_exhaustive) = list(&cmd.writes);
         paths.extend(writes.iter().cloned());
-        for r in &cmd.redirects {
+        // A redirect that opens no file (`2>&1`) has a null target.
+        for r in cmd.redirects.iter().filter(|r| r.target != TriVal::Null) {
             if r.is_write {
                 writes.push(r.target.clone());
             }
@@ -205,26 +218,65 @@ impl Facts {
             host,
             user: cmd.context.user.clone(),
             own_user: cmd.context.own_user,
+            line: line.to_string(),
+            place: place(cmd),
         }
     }
 }
 
-/// The result of the strictest rule that matches and is not exempted; on a
-/// tie, the first one. No match gives the default.
-fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> PolicyResult {
+/// `command.*` beyond its name: the facts of its place in the line.
+fn place(cmd: &CommandInfo) -> HashMap<String, TriVal> {
+    let text = |s: &str| TriVal::String(s.to_string());
+    let op = |o: &Option<String>| o.as_deref().map_or(TriVal::Null, text);
+    let strings = |items: Vec<TriVal>| TriVal::List { elements: items, exhaustive: true };
+    let range = |(start, end): (usize, usize)| strings(vec![TriVal::Int(start as i64), TriVal::Int(end as i64)]);
+    HashMap::from([
+        ("text".to_string(), text(&cmd.text)),
+        ("top".to_string(), TriVal::Bool(cmd.top)),
+        ("op_before".to_string(), op(&cmd.op_before)),
+        ("op_after".to_string(), op(&cmd.op_after)),
+        ("constant".to_string(), TriVal::Bool(cmd.constant)),
+        ("expands".to_string(), strings(cmd.expands.iter().map(|e| text(e)).collect())),
+        ("redirects".to_string(), strings(cmd.redirects.iter().map(|r| text(&r.text)).collect())),
+        ("cwd".to_string(), cmd.cwd.clone()),
+        ("shell_cwd".to_string(), cmd.context.cwd.clone()),
+        (CUT.to_string(), range(cmd.cut)),
+        (
+            REDIRECT_CUTS.to_string(),
+            strings(cmd.redirects.iter().map(|r| strings(vec![text(&r.text), range(r.cut)])).collect()),
+        ),
+    ])
+}
+
+/// Keys of `command` that hold the bytes `drop` cuts. They are no CEL
+/// identifier, so no rule reads them.
+pub(super) const CUT: &str = "@cut";
+pub(super) const REDIRECT_CUTS: &str = "@redirect_cuts";
+
+/// The strictest action among the rules that match and are not exempted,
+/// and the reason of each rule at that action, in rule order. No match
+/// gives the default.
+fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Decision, Vec<String>) {
     let meetings: Vec<Meeting> = rules.rules.iter().map(|rule| meet(rule, facts, env)).collect();
     let exempted = exemptions(rules, &meetings, facts);
-    let mut strictest: Option<PolicyResult> = None;
-    for ((rule, meeting), exempted) in rules.rules.iter().zip(&meetings).zip(&exempted) {
-        if exempted.whole {
-            continue;
-        }
-        let Some(matched) = rule_match(rule, meeting.truth(&exempted.paths)) else { continue };
-        if strictest.as_ref().is_none_or(|s| super::severity(&rule.action) > super::severity(&s.decision)) {
-            strictest = Some(rule_result(rule, matched));
-        }
-    }
-    strictest.unwrap_or_else(|| PolicyResult { decision: rules.default.clone(), rule: "default".to_string() })
+    let matched: Vec<(&CompiledRule, Match)> = rules
+        .rules
+        .iter()
+        .zip(&meetings)
+        .zip(&exempted)
+        .filter(|(_, exempted)| !exempted.whole)
+        .filter_map(|((rule, meeting), exempted)| Some((rule, rule_match(rule, meeting.truth(&exempted.paths))?)))
+        .collect();
+    let Some(decision) = matched.iter().map(|(rule, _)| &rule.action).max_by_key(|a| super::severity(a)).cloned() else {
+        return (rules.default.clone(), vec!["default".to_string()]);
+    };
+    let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
+    let reasons = matched
+        .into_iter()
+        .filter(|(rule, _)| rule.action == decision)
+        .map(|(rule, how)| reason(rule, how, &when_ctx(rule, facts, site)))
+        .collect();
+    (decision, reasons)
 }
 
 /// The *Exemption*s that apply, loosest rules first: allows exempt asks and
@@ -418,26 +470,50 @@ fn command_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
 fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
     let depth = rule.command.as_ref().map_or(0, |c| c.len() - 1);
     let subcommand = facts.subcommands.get(depth).cloned().unwrap_or(TriVal::Null);
-    let command = HashMap::from([("name".to_string(), facts.identity.clone())]);
+    let mut command = facts.place.clone();
+    command.insert("name".to_string(), facts.identity.clone());
     let vars = HashMap::from([
         ("args".to_string(), facts.args.clone()),
         ("subcommand".to_string(), subcommand),
         ("command".to_string(), TriVal::Map(command)),
         ("variables".to_string(), facts.variables.clone()),
+        ("line".to_string(), TriVal::String(facts.line.clone())),
     ]);
     Ctx { vars, site: Some(site), home: TriVal::Unknown }
 }
 
-/// The reason starts with the rule's id, the name an *Exemption* uses.
-fn rule_result(rule: &CompiledRule, matched: Match) -> PolicyResult {
-    let mut rule_desc = match &rule.message {
-        Some(msg) => format!("{}: {}", rule.id, msg),
+/// The reason starts with the rule's id, the name an *Exemption* uses, then
+/// its message with each hole rendered over `ctx`.
+fn reason(rule: &CompiledRule, matched: Match, ctx: &Ctx) -> String {
+    let mut reason = match &rule.message {
+        Some(parts) => {
+            let message: String = parts
+                .iter()
+                .map(|part| match part {
+                    Part::Text(text) => text.clone(),
+                    Part::Hole(expr) => render(&eval_expr(&expr.expr, ctx)),
+                })
+                .collect();
+            format!("{}: {message}", rule.id)
+        }
         None => rule.id.clone(),
     };
     if let Match::Unknown = matched {
         // Tells the model what fired the rule, so it can write the command
         // with literal words.
-        rule_desc.push_str(" (could not be ruled out)");
+        reason.push_str(" (could not be ruled out)");
     }
-    PolicyResult { decision: rule.action.clone(), rule: rule_desc }
+    reason
+}
+
+/// A hole's value as text: a list as its elements joined by spaces, null
+/// and Unknown as "…".
+fn render(value: &TriVal) -> String {
+    match value {
+        TriVal::String(s) => s.clone(),
+        TriVal::Int(n) => n.to_string(),
+        TriVal::Bool(b) => b.to_string(),
+        TriVal::List { elements, .. } => elements.iter().map(render).collect::<Vec<_>>().join(" "),
+        TriVal::Map(_) | TriVal::Null | TriVal::Unknown => "…".to_string(),
+    }
 }
