@@ -1,16 +1,18 @@
 //! Command parsing: brush-parser → flat list of CommandInfo.
 //!
 //! Parses a command string into a flat list of `CommandInfo` nodes, one per
-//! command that will execute. Pipelines, logical operators, compound commands
-//! and command substitutions produce additional independent entries. Each
-//! command's words lose their quotes, and its grammar parses them into parts.
+//! command that will execute. Pipelines, logical operators, compound commands,
+//! command substitutions and *Inner command*s produce additional independent
+//! entries. Each command's words lose their quotes, and its grammar parses
+//! them into parts.
 
 use std::collections::BTreeMap;
 
 use brush_parser::ast;
-use brush_parser::word::{BraceExpressionOrText, WordPiece};
+use brush_parser::word::{BraceExpressionOrText, WordPiece, WordPieceWithSource};
 
 pub use super::grammar::Grammars;
+use super::grammar::{Inner, With};
 use super::rules::TriVal;
 
 // --- Types ---
@@ -18,8 +20,9 @@ use super::rules::TriVal;
 /// Information about a single command that will execute.
 #[derive(Debug, Clone)]
 pub struct CommandInfo {
-    /// The command name as written, quotes included.
-    pub name: String,
+    /// The command name without its quotes: Unknown when the shell expands
+    /// it, Null for a command that only assigns or redirects.
+    pub name: TriVal,
     /// Shell redirects attached to this command.
     pub redirects: Vec<RedirectInfo>,
     /// The subcommand words below the command name: a list that ends in
@@ -27,13 +30,21 @@ pub struct CommandInfo {
     pub subcommands: TriVal,
     /// The parts of every level that parsed, by name.
     pub args: BTreeMap<String, TriVal>,
-    /// The directory the command runs in, relative to the shell's: Null when
-    /// the grammar marks none.
+    /// The directory the command runs in, relative to the pane's: Null when
+    /// nothing changes it; Unknown when an earlier `cd` or an outer
+    /// command's `with` changed it.
     pub cwd: TriVal,
     /// The words the grammar marks as read paths, relative to `cwd`.
     pub reads: TriVal,
     /// The words the grammar marks as write paths, relative to `cwd`.
     pub writes: TriVal,
+    /// The names of the variables the command sets: its prefix assignments
+    /// and its `marks.variables` words.
+    pub variables: TriVal,
+    /// The user the command runs as. Null: the pane's; Unknown: changed.
+    pub user: TriVal,
+    /// The host the command runs on. Null: the pane's; Unknown: changed.
+    pub host: TriVal,
 }
 
 /// A shell redirect (>, >>, <, etc.) attached to a command.
@@ -63,19 +74,16 @@ pub(crate) enum Word {
 
 // --- Public API ---
 
-/// Parse a command string into the flat list of commands it runs.
+/// Parse a command string into the flat list of commands it runs. A shell
+/// line that an *Inner command* runs must parse too.
 pub fn parse_command(command: &str, grammars: &Grammars) -> Result<Vec<CommandInfo>, ParseError> {
     let program = parse_with_brush(command)?;
     let mut commands = Vec::new();
-    Walker { grammars, out: &mut commands }.program(&program);
-    Ok(commands)
-}
-
-/// The text of a word without its quotes, or None when the shell expands it.
-pub(crate) fn literal(raw: &str) -> Option<String> {
-    match word(raw) {
-        Word::Known(text) => Some(text),
-        Word::Unknown { .. } => None,
+    let mut walker = Walker { grammars, out: &mut commands, context: Context::pane(), error: None };
+    walker.program(&program);
+    match walker.error {
+        Some(err) => Err(err),
+        None => Ok(commands),
     }
 }
 
@@ -121,6 +129,34 @@ fn parse_with_brush(command: &str) -> Result<ast::Program, ParseError> {
 struct Walker<'a> {
     grammars: &'a Grammars,
     out: &'a mut Vec<CommandInfo>,
+    /// The context of the shell being walked.
+    context: Context,
+    /// The first shell line of an *Inner command* that did not parse.
+    error: Option<ParseError>,
+}
+
+/// The context a command runs in, against the pane's: a field is Null while
+/// it is the pane's, and Unknown once a command changed it.
+#[derive(Clone)]
+struct Context {
+    cwd: TriVal,
+    user: TriVal,
+    host: TriVal,
+}
+
+/// The shell builtins that change the directory of the rest of their shell.
+const CHANGES_DIRECTORY: [&str; 3] = ["cd", "pushd", "popd"];
+
+impl Context {
+    fn pane() -> Context {
+        Context { cwd: TriVal::Null, user: TriVal::Null, host: TriVal::Null }
+    }
+
+    /// The context of the *Inner command*s of a command whose levels set `with`.
+    fn with(&self, with: With) -> Context {
+        let change = |set: bool, field: &TriVal| if set { TriVal::Unknown } else { field.clone() };
+        Context { cwd: change(with.cwd, &self.cwd), user: change(with.user, &self.user), host: change(with.host, &self.host) }
+    }
 }
 
 impl Walker<'_> {
@@ -146,63 +182,141 @@ impl Walker<'_> {
         }
     }
 
+    /// Each stage of a pipeline of several runs in a subshell.
     fn pipeline(&mut self, pipeline: &ast::Pipeline) {
+        let subshells = pipeline.seq.len() > 1;
         for command in &pipeline.seq {
-            match command {
-                ast::Command::Simple(simple) => self.simple_command(simple),
-                ast::Command::Compound(compound, _) => self.compound_command(compound),
-                ast::Command::Function(_) | ast::Command::ExtendedTest(_) => {}
+            if subshells {
+                self.subshell(|w| w.command(command));
+            } else {
+                self.command(command);
             }
         }
     }
 
-    /// A simple command, followed by the commands of its substitutions.
+    fn command(&mut self, command: &ast::Command) {
+        match command {
+            ast::Command::Simple(simple) => self.simple_command(simple),
+            ast::Command::Compound(compound, redirects) => {
+                self.compound_command(compound);
+                for redirect in redirects.iter().flat_map(|r| &r.0) {
+                    self.redirect_substitutions(redirect);
+                }
+            }
+            ast::Command::Function(_) | ast::Command::ExtendedTest(_) => {}
+        }
+    }
+
+    /// A simple command, the commands of its substitutions, and its
+    /// *Inner command*s. Words after the name that brush reads as
+    /// assignments are plain words to the command.
     fn simple_command(&mut self, simple: &ast::SimpleCommand) {
-        let Some(name) = &simple.word_or_name else { return };
-        let prefix = simple.prefix.iter().flat_map(|p| &p.0).map(|item| (item, false));
-        let suffix = simple.suffix.iter().flat_map(|s| &s.0).map(|item| (item, true));
+        let prefix = || simple.prefix.iter().flat_map(|p| &p.0);
+        let suffix = || simple.suffix.iter().flat_map(|s| &s.0);
+        let mut variables = Vec::new();
         let mut words = Vec::new();
-        let mut raw_words = Vec::new();
-        for (item, in_suffix) in prefix.chain(suffix) {
+        let mut raws: Vec<&str> = simple.word_or_name.iter().map(|n| n.value.as_str()).collect();
+        for item in prefix() {
             match item {
-                ast::CommandPrefixOrSuffixItem::Word(w) => {
-                    if in_suffix {
-                        words.push(word(&w.value));
-                    }
-                    raw_words.push(w.value.clone());
+                ast::CommandPrefixOrSuffixItem::AssignmentWord(assignment, w) => {
+                    variables.push(TriVal::String(variable_name(&assignment.name)));
+                    raws.push(&w.value);
                 }
-                ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, subshell) => {
-                    if in_suffix {
-                        words.push(Word::Unknown { splits: false });
-                    }
-                    self.compound_list(&subshell.list);
-                }
-                _ => {}
+                ast::CommandPrefixOrSuffixItem::Word(w) => raws.push(&w.value),
+                ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, s) => self.subshell(|w| w.compound_list(&s.list)),
+                ast::CommandPrefixOrSuffixItem::IoRedirect(r) => self.redirect_substitutions(r),
             }
         }
-
-        let parsed = match literal(&name.value) {
-            Some(n) => self.grammars.parse(&n, &words),
-            None => self.grammars.parse("", &[]),
-        };
-        let items = simple.prefix.iter().flat_map(|p| &p.0).chain(simple.suffix.iter().flat_map(|s| &s.0));
-        self.out.push(CommandInfo {
-            name: name.value.clone(),
-            redirects: redirects(items),
-            subcommands: parsed.subcommands,
-            args: parsed.args,
-            cwd: parsed.cwd,
-            reads: parsed.reads,
-            writes: parsed.writes,
-        });
-        for raw in std::iter::once(&name.value).chain(&raw_words) {
+        for item in suffix() {
+            match item {
+                ast::CommandPrefixOrSuffixItem::Word(w) | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, w) => {
+                    words.push(word(&w.value));
+                    raws.push(&w.value);
+                }
+                ast::CommandPrefixOrSuffixItem::ProcessSubstitution(_, s) => {
+                    words.push(Word::Unknown { splits: false });
+                    self.subshell(|w| w.compound_list(&s.list));
+                }
+                ast::CommandPrefixOrSuffixItem::IoRedirect(r) => self.redirect_substitutions(r),
+            }
+        }
+        for raw in raws {
             self.substitutions(raw);
         }
+
+        let name = simple.word_or_name.as_ref().map(|n| word(&n.value));
+        self.run(name.clone(), &words, variables, redirects(prefix().chain(suffix())));
+        if matches!(&name, Some(Word::Known(n)) if CHANGES_DIRECTORY.contains(&n.as_str())) {
+            self.context.cwd = TriVal::Unknown;
+        }
+    }
+
+    /// One command in the shell's context, then its *Inner command*s in the
+    /// context that its `with` gives them.
+    fn run(&mut self, name: Option<Word>, words: &[Word], mut variables: Vec<TriVal>, redirects: Vec<RedirectInfo>) {
+        let parsed = match &name {
+            Some(Word::Known(n)) => self.grammars.parse(n, words),
+            _ => self.grammars.parse("", &[]),
+        };
+        let exhaustive = match parsed.variables {
+            TriVal::List { elements, exhaustive } => {
+                variables.extend(elements);
+                exhaustive
+            }
+            _ => false,
+        };
+        let cwd = if self.context.cwd == TriVal::Unknown { TriVal::Unknown } else { parsed.cwd };
+        self.out.push(CommandInfo {
+            name: match &name {
+                None => TriVal::Null,
+                Some(Word::Known(n)) => TriVal::String(n.clone()),
+                Some(Word::Unknown { .. }) => TriVal::Unknown,
+            },
+            redirects,
+            subcommands: parsed.subcommands,
+            args: parsed.args,
+            cwd,
+            reads: parsed.reads,
+            writes: parsed.writes,
+            variables: TriVal::List { elements: variables, exhaustive },
+            user: self.context.user.clone(),
+            host: self.context.host.clone(),
+        });
+
+        let context = self.context.with(parsed.with);
+        for inner in parsed.inner {
+            let outer = std::mem::replace(&mut self.context, context.clone());
+            match inner {
+                Inner::Words(words) => {
+                    if let Some((name, rest)) = words.split_first() {
+                        self.run(Some(name.clone()), rest, Vec::new(), Vec::new());
+                    }
+                }
+                Inner::Line(Some(line)) => self.line(&line),
+                Inner::Line(None) => self.run(Some(Word::Unknown { splits: true }), &[], Vec::new(), Vec::new()),
+            }
+            self.context = outer;
+        }
+    }
+
+    /// A shell line that an *Inner command* runs.
+    fn line(&mut self, text: &str) {
+        match parse_with_brush(text) {
+            Ok(program) => self.program(&program),
+            Err(err) => _ = self.error.get_or_insert(err),
+        }
+    }
+
+    /// Walks `f` in a shell of its own: what a `cd` there changes stays there.
+    fn subshell(&mut self, f: impl FnOnce(&mut Self)) {
+        let outer = self.context.clone();
+        f(self);
+        self.context = outer;
     }
 
     fn compound_command(&mut self, compound: &ast::CompoundCommand) {
         match compound {
-            ast::CompoundCommand::Subshell(s) => self.compound_list(&s.list),
+            ast::CompoundCommand::Subshell(s) => self.subshell(|w| w.compound_list(&s.list)),
             ast::CompoundCommand::BraceGroup(g) => self.compound_list(&g.list),
             ast::CompoundCommand::IfClause(c) => {
                 self.compound_list(&c.condition);
@@ -218,9 +332,18 @@ impl Walker<'_> {
                 self.compound_list(&c.0);
                 self.compound_list(&c.1.list);
             }
-            ast::CompoundCommand::ForClause(c) => self.compound_list(&c.body.list),
+            ast::CompoundCommand::ForClause(c) => {
+                for value in c.values.iter().flatten() {
+                    self.substitutions(&value.value);
+                }
+                self.compound_list(&c.body.list);
+            }
             ast::CompoundCommand::CaseClause(c) => {
+                self.substitutions(&c.value.value);
                 for item in &c.cases {
+                    for pattern in &item.patterns {
+                        self.substitutions(&pattern.value);
+                    }
                     if let Some(cmd) = &item.cmd {
                         self.compound_list(cmd);
                     }
@@ -231,30 +354,70 @@ impl Walker<'_> {
         }
     }
 
-    /// The commands of the `$(…)` and backquote substitutions in a word.
+    /// The commands of the `$(…)` and backquote substitutions in a word,
+    /// inside `${…}` and `$((…))` too. Each runs in a subshell.
     fn substitutions(&mut self, raw: &str) {
         let options = brush_parser::ParserOptions::default();
         if let Ok(pieces) = brush_parser::word::parse(raw, &options) {
             for p in &pieces {
-                self.substitution_piece(&p.piece);
+                self.substitution_piece(p, raw);
             }
         }
     }
 
-    fn substitution_piece(&mut self, piece: &WordPiece) {
-        match piece {
+    fn substitution_piece(&mut self, piece: &WordPieceWithSource, raw: &str) {
+        match &piece.piece {
             WordPiece::CommandSubstitution(text) | WordPiece::BackquotedCommandSubstitution(text) => {
                 if let Ok(program) = parse_with_brush(text) {
-                    self.program(&program);
+                    self.subshell(|w| w.program(&program));
                 }
             }
             WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
                 for ip in inner {
-                    self.substitution_piece(&ip.piece);
+                    self.substitution_piece(ip, raw);
                 }
             }
+            // The words of `${x:-…}`, `${x#…}` and the rest are inside its braces.
+            WordPiece::ParameterExpansion(_) => {
+                let source = raw.get(piece.start_index..piece.end_index);
+                if let Some(inner) = source.and_then(|s| s.strip_prefix("${")?.strip_suffix('}')) {
+                    self.substitutions(inner);
+                }
+            }
+            WordPiece::ArithmeticExpression(expr) => self.substitutions(&expr.value),
             _ => {}
         }
+    }
+
+    /// The commands of a redirect: substitutions in its target, a process
+    /// substitution, or an expanded here-document.
+    fn redirect_substitutions(&mut self, redirect: &ast::IoRedirect) {
+        match redirect {
+            ast::IoRedirect::File(_, _, target) => match target {
+                ast::IoFileRedirectTarget::Filename(w) | ast::IoFileRedirectTarget::Duplicate(w) => {
+                    self.substitutions(&w.value);
+                }
+                ast::IoFileRedirectTarget::ProcessSubstitution(_, s) => self.subshell(|w| w.compound_list(&s.list)),
+                ast::IoFileRedirectTarget::Fd(_) => {}
+            },
+            ast::IoRedirect::HereString(_, w) | ast::IoRedirect::OutputAndError(w, _) => self.substitutions(&w.value),
+            ast::IoRedirect::HereDocument(_, doc) if doc.requires_expansion => {
+                self.substitutions(&here_document_word(&doc.doc.value));
+            }
+            ast::IoRedirect::HereDocument(..) => {}
+        }
+    }
+}
+
+/// A here-document body expands as a double-quoted word in which `"` is
+/// plain text. Every backslash is kept, so an escaped `$(` still counts.
+fn here_document_word(body: &str) -> String {
+    format!("\"{}\"", body.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn variable_name(name: &ast::AssignmentName) -> String {
+    match name {
+        ast::AssignmentName::VariableName(n) | ast::AssignmentName::ArrayElementName(n, _) => n.clone(),
     }
 }
 
@@ -276,9 +439,9 @@ fn redirects<'a>(items: impl Iterator<Item = &'a ast::CommandPrefixOrSuffixItem>
             ast::IoRedirect::OutputAndError(w, _) => (w, true),
             _ => continue,
         };
-        let (target, has_expansion) = match literal(&target.value) {
-            Some(text) => (text, false),
-            None => (target.value.clone(), true),
+        let (target, has_expansion) = match word(&target.value) {
+            Word::Known(text) => (text, false),
+            Word::Unknown { .. } => (target.value.clone(), true),
         };
         out.push(RedirectInfo { target, is_write, has_expansion });
     }
@@ -370,6 +533,61 @@ mod tests {
         assert!(parse_with_brush("echo 'hello").is_err());
     }
 
+    fn simple(line: &str) -> ast::SimpleCommand {
+        match &parse_program(line).complete_commands[0].0[0].0.first.seq[0] {
+            ast::Command::Simple(s) => s.clone(),
+            _ => panic!("{line}: expected a simple command"),
+        }
+    }
+
+    #[test]
+    fn brush_reads_assignments_as_their_own_items() {
+        let kinds = |line: &str| {
+            let s = simple(line);
+            let items = s.prefix.iter().flat_map(|p| &p.0).chain(s.suffix.iter().flat_map(|p| &p.0));
+            items.map(|i| matches!(i, ast::CommandPrefixOrSuffixItem::AssignmentWord(..))).collect::<Vec<_>>()
+        };
+        assert_eq!(kinds("X=1 Y=2 ls a"), [true, true, false]);
+        // After the name too, though only the command gives it a meaning.
+        assert_eq!(kinds("export X=1 Y"), [true, false]);
+        assert_eq!(kinds("env X=1 ls a=b"), [true, false, true]);
+        assert!(simple("X=1").word_or_name.is_none());
+    }
+
+    #[test]
+    fn brush_gives_each_word_piece_its_source_span() {
+        let options = brush_parser::ParserOptions::default();
+        let raw = "a${x:-$(eval true)}\"$((1 + $(id)))\"";
+        let pieces = brush_parser::word::parse(raw, &options).unwrap();
+        assert_eq!(&raw[pieces[1].start_index..pieces[1].end_index], "${x:-$(eval true)}");
+        let WordPiece::DoubleQuotedSequence(inner) = &pieces[2].piece else { panic!("{:?}", pieces[2]) };
+        assert!(matches!(&inner[0].piece, WordPiece::ArithmeticExpression(e) if e.value.contains("$(id)")));
+        let raw = "\"a${x:-$(id)}\"";
+        let pieces = brush_parser::word::parse(raw, &options).unwrap();
+        let WordPiece::DoubleQuotedSequence(inner) = &pieces[0].piece else { panic!("{:?}", pieces[0]) };
+        assert_eq!(&raw[inner[1].start_index..inner[1].end_index], "${x:-$(id)}");
+    }
+
+    #[test]
+    fn brush_keeps_a_here_document_body_as_a_word() {
+        let s = simple("cat <<EOF\n$(id)\nEOF\n");
+        let docs: Vec<_> = s
+            .suffix
+            .iter()
+            .flat_map(|p| &p.0)
+            .filter_map(|i| match i {
+                ast::CommandPrefixOrSuffixItem::IoRedirect(ast::IoRedirect::HereDocument(_, d)) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(docs[0].requires_expansion && docs[0].doc.value.contains("$(id)"));
+        let quoted = simple("cat <<'EOF'\n$(id)\nEOF\n");
+        assert!(quoted.suffix.iter().flat_map(|p| &p.0).any(|i| matches!(
+            i,
+            ast::CommandPrefixOrSuffixItem::IoRedirect(ast::IoRedirect::HereDocument(_, d)) if !d.requires_expansion
+        )));
+    }
+
     #[test]
     fn brush_finds_brace_expressions_outside_quotes_only() {
         let options = brush_parser::ParserOptions::default();
@@ -413,26 +631,85 @@ mod tests {
 
     // --- Commands of a line ---
 
+    /// Each command's name, sorted: `-` for none, `?` for Unknown.
     fn names(line: &str) -> Vec<String> {
-        parse_command(line, &Grammars::default()).unwrap().into_iter().map(|c| c.name).collect()
+        let commands = parse_command(line, &Grammars::default()).unwrap_or_else(|e| panic!("{line}: {}", e.message));
+        let mut names: Vec<String> = commands
+            .into_iter()
+            .map(|c| match c.name {
+                TriVal::String(n) => n,
+                TriVal::Null => "-".into(),
+                _ => "?".into(),
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
     fn a_line_holds_every_command_it_runs() {
-        let rows: [(&str, &[&str]); 7] = [
-            ("ls | grep foo | wc -l", &["ls", "grep", "wc"]),
-            ("ls && echo done || echo failed", &["ls", "echo", "echo"]),
+        let rows: &[(&str, &[&str])] = &[
+            ("ls | grep foo | wc -l", &["grep", "ls", "wc"]),
+            ("ls && echo done || echo failed", &["echo", "echo", "ls"]),
             ("echo 'hello | world'", &["echo"]),
-            ("echo $(date)", &["echo", "date"]),
+            ("echo $(date)", &["date", "echo"]),
             ("(ls && pwd)", &["ls", "pwd"]),
             ("{ ls; pwd; }", &["ls", "pwd"]),
             ("time make -j4", &["make"]),
+            ("X=1", &["-"]),
+            ("> out", &["-"]),
+            ("$X a", &["?"]),
+            // Every word where a substitution can stand
+            ("FOO=$(id) ls", &["id", "ls"]),
+            ("echo ${x:-$(id)} \"${y#`date`}\"", &["date", "echo", "id"]),
+            ("echo $((1 + $(id)))", &["echo", "id"]),
+            ("echo hi > $(id)", &["echo", "id"]),
+            ("{ echo; } > $(id)", &["echo", "id"]),
+            ("cat <(id)", &["cat", "id"]),
+            ("for i in $(id); do echo; done", &["echo", "id"]),
+            ("case $(id) in $(date)) echo;; esac", &["date", "echo", "id"]),
+            ("cat <<EOF\na \"$(id)\" \\$(date)\nEOF\n", &["cat", "date", "id"]),
+            ("cat <<'EOF'\n$(id)\nEOF\n", &["cat"]),
+            ("cat <<< $(id)", &["cat", "id"]),
         ];
         for (line, want) in rows {
-            assert_eq!(names(line), want, "{line}");
+            assert_eq!(names(line), *want, "{line}");
         }
         assert!(parse_command("", &Grammars::default()).unwrap().is_empty());
         assert!(parse_command("echo 'hello", &Grammars::default()).is_err());
+    }
+
+    #[test]
+    fn a_prefix_assignment_is_a_variable_of_its_command() {
+        let cmds = parse_command("A=1 B[0]=2 env C=3 ls", &Grammars::default()).unwrap();
+        let strings = |vals: &[&str]| TriVal::List {
+            elements: vals.iter().map(|v| TriVal::String(v.to_string())).collect(),
+            exhaustive: true,
+        };
+        assert_eq!(cmds[0].variables, strings(&["A", "B"]));
+    }
+
+    /// `cd` changes the directory of the commands after it in its shell;
+    /// a subshell, a substitution and a pipeline stage are shells of their own.
+    #[test]
+    fn a_cd_leaves_the_directory_of_the_rest_of_its_shell_unknown() {
+        let rows = [
+            ("cd x && cat y", TriVal::Unknown),
+            ("pushd x; cat y", TriVal::Unknown),
+            ("{ cd x; } && cat y", TriVal::Unknown),
+            ("if true; then cd x; fi; cat y", TriVal::Unknown),
+            ("(cd x) && cat y", TriVal::Null),
+            ("cd x | cat y", TriVal::Null),
+            ("echo $(cd x) && cat y", TriVal::Null),
+            ("cat y", TriVal::Null),
+        ];
+        for (line, want) in rows {
+            let cmds = parse_command(line, &Grammars::default()).unwrap();
+            let cat = cmds.iter().find(|c| c.name == TriVal::String("cat".into())).unwrap();
+            assert_eq!(cat.cwd, want, "{line}");
+        }
+        let cmds = parse_command("cd $(pwd)", &Grammars::default()).unwrap();
+        assert!(cmds.iter().all(|c| c.cwd == TriVal::Null));
     }
 
     #[test]

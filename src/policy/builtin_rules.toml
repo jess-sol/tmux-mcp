@@ -231,11 +231,152 @@ arguments = [
   "-newermt:", "-printf:", "-regextype:",
   "-print", "-print0", "-ls", "-prune", "-quit", "-empty", "-executable", "-readable", "-writable",
   "-depth", "-xdev", "-mount", "-follow", "-true", "-false", "-nouser", "-nogroup", "-daystart",
-  # stage 2: -exec, -execdir, -ok, -okdir end at ";" or "{} +"
+  "-exec...", "-execdir...", "-ok...", "-okdir...",   # a command up to ";" or "{} +"
 ]
 argument.files.default = ["."]
 marks.read = ["files", "newer", "anewer", "cnewer", "samefile", "files0_from"]
 marks.write = ["fprint", "fprint0", "fls", "fprintf"]
+marks.command = ["exec", "execdir", "ok", "okdir"]
+
+# =============================================================================
+# Commands that run commands
+# =============================================================================
+
+[commands.timeout]
+parser = "posix"
+arguments = ["duration", "command...", "--signal|-s:", "--kill-after|-k:", "--preserve-status", "--foreground", "--verbose|-v"]
+marks.command = ["command"]
+
+[commands.nice]
+parser = { name = "posix", leading_number = "adjustment" }   # nice -5 is nice -n 5
+arguments = ["command...", "--adjustment|-n:"]
+marks.command = ["command"]
+
+[commands.nohup]
+parser = "posix"
+arguments = ["command..."]
+marks.command = ["command"]
+
+[commands.xargs]
+parser = "posix"
+arguments = [
+  "command...", "--arg-file|-a:", "--delimiter|-d:", "eof=-E:", "replace=-I:", "max_lines=-L:",
+  "--max-args|-n:", "--max-procs|-P:", "--max-chars|-s:", "--process-slot-var:",
+  "--null|-0", "--interactive|-p", "--no-run-if-empty|-r", "--verbose|-t", "--exit|-x", "--open-tty|-o",
+  "--show-limits",
+]
+argument.command.default = ["echo"]
+argument.command.appends = true                       # xargs adds its input to the command
+marks.command = ["command"]
+marks.read = ["arg_file"]
+
+[commands.env]
+parser = "posix"
+arguments = [
+  "assigns...", "command...", "--chdir|-C:", "--split-string|-S:", "--unset|-u:",
+  "--ignore-environment|-i", "--null|-0", "--debug|-v",
+]
+argument.assigns.match = "*=*"
+marks.variables = ["assigns"]
+marks.command = ["command"]
+marks.shell = ["split_string"]
+with.cwd = 'path(last(args.chdir))'
+
+[commands.export]
+parser = "posix"
+arguments = ["names...", "unexport=-n", "functions=-f", "print=-p"]
+marks.variables = ["names"]
+
+[commands.sudo]
+parser = "posix"
+arguments = [
+  "command...",
+  "--user|-u:", "--group|-g:", "--chdir|-D:", "--close-from|-C:", "--host:", "--prompt|-p:",
+  "--role|-r:", "--type|-t:", "--command-timeout|-T:", "--other-user|-U:",
+  "--login|-i", "--shell|-s", "--edit|-e", "--preserve-env|-E", "--non-interactive|-n",
+  "--background|-b", "--list|-l", "--validate|-v", "--reset-timestamp|-k", "--remove-timestamp|-K",
+  "--set-home|-H", "--stdin|-S",
+]
+argument.user.default = ["root"]
+marks.command = ["command"]
+with.user = 'last(args.user)'
+with.cwd = 'args.login ? home(with.user) : path(last(args.chdir))'
+
+[commands.ssh]
+parser = "posix"                                      # ssh's options end at the destination
+arguments = [
+  "destination", "command...",
+  "bind_interface=-B:", "bind_address=-b:", "cipher_spec=-c:", "dynamic=-D:", "log_file=-E:",
+  "escape_char=-e:", "config=-F:", "pkcs11=-I:", "identity_file=-i:", "jump=-J:", "local=-L:",
+  "login_name=-l:", "mac_spec=-m:", "control=-O:", "option=-o:", "port=-p:", "query=-Q:",
+  "remote=-R:", "control_path=-S:", "forward_stdio=-W:", "tunnel=-w:",
+  "ipv4=-4", "ipv6=-6", "agent=-A", "no_agent=-a", "compress=-C", "background=-f", "gateway=-g",
+  "no_stdin=-n", "no_command=-N", "quiet=-q", "subsystem=-s", "no_tty=-T", "tty=-t", "verbose=-v",
+  "x11=-X", "no_x11=-x", "trusted_x11=-Y",
+]
+marks.read = ["config", "identity_file"]
+marks.write = ["log_file"]
+marks.shell = ["command"]                             # ssh joins its words into one remote line
+with.host = 'host_of(args.destination)'
+with.user = 'or(last(args.login_name), user_of(args.destination))'
+with.cwd = 'home(with.user)'
+
+# sh, bash, dash, zsh: four entries on purpose. With -c the line is a shell line; else the first
+# operand is a script file, and with neither the shell reads its commands from standard input.
+
+[commands.sh]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "--login|-l", "interactive=-i",
+  "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v", "noexec=-n", "stdin=-s",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+
+[commands.bash]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "shopt=-O:", "--rcfile|--init-file:",
+  "--login|-l", "interactive=-i", "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v",
+  "noexec=-n", "stdin=-s", "--norc", "--noprofile", "--posix", "--restricted|-r",
+]
+marks.read = ["file", "rcfile"]
+marks.shell = ["command"]
+
+[commands.dash]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "--login|-l", "interactive=-i",
+  "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v", "noexec=-n", "stdin=-s",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+
+[commands.zsh]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "--login|-l", "interactive=-i",
+  "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v", "noexec=-n", "stdin=-s", "no_rcs=-f",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+
+# cd, pushd and popd also change the directory of the commands after them in their shell.
+
+[commands.cd]
+parser = "posix"
+arguments = ["dir", "logical=-L", "physical=-P", "exit_on_error=-e"]
+argument.dir.default = ["~"]
+marks.read = ["dir"]
+
+[commands.pushd]
+parser = "posix"
+arguments = ["dir", "no_change=-n"]
+marks.read = ["dir"]
+
+[commands.popd]
+parser = "posix"
+arguments = ["entry", "no_change=-n"]
 
 # =============================================================================
 # Writers
@@ -622,7 +763,14 @@ message = "eval executes arbitrary strings"
 
 [[rules]]
 description = "source"
-when = 'command.name in ["source", "."]'
+command = "source"
+host = 'true'
+action = "deny"
+message = "source executes file contents"
+
+[[rules]]
+description = ". (source)"
+command = "."
 host = 'true'
 action = "deny"
 message = "source executes file contents"
@@ -633,6 +781,38 @@ command = "exec"
 host = 'true'
 action = "deny"
 message = "exec replaces the shell process"
+
+[[rules]]
+description = "sh reads standard input"
+command = "sh"
+when = 'args.command == [] && args.file == null'
+host = 'true'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
+
+[[rules]]
+description = "bash reads standard input"
+command = "bash"
+when = 'args.command == [] && args.file == null'
+host = 'true'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
+
+[[rules]]
+description = "dash reads standard input"
+command = "dash"
+when = 'args.command == [] && args.file == null'
+host = 'true'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
+
+[[rules]]
+description = "zsh reads standard input"
+command = "zsh"
+when = 'args.command == [] && args.file == null'
+host = 'true'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
 [[rules]]
 description = "git -c"
@@ -656,13 +836,22 @@ action = "ask"
 # =============================================================================
 
 [[rules]]
-description = "cd/pushd/popd"
-when = 'command.name in ["cd", "pushd", "popd"]'
+description = "a variable that can run code"
+when = '''
+  variables.exists(v, v in ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV",
+                            "PROMPT_COMMAND", "PS4", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
+                            "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EDITOR",
+                            "GIT_EXEC_PATH", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "PAGER",
+                            "EDITOR", "VISUAL", "LESSOPEN", "LESSCLOSE", "PYTHONPATH", "PYTHONSTARTUP",
+                            "NODE_OPTIONS", "PERL5OPT", "RUBYOPT", "RUSTC_WRAPPER", "CARGO_TARGET_DIR"]
+                || startsWith(v, "BASH_FUNC_") || startsWith(v, "GIT_CONFIG_"))
+'''
 action = "ask"
+message = "the variable can make a later command run another program"
 
 [[rules]]
 description = "privilege escalation"
-when = 'command.name in ["sudo", "su", "doas"]'
+when = 'command.name in ["su", "doas"]'
 action = "ask"
 
 [[rules]]
@@ -832,9 +1021,60 @@ message = "cargo install downloads and compiles arbitrary code from crates.io"
 [[rules]]
 description = "info commands"
 when = '''
-  command.name in ["echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id", "which",
-                   "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type", "man", "tr"]
-'''
+  command.name in [null, "echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id",
+                   "which", "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type",
+                   "man", "tr"]
+'''                                                   # null: a line that only assigns or redirects
+action = "allow"
+
+# A command that runs an inner command is allowed; the inner command meets the rules itself, in
+# the context the outer command gives it.
+
+[[rules]]
+description = "commands that run a command, and export"
+when = 'command.name in ["timeout", "nice", "nohup", "xargs", "env", "export"]'
+action = "allow"
+
+[[rules]]
+description = "sudo with a command"
+command = "sudo"
+when = 'args.command != [] && !args.edit && !args.shell && !args.login'
+action = "allow"
+
+# -o and -F can set a ProxyCommand, which runs on this machine.
+[[rules]]
+description = "ssh with a command"
+command = "ssh"
+when = 'args.command != [] && args.option == [] && args.config == []'
+action = "allow"
+
+[[rules]]
+description = "sh -c"
+command = "sh"
+when = 'args.command != []'
+action = "allow"
+
+[[rules]]
+description = "bash -c"
+command = "bash"
+when = 'args.command != []'
+action = "allow"
+
+[[rules]]
+description = "dash -c"
+command = "dash"
+when = 'args.command != []'
+action = "allow"
+
+[[rules]]
+description = "zsh -c"
+command = "zsh"
+when = 'args.command != []'
+action = "allow"
+
+[[rules]]
+description = "cd, pushd and popd"
+when = 'command.name in ["cd", "pushd", "popd"]'
 action = "allow"
 
 [[rules]]

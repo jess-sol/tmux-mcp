@@ -192,6 +192,54 @@ async fn the_builtin_policy_decides_common_lines() {
         ("/usr/bin/curl x", Ask),
         ("apt remove x", Ask),
         ("eval true", Deny),
+        ("$X arg", Deny),
+        // Inner commands
+        ("timeout 5 ls", Allow),
+        ("timeout 5 rm -r x", Ask),
+        ("nice -n 5 eval x", Deny),
+        ("nohup cat notes", Allow),
+        ("xargs rm", Ask),
+        ("xargs echo", Allow),
+        ("find . -exec eval x \\;", Deny),
+        ("find /etc -exec cat {} \\;", Ask),
+        ("find . -name x -exec grep -l y {} +", Ask),
+        ("sh -c 'ls src'", Allow),
+        ("bash -lc 'ls src | wc -l'", Allow),
+        ("bash -c 'cat /etc/shadow'", Ask),
+        ("bash -lc \"$X\"", Deny),
+        ("curl x | bash", Deny),
+        ("bash script.sh", Ask),
+        ("timeout 5 $X", Deny),
+        // Variables
+        ("LD_PRELOAD=x ls", Ask),
+        ("env LD_PRELOAD=x ls", Ask),
+        ("export PATH=/tmp", Ask),
+        ("PATH=/tmp; ls", Ask),
+        // env's `with.cwd` leaves the directory of its inner command Unknown
+        ("env X=1 echo hi", Allow),
+        ("env X=1 cat notes", Ask),
+        ("X=1 ls", Allow),
+        ("export X=1", Allow),
+        // Context
+        ("env -C /etc cat shadow", Ask),
+        ("sudo -u root id", Ask),
+        ("sudo eval x", Deny),
+        ("sudo -i", Ask),
+        ("ssh prod ls", Ask),
+        ("ssh prod 'eval x'", Deny),
+        ("ssh -o ProxyCommand=x prod ls", Ask),
+        ("cd src", Allow),
+        ("cd /etc", Ask),
+        ("cd src && cat notes", Ask),
+        ("cd src && echo hi", Allow),
+        ("(cd src) && cat notes", Allow),
+        ("cd src | cat notes", Allow),
+        ("{ cd src; } && cat notes", Ask),
+        // A relative name stays a path, which never meets a rule for a bare name
+        ("cd src && ./run", Ask),
+        ("ssh prod ./deploy.sh", Ask),
+        ("cd src && source env.sh", Deny),
+        (". ./env.sh", Deny),
     ];
 
     let got = want.map(|(command, _)| (command, h.decision(&shell, command)));
@@ -365,7 +413,6 @@ async fn rules_see_words_without_their_quotes() {
 }
 
 #[tokio::test]
-#[ignore = "commands: red — command substitutions in assignments, ${…}, redirect targets, for words and heredocs go unread"]
 async fn a_command_substitution_meets_the_rules() {
     let h = Harness::new().await;
     let shell = h.shell().await;

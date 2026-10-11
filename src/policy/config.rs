@@ -68,8 +68,22 @@ pub struct GrammarConfig {
     pub argument: BTreeMap<String, ArgumentSettings>,
     #[serde(default)]
     pub marks: MarksConfig,
+    #[serde(default)]
+    pub with: ContextConfig,
     #[serde(flatten)]
     pub subcommands: BTreeMap<String, GrammarConfig>,
+}
+
+/// CEL for the context of a level's *Inner command*s: one per field it changes.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextConfig {
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +129,9 @@ pub struct ArgumentSettings {
     pub default: Option<Vec<String>>,
     #[serde(default, rename = "match")]
     pub matches: Option<String>,
+    /// The tool adds words at the end of the command that this argument holds.
+    #[serde(default)]
+    pub appends: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -126,6 +143,12 @@ pub struct MarksConfig {
     pub write: Vec<String>,
     #[serde(default)]
     pub cwd: Vec<String>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub shell: Vec<String>,
+    #[serde(default)]
+    pub variables: Vec<String>,
 }
 
 const BUILTIN_TOML: &str = include_str!("builtin_rules.toml");

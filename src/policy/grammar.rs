@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use globset::{Glob, GlobMatcher};
 
-use super::config::{ArgumentConfig, GrammarConfig, ParserConfig, ParserName};
+use super::config::{ArgumentConfig, ContextConfig, GrammarConfig, ParserConfig, ParserName};
 use super::parse::Word;
-use super::rules::TriVal;
+use super::rules::{self, TriVal};
 
 // --- Types ---
 
@@ -25,6 +25,29 @@ pub(crate) struct Parse {
     pub cwd: TriVal,
     pub reads: TriVal,
     pub writes: TriVal,
+    /// The names of the variables that the marked words set.
+    pub variables: TriVal,
+    /// The *Inner command*s that the marked words run.
+    pub inner: Vec<Inner>,
+    /// The context fields that a `with` key changes for the inner commands.
+    pub with: With,
+}
+
+/// An *Inner command* as the words of its outer command give it.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Inner {
+    /// Words already split; the first is the command name.
+    Words(Vec<Word>),
+    /// A shell line; None when a word of it cannot be known.
+    Line(Option<String>),
+}
+
+/// The context fields that `with` keys set.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct With {
+    pub cwd: bool,
+    pub user: bool,
+    pub host: bool,
 }
 
 /// A grammar's top level or one of its subcommand levels.
@@ -38,6 +61,7 @@ struct Level {
     global: Vec<Opt>,
     defaults: BTreeMap<String, Vec<String>>,
     marks: Marks,
+    with: With,
     /// Subcommand words that parse the rest with this level.
     words: BTreeSet<String>,
     /// Subcommand words that parse the rest with a level of their own.
@@ -75,6 +99,8 @@ struct Opt {
     /// The `find` parser's spellings: whole words, dash included.
     single: Vec<String>,
     value: bool,
+    /// Its value is a command up to `;` or `{} +` (`-exec...`).
+    command: bool,
 }
 
 #[derive(Default)]
@@ -82,6 +108,11 @@ struct Marks {
     read: Vec<String>,
     write: Vec<String>,
     cwd: Vec<String>,
+    command: Vec<String>,
+    shell: Vec<String>,
+    variables: Vec<String>,
+    /// Command arguments that the tool adds words to.
+    appends: BTreeSet<String>,
 }
 
 /// The names and global spellings of the levels above the one compiling.
@@ -130,7 +161,6 @@ enum Placed {
     Unsure,
 }
 
-const RESERVED: [&str; 7] = ["parser", "arguments", "global", "argument", "marks", "with", "then"];
 const SUBCOMMAND: &str = "subcommand";
 
 // --- Public API ---
@@ -161,6 +191,9 @@ impl Grammars {
                 cwd: TriVal::Null,
                 reads: list(Vec::new(), true),
                 writes: list(Vec::new(), true),
+                variables: list(Vec::new(), true),
+                inner: Vec::new(),
+                with: With::default(),
             };
         };
         let mut run = Run::default();
@@ -236,17 +269,16 @@ impl Level {
 
         let sub_at = check_slots(path, &slots)?;
         let names = check_names(path, &slots, &options, &global, chain)?;
-        let (defaults, words) = settings(path, config, &mut slots, &options, &global)?;
-        let marks = marks(path, config, &names)?;
+        let (defaults, words, appends) = settings(path, config, &mut slots, &options, &global)?;
+        let marks = marks(path, config, &names, &slots, appends)?;
+        let with = with(path, &config.with)?;
 
         let mut child_chain = chain.clone();
         child_chain.names.extend(names);
         child_chain.global_spellings.extend(global.iter().flat_map(Opt::spellings));
         let mut tables = BTreeMap::new();
+        // A reserved name never gets here: serde reads it as the key of that name.
         for (word, sub) in &config.subcommands {
-            if RESERVED.contains(&word.as_str()) {
-                return Err(format!("{path}: `{word}` is a reserved name, not a subcommand"));
-            }
             if sub_at.is_none() {
                 return Err(format!("{path}: the table `{word}` is on a level without `subcommand`"));
             }
@@ -260,7 +292,7 @@ impl Level {
             return Err(format!("{path}: `subcommand` has no words and no tables"));
         }
 
-        Ok(Level { parser, slots, options, global, defaults, marks, words, tables })
+        Ok(Level { parser, slots, options, global, defaults, marks, with, words, tables })
     }
 
     /// The names this level declares, its global options included.
@@ -296,7 +328,7 @@ impl Opt {
 }
 
 /// One argument string: `"files"`, `"files..."`, `"--force|-f"`, `"--output|-o:"`,
-/// `"dir=-C:"` or `"subcommand"`.
+/// `"-exec..."`, `"dir=-C:"` or `"subcommand"`.
 fn parse_spec(path: &str, spec: &str, parser: &Parser) -> Result<Item, String> {
     let bad = || format!("{path}: `{spec}` is not an argument string");
     let (prefix, body) = match spec.split_once('=') {
@@ -311,11 +343,15 @@ fn parse_spec(path: &str, spec: &str, parser: &Parser) -> Result<Item, String> {
     }
 
     if body.starts_with('-') {
-        let (body, value) = match body.strip_suffix(':') {
-            Some(b) => (b, true),
-            None => (body, false),
+        let (body, value, command) = match (body.strip_suffix(':'), body.strip_suffix("...")) {
+            (Some(b), _) => (b, true, false),
+            (None, Some(b)) => (b, false, true),
+            (None, None) => (body, false, false),
         };
-        let mut opt = Opt { name: String::new(), long: vec![], short: vec![], single: vec![], value };
+        if command && parser.name != ParserName::Find {
+            return Err(format!("{path}: `{spec}`: an option spelled with `...` is only for the `find` parser"));
+        }
+        let mut opt = Opt { name: String::new(), long: vec![], short: vec![], single: vec![], value, command };
         for spelling in body.split('|') {
             if let Some(long) = spelling.strip_prefix("--") {
                 if !is_spelling(long) {
@@ -430,11 +466,13 @@ fn check_names(path: &str, slots: &[Slot], options: &[Opt], global: &[Opt], chai
     Ok(names)
 }
 
-type Settings = (BTreeMap<String, Vec<String>>, BTreeSet<String>);
+/// The defaults, the subcommand words, and the arguments that `appends` sets.
+type Settings = (BTreeMap<String, Vec<String>>, BTreeSet<String>, BTreeSet<String>);
 
 fn settings(path: &str, config: &GrammarConfig, slots: &mut [Slot], options: &[Opt], global: &[Opt]) -> Result<Settings, String> {
     let mut defaults = BTreeMap::new();
     let mut words = BTreeSet::new();
+    let mut appends = BTreeSet::new();
     for (name, s) in &config.argument {
         let opt = options.iter().chain(global).find(|o| &o.name == name);
         let slot = slots.iter_mut().find(|x| &x.name == name);
@@ -463,18 +501,53 @@ fn settings(path: &str, config: &GrammarConfig, slots: &mut [Slot], options: &[O
             }
             defaults.insert(name.clone(), d.clone());
         }
+        if s.appends {
+            appends.insert(name.clone());
+        }
     }
-    Ok((defaults, words))
+    Ok((defaults, words, appends))
 }
 
-fn marks(path: &str, config: &GrammarConfig, names: &BTreeSet<String>) -> Result<Marks, String> {
+fn marks(path: &str, config: &GrammarConfig, names: &BTreeSet<String>, slots: &[Slot], appends: BTreeSet<String>) -> Result<Marks, String> {
     let m = &config.marks;
-    for (mark, list) in [("read", &m.read), ("write", &m.write), ("cwd", &m.cwd)] {
+    let lists = [
+        ("read", &m.read),
+        ("write", &m.write),
+        ("cwd", &m.cwd),
+        ("command", &m.command),
+        ("shell", &m.shell),
+        ("variables", &m.variables),
+    ];
+    for (mark, list) in lists {
         if let Some(name) = list.iter().find(|n| !names.contains(*n)) {
             return Err(format!("{path}: `marks.{mark}` names `{name}`, which this level does not declare"));
         }
     }
-    Ok(Marks { read: m.read.clone(), write: m.write.clone(), cwd: m.cwd.clone() })
+    if let Some(slot) = slots.iter().find(|s| s.kind == SlotKind::One && m.command.contains(&s.name)) {
+        return Err(format!("{path}: `marks.command` names `{}`, a one-word operand; a command is `{0}...`", slot.name));
+    }
+    if let Some(name) = appends.iter().find(|n| !m.command.contains(*n)) {
+        return Err(format!("{path}: `argument.{name}.appends` is on an argument that `marks.command` does not name"));
+    }
+    Ok(Marks {
+        read: m.read.clone(),
+        write: m.write.clone(),
+        cwd: m.cwd.clone(),
+        command: m.command.clone(),
+        shell: m.shell.clone(),
+        variables: m.variables.clone(),
+        appends,
+    })
+}
+
+/// The fields that `with` sets. Their CEL is not evaluated, so it only has to parse.
+fn with(path: &str, config: &ContextConfig) -> Result<With, String> {
+    for (field, cel) in [("cwd", &config.cwd), ("user", &config.user), ("host", &config.host)] {
+        if let Some(text) = cel {
+            rules::parse_cel(text).map_err(|e| format!("{path}: `with.{field}`: {e}"))?;
+        }
+    }
+    Ok(With { cwd: config.cwd.is_some(), user: config.user.is_some(), host: config.host.is_some() })
 }
 
 // --- Parsing ---
@@ -490,7 +563,7 @@ impl Level {
             }
         }
         for opt in self.options.iter().chain(&self.global) {
-            let empty = if opt.value { list(Vec::new(), true) } else { TriVal::Bool(false) };
+            let empty = if opt.value || opt.command { list(Vec::new(), true) } else { TriVal::Bool(false) };
             run.parts.insert(opt.name.clone(), empty);
         }
         let mut globals = globals.to_vec();
@@ -627,6 +700,7 @@ impl Level {
                 *expression = true;
             }
             return match active.iter().find(|o| o.single.iter().any(|s| s == text)) {
+                Some(o) if o.command => took(take_command(o, rest, run)),
                 Some(o) if o.value => took(take_value(o, None, rest, run)),
                 Some(o) => took(set_flag(o, run)),
                 None => undeclared(false),
@@ -803,6 +877,38 @@ fn take_value(opt: &Opt, attached: Option<String>, rest: &[Word], run: &mut Run)
     }
 }
 
+/// `-exec` and its kin: a command up to `;`, or up to `{}` and `+`. `{}` is
+/// a file path that cannot be known, and so is a word that holds it. A word
+/// that may split may hide the `;`: what follows cannot be known.
+fn take_command(opt: &Opt, rest: &[Word], run: &mut Run) -> usize {
+    let mut words = Vec::new();
+    let mut taken = rest.len();
+    for (i, word) in rest.iter().enumerate() {
+        match word {
+            Word::Known(w) if w == ";" => {
+                taken = i + 1;
+                break;
+            }
+            Word::Known(w) if w == "+" && i > 0 && rest[i - 1] == Word::Known("{}".into()) => {
+                taken = i + 1;
+                break;
+            }
+            Word::Known(w) if !w.contains("{}") => words.push(TriVal::String(w.clone())),
+            Word::Unknown { splits: true } => {
+                words.push(TriVal::Unknown);
+                run.unsure = true;
+                taken = i + 1;
+                break;
+            }
+            _ => words.push(TriVal::Unknown),
+        }
+    }
+    if let Some(TriVal::List { elements, .. }) = run.parts.get_mut(&opt.name) {
+        elements.push(list(words, true));
+    }
+    taken
+}
+
 /// Under doubt, the flag word may be another option's value: given reads Unknown.
 fn set_flag(opt: &Opt, run: &mut Run) -> usize {
     let part = run.parts.entry(opt.name.clone()).or_insert(TriVal::Bool(false));
@@ -897,13 +1003,93 @@ impl Run<'_> {
             _ => {}
         }
 
+        let mut variables = Gather::new(true);
+        let mut inner = Vec::new();
+        let mut with = With::default();
+        for level in &self.levels {
+            for name in &level.marks.variables {
+                variables.add_names(self.parts.get(name));
+            }
+            for name in &level.marks.command {
+                commands(self.parts.get(name), level.marks.appends.contains(name), &mut inner);
+            }
+            for name in &level.marks.shell {
+                inner.extend(line(self.parts.get(name)));
+            }
+            with.cwd |= level.with.cwd;
+            with.user |= level.with.user;
+            with.host |= level.with.host;
+        }
+
         Parse {
             subcommands: list(self.subcommands, true),
             args: self.parts,
             cwd,
             reads: list(reads.elements, reads.exhaustive),
             writes: list(writes.elements, writes.exhaustive),
+            variables: list(variables.elements, variables.exhaustive),
+            inner,
+            with,
         }
+    }
+}
+
+/// The commands a `marks.command` part holds: its words, or one list of
+/// words for each use of a `-exec...` option. Words that a part may hold
+/// beyond those it shows make an Unknown word at the end of the command.
+fn commands(part: Option<&TriVal>, appends: bool, out: &mut Vec<Inner>) {
+    match part {
+        Some(TriVal::List { elements, exhaustive }) if matches!(elements.first(), Some(TriVal::List { .. })) => {
+            for use_ in elements {
+                if let TriVal::List { elements, exhaustive } = use_ {
+                    out.extend(command(elements, *exhaustive, appends));
+                }
+            }
+            if !exhaustive {
+                out.push(Inner::Words(vec![Word::Unknown { splits: true }]));
+            }
+        }
+        Some(TriVal::List { elements, exhaustive }) => out.extend(command(elements, *exhaustive, appends)),
+        Some(TriVal::Unknown) => out.push(Inner::Words(vec![Word::Unknown { splits: true }])),
+        _ => {}
+    }
+}
+
+/// A part's value lost whether an Unknown word could split, so each may.
+fn command(elements: &[TriVal], exhaustive: bool, appends: bool) -> Option<Inner> {
+    if elements.is_empty() && exhaustive {
+        return None;
+    }
+    let mut words: Vec<Word> = elements
+        .iter()
+        .map(|e| match e {
+            TriVal::String(w) => Word::Known(w.clone()),
+            _ => Word::Unknown { splits: true },
+        })
+        .collect();
+    if !exhaustive || appends {
+        words.push(Word::Unknown { splits: true });
+    }
+    Some(Inner::Words(words))
+}
+
+/// The shell line a `marks.shell` part holds: its words joined with spaces.
+fn line(part: Option<&TriVal>) -> Option<Inner> {
+    match part {
+        Some(TriVal::String(s)) => Some(Inner::Line(Some(s.clone()))),
+        Some(TriVal::List { elements, exhaustive: true }) if elements.is_empty() => None,
+        Some(TriVal::List { elements, exhaustive: true }) => {
+            let words: Option<Vec<&str>> = elements
+                .iter()
+                .map(|e| match e {
+                    TriVal::String(w) => Some(w.as_str()),
+                    _ => None,
+                })
+                .collect();
+            Some(Inner::Line(words.map(|w| w.join(" "))))
+        }
+        Some(TriVal::List { .. } | TriVal::Unknown) => Some(Inner::Line(None)),
+        _ => None,
     }
 }
 
@@ -967,6 +1153,23 @@ impl Gather {
                 self.exhaustive &= exhaustive;
             }
             Some(v @ (TriVal::String(_) | TriVal::Unknown)) => self.elements.push(v.clone()),
+            _ => {}
+        }
+    }
+
+    /// The variable names of `NAME=value` and `NAME` words.
+    fn add_names(&mut self, part: Option<&TriVal>) {
+        let name = |v: &TriVal| match v {
+            TriVal::String(w) => TriVal::String(w.split_once('=').map_or(w.as_str(), |(n, _)| n).to_string()),
+            _ => TriVal::Unknown,
+        };
+        match part {
+            Some(TriVal::List { elements, exhaustive }) => {
+                self.elements.extend(elements.iter().map(name));
+                self.exhaustive &= exhaustive;
+            }
+            Some(v @ TriVal::String(_)) => self.elements.push(name(v)),
+            Some(TriVal::Unknown) => self.exhaustive = false,
             _ => {}
         }
     }
@@ -1288,6 +1491,74 @@ mod tests {
         assert_eq!(parse(GIT, "git $X log").cwd, TriVal::Unknown);
     }
 
+    const WRAPPERS: &str = r#"
+        [commands.timeout]
+        parser = "posix"
+        arguments = ["duration", "command...", "--signal|-s:"]
+        marks.command = ["command"]
+
+        [commands.xargs]
+        parser = "posix"
+        arguments = ["command...", "--max-args|-n:"]
+        argument.command.appends = true
+        marks.command = ["command"]
+
+        [commands.sh]
+        parser = "posix"
+        arguments = [["file", "command=-c:"], "positional..."]
+        marks.shell = ["command"]
+
+        [commands.find]
+        parser = "find"
+        arguments = ["files...", "-name:", "-exec...", "-delete"]
+        marks.command = ["exec"]
+
+        [commands.env]
+        parser = "posix"
+        arguments = ["assigns...", "command...", "--chdir|-C:"]
+        argument.assigns.match = "*=*"
+        marks.variables = ["assigns"]
+        marks.command = ["command"]
+        with.cwd = 'path(last(args.chdir))'
+    "#;
+
+    #[test]
+    fn marks_give_the_inner_commands_that_a_command_runs() {
+        let k = |w: &str| Word::Known(w.into());
+        let u = || Word::Unknown { splits: true };
+        let words = |ws: &[Word]| Inner::Words(ws.to_vec());
+        let rows = [
+            ("timeout 5 ls -l", vec![words(&[k("ls"), k("-l")])]),
+            ("timeout 5", vec![]),
+            ("timeout --frob 5 ls", vec![words(&[u()])]),
+            ("timeout 5 $X", vec![words(&[u()])]),
+            ("xargs rm -f", vec![words(&[k("rm"), k("-f"), u()])]),
+            ("sh -c date", vec![Inner::Line(Some("date".into()))]),
+            ("sh -c $X", vec![Inner::Line(None)]),
+            ("sh script", vec![]),
+            ("find . -exec rm {} ; -name x", vec![words(&[k("rm"), u()])]),
+            ("find . -exec ls {} + -exec cp {}.bak d ;", vec![words(&[k("ls"), u()]), words(&[k("cp"), u(), k("d")])]),
+            ("find . -exec rm", vec![words(&[k("rm")])]),
+            // `$X` may hold the `;`, and more `-exec` uses after it.
+            ("find . -exec rm $X ; -delete", vec![words(&[k("rm"), u()]), words(&[u()])]),
+            ("find . -name $X", vec![words(&[u()])]),
+            ("env A=1 ls", vec![words(&[k("ls")])]),
+        ];
+        for (line, want) in rows {
+            assert_eq!(parse(WRAPPERS, line).inner, want, "{line}");
+        }
+        check(WRAPPERS, &[("find . -exec rm {} ; -name x", "name", strings(&["x"]))]);
+    }
+
+    #[test]
+    fn marks_name_the_variables_and_with_names_the_context_that_a_command_changes() {
+        let p = parse(WRAPPERS, "env A=1 B ls");
+        assert_eq!(p.variables, strings(&["A"]));
+        assert_eq!(p.with, With { cwd: true, user: false, host: false });
+        assert_eq!(parse(WRAPPERS, "env --frob A=1 ls").variables, list(vec![], false));
+        assert_eq!(parse(WRAPPERS, "timeout 5 ls").with, With::default());
+    }
+
     #[test]
     fn a_command_finds_its_grammar_by_its_last_path_component() {
         assert_eq!(parse(GIT, "/usr/bin/git log").subcommands, strings(&["log"]));
@@ -1330,7 +1601,13 @@ mod tests {
                 "parser = \"gnu\"\narguments = [\"subcommand\"]\nargument.subcommand.words = [\"a\"]\n[commands.t.a]\narguments = []",
                 "both in `words` and a table",
             ),
-            ("parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.with]\narguments = []", "reserved"),
+            ("parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.with]\narguments = []", "unknown field"),
+            ("parser = \"gnu\"\narguments = [\"--run...\"]", "only for the `find` parser"),
+            ("parser = \"gnu\"\narguments = [\"xs...\"]\nargument.xs.appends = true", "`marks.command` does not name"),
+            ("parser = \"gnu\"\narguments = [\"x\"]\nmarks.command = [\"x\"]", "a one-word operand"),
+            ("parser = \"gnu\"\narguments = [\"x\"]\nmarks.shell = [\"y\"]", "does not declare"),
+            ("parser = \"gnu\"\nwith.home = 'x'", "unknown field"),
+            ("parser = \"gnu\"\nwith.cwd = '@@'", "CEL"),
             ("parser = \"gnu\"\narguments = [\"x\"]\nargument.x.words = [\"a\"]", "only for `subcommand`"),
             ("parser = \"gnu\"\narguments = [\"--x:\"]\nargument.x.match = \"*\"", "only for an operand"),
             ("parser = \"gnu\"\narguments = [\"--x\"]\nargument.x.default = [\"a\"]", "only for an operand or an option"),

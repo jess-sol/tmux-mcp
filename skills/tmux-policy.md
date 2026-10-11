@@ -30,7 +30,7 @@ A policy file that does not load denies every command until it is fixed.
 [[rules]]
 description = "short name"
 command = "git stash"                  # the command path; matches it and the subcommands below it
-when = 'subcommand in ["list", "show"]'  # CEL over args.<name>, subcommand, command.name, pane.foreground
+when = 'subcommand in ["list", "show"]'  # CEL over args.<name>, subcommand, command.name, variables
 action = "allow"                       # or "ask" or "deny"
 # path = '!in_project(path)'           # CEL over each path the command reads or writes
 # write = '...'                        # CEL over each path it writes
@@ -42,6 +42,8 @@ action = "allow"                       # or "ask" or "deny"
 Every matching rule counts, and the strictest wins: deny, then ask, then allow. Default is `ask`. An Unknown condition fires ask and deny rules, never allow or override rules.
 
 A rule reads a command's parts by name (`args.force`), which its grammar (`[commands.<name>]`) declares. To allow a command with conditions on its arguments, check that a built-in grammar exists for it, or add one.
+
+A command that runs another (`timeout`, `xargs`, `sudo`, `ssh`, `bash -c`, `find -exec`) needs no rule of its own: its inner command meets the rules itself.
 
 ## Instructions
 

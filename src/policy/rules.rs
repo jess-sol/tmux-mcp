@@ -17,7 +17,7 @@ use cel_parser::reference::Val;
 
 use super::config::RuleConfig;
 use super::grammar::Grammars;
-use super::parse::{CommandInfo, literal};
+use super::parse::CommandInfo;
 use super::programs;
 use super::{Decision, PolicyResult};
 
@@ -116,6 +116,7 @@ pub struct RuleSet {
 }
 
 /// Where the commands of a line run, as the rules see it.
+#[derive(Clone)]
 pub(crate) struct Env {
     pub host: Host,
     /// The hostname of the tmux-mcp process.
@@ -127,9 +128,9 @@ pub(crate) struct Env {
     /// The directory that relative command identities start from.
     pub anchor: Option<PathBuf>,
     pub project_dirs: Vec<PathBuf>,
-    pub foreground: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) enum Host {
     Here,
     There(String),
@@ -139,6 +140,9 @@ pub(crate) enum Host {
 /// What one command shows the rules.
 struct Facts {
     identity: TriVal,
+    /// Written as a relative path, so its identity is a path even when the
+    /// directory cannot be known.
+    relative: bool,
     subcommands: Vec<TriVal>,
     args: TriVal,
     /// Every resolved path it reads or writes.
@@ -147,6 +151,9 @@ struct Facts {
     writes: TriVal,
     /// The directory it runs in; None when it cannot be known.
     dir: Option<PathBuf>,
+    variables: TriVal,
+    /// Unknown when an outer command changed the user it runs as.
+    user: TriVal,
 }
 
 /// The variables of one CEL evaluation, and where its paths resolve.
@@ -187,6 +194,15 @@ pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Gra
 /// are a group of their own: when any matches, the strictest override
 /// decides and the other rules do not count. No match gives the default.
 pub(crate) fn evaluate(cmd: &CommandInfo, env: &Env, rules: &RuleSet) -> PolicyResult {
+    // A host that an outer command changed cannot be known.
+    let changed;
+    let env = match cmd.host {
+        TriVal::Unknown => {
+            changed = Env { host: Host::Unknown, ..env.clone() };
+            &changed
+        }
+        _ => env,
+    };
     decide(rules, &Facts::of(cmd, env), env)
 }
 
@@ -282,7 +298,7 @@ fn command_path(command: &str) -> Result<Vec<String>, String> {
 
 /// cel-parser panics on some malformed input (`@@`), so a panic is a parse
 /// error too.
-fn parse_cel(text: &str) -> Result<cel::IdedExpr, String> {
+pub(crate) fn parse_cel(text: &str) -> Result<cel::IdedExpr, String> {
     let parsed = std::panic::catch_unwind(|| cel_parser::Parser::new().parse(text));
     match parsed {
         Ok(Ok(expr)) => Ok(expr),
@@ -344,6 +360,12 @@ impl Refs {
 impl Facts {
     fn of(cmd: &CommandInfo, env: &Env) -> Facts {
         let home = env.home.as_deref();
+        // The shell's directory, where redirects and the command name resolve;
+        // a `cd` or an outer command may have changed it.
+        let shell_dir = match cmd.cwd {
+            TriVal::Unknown => None,
+            _ => env.pane_cwd.as_deref(),
+        };
         let dir = match &cmd.cwd {
             TriVal::Null => env.pane_cwd.clone(),
             TriVal::String(d) => match resolve(d, env.pane_cwd.as_deref(), home) {
@@ -372,11 +394,7 @@ impl Facts {
         let mut paths = reads;
         paths.extend(writes.iter().cloned());
         for r in &cmd.redirects {
-            let target = if r.has_expansion {
-                TriVal::Unknown
-            } else {
-                resolve(&r.target, env.pane_cwd.as_deref(), home)
-            };
+            let target = if r.has_expansion { TriVal::Unknown } else { resolve(&r.target, shell_dir, home) };
             if r.is_write {
                 writes.push(target.clone());
             }
@@ -384,7 +402,8 @@ impl Facts {
         }
 
         Facts {
-            identity: identity(&cmd.name, env),
+            identity: identity(&cmd.name, env, shell_dir),
+            relative: matches!(&cmd.name, TriVal::String(n) if n.contains('/') && !n.starts_with(['/', '~'])),
             subcommands: match &cmd.subcommands {
                 TriVal::List { elements, .. } => elements.clone(),
                 _ => vec![TriVal::Unknown],
@@ -393,6 +412,8 @@ impl Facts {
             paths: TriVal::List { elements: paths, exhaustive: reads_exhaustive && writes_exhaustive },
             writes: TriVal::List { elements: writes, exhaustive: writes_exhaustive },
             dir,
+            variables: cmd.variables.clone(),
+            user: cmd.user.clone(),
         }
     }
 }
@@ -434,10 +455,14 @@ fn rule_match(rule: &CompiledRule, facts: &Facts, env: &Env) -> Option<Match> {
     }
 }
 
-/// A rule matches when every key it has matches.
+/// A rule matches when every key it has matches, and only a command that
+/// runs as the pane's own user.
 fn rule_truth(rule: &CompiledRule, facts: &Facts, env: &Env) -> TriBool {
     let site = Site { env, dir: facts.dir.as_deref() };
     let mut truth = host_match(rule, env);
+    if facts.user == TriVal::Unknown {
+        truth = truth.and(TriBool::Unknown);
+    }
     if truth != TriBool::False {
         truth = truth.and(command_match(rule, facts));
     }
@@ -470,9 +495,15 @@ fn host_match(rule: &CompiledRule, env: &Env) -> TriBool {
     }
 }
 
-/// The command is the rule's path or a subcommand below it.
+/// The command is the rule's path or a subcommand below it. A relative
+/// name is a path identity wherever it resolves, so it never equals a bare
+/// name: spelling a tool as a path can turn its deny into an ask, never
+/// gain an allow.
 fn command_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
     let Some(path) = &rule.command else { return TriBool::True };
+    if facts.relative && !path[0].starts_with("./") {
+        return TriBool::False;
+    }
     let mut truth = tri_eq(&facts.identity, &TriVal::String(path[0].clone()));
     for (i, word) in path[1..].iter().enumerate() {
         let below = facts.subcommands.get(i).cloned().unwrap_or(TriVal::Null);
@@ -485,13 +516,11 @@ fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
     let depth = rule.command.as_ref().map_or(0, |c| c.len() - 1);
     let subcommand = facts.subcommands.get(depth).cloned().unwrap_or(TriVal::Null);
     let command = HashMap::from([("name".to_string(), facts.identity.clone())]);
-    let foreground = site.env.foreground.clone().map_or(TriVal::Null, TriVal::String);
-    let pane = HashMap::from([("foreground".to_string(), foreground)]);
     let vars = HashMap::from([
         ("args".to_string(), facts.args.clone()),
         ("subcommand".to_string(), subcommand),
         ("command".to_string(), TriVal::Map(command)),
-        ("pane".to_string(), TriVal::Map(pane)),
+        ("variables".to_string(), facts.variables.clone()),
     ]);
     Ctx { vars, site: Some(site) }
 }
@@ -529,18 +558,20 @@ fn rule_result(rule: &CompiledRule, matched: Match) -> PolicyResult {
 /// A command's identity, from its first word as text: a bare name is itself;
 /// a path inside the anchor is `./` and its path from the anchor; another
 /// absolute path is its last component; a relative path outside the anchor
-/// keeps its `../`. Off this machine a relative path cannot be known.
-fn identity(raw: &str, env: &Env) -> TriVal {
-    let Some(name) = literal(raw) else { return TriVal::Unknown };
+/// keeps its `../`. Off this machine, or from a shell directory that cannot
+/// be known, a relative path cannot be known. A command without a name has
+/// none.
+fn identity(name: &TriVal, env: &Env, shell_dir: Option<&Path>) -> TriVal {
+    let TriVal::String(name) = name else { return name.clone() };
     if !name.contains('/') {
-        return TriVal::String(name);
+        return TriVal::String(name.clone());
     }
     let last = || TriVal::String(name.rsplit('/').next().unwrap_or_default().to_string());
     let written_absolute = name.starts_with('/') || name.starts_with('~');
     if !matches!(env.host, Host::Here) {
         return if written_absolute { last() } else { TriVal::Unknown };
     }
-    let TriVal::String(path) = resolve(&name, env.pane_cwd.as_deref(), env.home.as_deref()) else {
+    let TriVal::String(path) = resolve(name, shell_dir, env.home.as_deref()) else {
         return TriVal::Unknown;
     };
     let path = PathBuf::from(path);
@@ -944,18 +975,20 @@ mod tests {
             home: Some("/home/u".into()),
             anchor: Some("/src/proj".into()),
             project_dirs: vec!["/src/proj".into()],
-            foreground: Some("bash".into()),
         }
     }
 
     fn facts_with_xs(xs: TriVal) -> Facts {
         Facts {
             identity: TriVal::String("t".into()),
+            relative: false,
             subcommands: vec![],
             args: TriVal::Map(HashMap::from([("xs".to_string(), xs)])),
             paths: TriVal::List { elements: vec![], exhaustive: true },
             writes: TriVal::List { elements: vec![], exhaustive: true },
             dir: Some("/src/proj".into()),
+            variables: TriVal::List { elements: vec![], exhaustive: true },
+            user: TriVal::Null,
         }
     }
 
@@ -1078,7 +1111,6 @@ mod tests {
     fn a_command_is_named_by_its_path_from_the_anchor() {
         let rows = [
             ("rm", Host::Here, TriVal::String("rm".into())),
-            ("'rm'", Host::Here, TriVal::String("rm".into())),
             ("/usr/bin/rm", Host::Here, TriVal::String("rm".into())),
             ("/src/proj/scripts/bench", Host::Here, TriVal::String("./scripts/bench".into())),
             ("../scripts/bench", Host::Here, TriVal::String("./scripts/bench".into())),
@@ -1087,11 +1119,16 @@ mod tests {
             ("~/bin/x", Host::Here, TriVal::String("x".into())),
             ("/usr/bin/rm", Host::There("prod".into()), TriVal::String("rm".into())),
             ("./run", Host::There("prod".into()), TriVal::Unknown),
-            ("$X", Host::Here, TriVal::Unknown),
         ];
         for (name, host, want) in rows {
-            assert_eq!(identity(name, &env(host)), want, "{name}");
+            let env = env(host);
+            assert_eq!(identity(&TriVal::String(name.into()), &env, env.pane_cwd.as_deref()), want, "{name}");
         }
+        let here = env(Host::Here);
+        assert_eq!(identity(&TriVal::String("./run".into()), &here, None), TriVal::Unknown);
+        assert_eq!(identity(&TriVal::String("rm".into()), &here, None), TriVal::String("rm".into()));
+        assert_eq!(identity(&TriVal::Unknown, &here, None), TriVal::Unknown);
+        assert_eq!(identity(&TriVal::Null, &here, None), TriVal::Null);
     }
 
     // --- Paths ---
