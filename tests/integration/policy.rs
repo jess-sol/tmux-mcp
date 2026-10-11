@@ -139,6 +139,7 @@ async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
         ("git push --force origin main", Some(Ask)),
         ("echo $(date) | tail -5", Some(Allow)),
         ("cd src && cargo build", Some(Deny)),
+        ("tmux capture-pane -p -t %1", Some(Deny)),
     ];
 
     let got = want.map(|(command, _)| (command, h.bash(command).map(|(d, _)| d)));
@@ -149,6 +150,8 @@ async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
         reason.starts_with("prefer-tmux") && reason.contains("command_run"),
         "{reason}"
     );
+    let (_, reason) = h.bash("tmux send-keys -t %1 ls Enter").unwrap();
+    assert!(reason.starts_with("tmux-cli"), "{reason}");
     assert_eq!(h.other_tool(), None);
 }
 

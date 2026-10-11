@@ -1051,6 +1051,18 @@ Run this in a tmux pane, where the user can watch it:
 
 Use list_panes to pick the pane.'''
 
+# The tmux CLI reaches the panes around tmux-mcp: no command tracking, no
+# policy, and keystrokes into a shell the person may be typing in.
+
+[[rules]]
+id = "tmux-cli"
+via = "bash"
+command = "tmux"
+action = "deny"
+message = '''
+Don't drive tmux from Bash. Use the tmux-mcp tools: list_panes to find a pane,
+command_run to run in it, command_read to read output, press_key for keys.'''
+
 # =============================================================================
 # Rules: paths
 # =============================================================================

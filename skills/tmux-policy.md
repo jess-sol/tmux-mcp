@@ -228,7 +228,7 @@ passthrough: the hook prints nothing and Claude Code's own permissions decide (`
 tmux only). A line is the strictest of its commands, allow < passthrough < ask < deny, so a Bash line
 is allowed only when every command is. The built-in `prefer-tmux` denies `cargo`, `make`, `npm`,
 `podman` and `kubectl` through Bash; lift it per tool with an allow that has `via = "bash"` and
-`exempts = ["prefer-tmux"]`.
+`exempts = ["prefer-tmux"]`. The built-in `tmux-cli` denies the `tmux` command through Bash.
 
 Only `id` and `action` are required. A rule without `when`, `path`, `write`, `host` or `user`
 matches every command on its `command` path. A rule with `path` or `write` matches only through a

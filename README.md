@@ -204,7 +204,7 @@ Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.to
 
 With `Bash` in the hook's matcher, the policy also judges Claude Code's own Bash tool. A line is allowed only when every command in it is; a line that no rule asks about or denies passes through to Claude Code's own permissions. Lints apply only to `command_run`.
 
-The built-in `prefer-tmux` rule denies `cargo`, `make`, `npm`, `podman` and `kubectl` through Bash and tells Claude to run them in a pane you can watch. A rule with `via = "bash"` or `via = "tmux"` counts only there; to let one project run `cargo` through Bash:
+The built-in `prefer-tmux` rule denies `cargo`, `make`, `npm`, `podman` and `kubectl` through Bash and tells Claude to run them in a pane you can watch, and `tmux-cli` denies driving tmux itself from Bash. A rule with `via = "bash"` or `via = "tmux"` counts only there; to let one project run `cargo` through Bash:
 
 ```toml
 [[rules]]

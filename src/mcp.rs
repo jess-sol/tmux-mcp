@@ -31,7 +31,11 @@ impl TmuxMcp {
 pub struct CommandRunParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
-    #[schemars(description = "Shell command to execute")]
+    #[schemars(
+        description = "One shell command, written as a runbook step a sysadmin will read, verify and run: \
+                       expressive and obviously correct. It lands in the person's shell history. \
+                       Don't echo status or pipe into head/tail/grep."
+    )]
     pub command: String,
     #[schemars(description = "Timeout in seconds (default 30)")]
     pub timeout_secs: Option<i64>,
@@ -432,7 +436,13 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Run a shell command in a pane and wait for completion")]
+    #[tool(
+        description = "Run one command in a pane, as the person would type it, and wait for it to finish. \
+                       The pane is a durable shell: its directory, variables and functions persist \
+                       between calls. The reply carries the \
+                       exit code and the output; use head/tail/search to window it, and command_read \
+                       to see more."
+    )]
     async fn command_run(
         &self,
         Parameters(params): Parameters<CommandRunParams>,
@@ -656,8 +666,18 @@ impl ServerHandler for TmuxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "MCP server for interacting with tmux panes. Use list_panes to discover \
-                 available panes, then run commands and read their output.\n\n\
+                "MCP server for working in the person's tmux panes. Use list_panes to \
+                 discover available panes, then run commands and read their output.\n\n\
+                 Writing commands: a pane is the person's own terminal. Every command \
+                 you run shows on their screen and stays in their shell history, so \
+                 write each one as a Staff SRE writes a runbook step for a sysadmin to \
+                 read, verify and run: expressive and obviously correct. A pane is a \
+                 durable shell: cd, exported variables and functions persist between \
+                 calls. command_run reports the \
+                 exit code, so don't echo status or $?; window output with \
+                 head/tail/search instead of piping into head, tail or grep, which keeps \
+                 the full output for command_read. Drive tmux only through these tools, \
+                 never with the tmux CLI from Bash.\n\n\
                  command_run: Combine with next=N + search=\"regex\" to return as soon \
                  as N matching lines appear, leaving the command running. Reach for \
                  this any time you'd otherwise set timeout_secs past ~30s and the \
