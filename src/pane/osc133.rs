@@ -122,11 +122,11 @@ impl Osc133Parser {
     /// needs to see the pending state to finalize the command.
     fn handle_a(&mut self, state: &mut TerminalState) {
         // If Executing without D, mark active command as abandoned.
-        if matches!(self.phase, Osc133Phase::Executing { .. }) {
-            if let Some(cmd) = state.active_command_mut() {
-                tracing::debug!("Abandoning in-flight command on A: {:?}", cmd.command);
-                cmd.completed = true; // exit_code stays None (abandoned)
-            }
+        if matches!(self.phase, Osc133Phase::Executing { .. })
+            && let Some(cmd) = state.active_command_mut()
+        {
+            tracing::debug!("Abandoning in-flight command on A: {:?}", cmd.command);
+            cmd.completed = true; // exit_code stays None (abandoned)
         }
         // NOTE: active command from D is NOT completed here.
         // D→A→B is the normal completion flow — B marks completed.

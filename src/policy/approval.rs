@@ -17,17 +17,10 @@ struct PendingApproval {
     created_at: Instant,
 }
 
+#[derive(Default)]
 pub struct ApprovalStore {
     /// (origin_pane, pane_id) → pending approval. Typically 0-3 entries.
     pending: HashMap<(String, String), PendingApproval>,
-}
-
-impl Default for ApprovalStore {
-    fn default() -> Self {
-        Self {
-            pending: HashMap::new(),
-        }
-    }
 }
 
 impl ApprovalStore {

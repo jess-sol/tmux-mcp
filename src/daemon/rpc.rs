@@ -188,12 +188,12 @@ fn merge_context_ranges(
     for &m in match_indices {
         let start = m.saturating_sub(before);
         let end = (m + after).min(total_lines - 1);
-        if let Some((_, prev_end)) = ranges.last_mut() {
-            if start <= *prev_end + 1 {
-                // Merge: extend previous range
-                *prev_end = end.max(*prev_end);
-                continue;
-            }
+        if let Some((_, prev_end)) = ranges.last_mut()
+            && start <= *prev_end + 1
+        {
+            // Merge: extend previous range
+            *prev_end = end.max(*prev_end);
+            continue;
         }
         ranges.push((start, end));
     }
@@ -207,9 +207,7 @@ fn collect_context_lines(all_lines: &[String], ranges: &[(usize, usize)]) -> Vec
         if i > 0 {
             result.push("--".to_string());
         }
-        for idx in start..=end {
-            result.push(all_lines[idx].to_string());
-        }
+        result.extend(all_lines[start..=end].iter().cloned());
     }
     result
 }
@@ -1010,10 +1008,10 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
         loop {
             {
                 let tp = pane_handle.lock().await;
-                if let Some(cmd) = tp.processor.state().commands.front() {
-                    if cmd.id > id_before {
-                        break cmd.id;
-                    }
+                if let Some(cmd) = tp.processor.state().commands.front()
+                    && cmd.id > id_before
+                {
+                    break cmd.id;
                 }
             }
             if tokio::time::Instant::now() >= marker_deadline {

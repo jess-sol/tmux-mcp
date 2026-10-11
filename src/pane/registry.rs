@@ -79,15 +79,14 @@ pub enum SyncAction {
 }
 
 /// Manages all tracked panes across the session.
+#[derive(Default)]
 pub struct PaneRegistry {
     panes: HashMap<String, PaneHandle>,
 }
 
 impl PaneRegistry {
     pub fn new() -> Self {
-        Self {
-            panes: HashMap::new(),
-        }
+        Self::default()
     }
 
     // --- Public lookup API (called under read lock) ---

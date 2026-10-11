@@ -169,10 +169,11 @@ impl TerminalState {
     /// Stops accumulating after D marker (output_done), remaining text before B
     /// is prompt content.
     pub fn append_active_output(&mut self, text: &str) {
-        if let Some(cmd) = self.commands.front_mut() {
-            if !cmd.completed && !cmd.output_done {
-                cmd.output.push_str(text);
-            }
+        if let Some(cmd) = self.commands.front_mut()
+            && !cmd.completed
+            && !cmd.output_done
+        {
+            cmd.output.push_str(text);
         }
     }
 
@@ -192,7 +193,7 @@ impl TerminalState {
     }
 
     /// Update user, hostname, and cwd from an OSC 7 URI.
-    /// Format: file://[user@]hostname/path
+    /// Format: `file://[user@]hostname/path`
     pub fn update_cwd_from_osc7(&mut self, uri: &str) {
         let Some(rest) = uri.strip_prefix("file://") else {
             return;

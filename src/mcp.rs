@@ -358,30 +358,29 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                 ));
             }
             // Nudge toward command_read when command_run output was filtered
-            if is_run {
-                if let Some(id) = command_id {
-                    if search_matches == Some(0) {
-                        text.push_str(&format!(
-                            "\n[Search had no matches. Use command_read(command_id={}, tail=50) to browse the end, \
-                             or command_read(command_id={}, search=\"different pattern\") to try again.]",
-                            id, id
-                        ));
-                    } else if lines_skipped > 0 {
-                        text.push_str(&format!(
-                            "\n[Output filtered ({} lines total). \
-                             Use command_read(command_id={}) with head, tail, or search for different views of the same command output.]",
-                            total_lines, id
-                        ));
-                    }
-                }
-            }
-            if output.is_empty() && !is_run {
-                if let Some(id) = command_id {
+            if is_run && let Some(id) = command_id {
+                if search_matches == Some(0) {
                     text.push_str(&format!(
-                        "\n[Command {} completed. No unread output. Use head, tail, or search to review full output ({} lines).]",
-                        id, total_lines
+                        "\n[Search had no matches. Use command_read(command_id={}, tail=50) to browse the end, \
+                         or command_read(command_id={}, search=\"different pattern\") to try again.]",
+                        id, id
+                    ));
+                } else if lines_skipped > 0 {
+                    text.push_str(&format!(
+                        "\n[Output filtered ({} lines total). \
+                         Use command_read(command_id={}) with head, tail, or search for different views of the same command output.]",
+                        total_lines, id
                     ));
                 }
+            }
+            if output.is_empty()
+                && !is_run
+                && let Some(id) = command_id
+            {
+                text.push_str(&format!(
+                    "\n[Command {} completed. No unread output. Use head, tail, or search to review full output ({} lines).]",
+                    id, total_lines
+                ));
             }
         }
         "running" => {

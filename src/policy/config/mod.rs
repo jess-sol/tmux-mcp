@@ -3,7 +3,7 @@
 //! Three sources, one format (`format`):
 //! - Built-in: compiled into binary via include_str!
 //! - Home: ~/.claude/tmux-mcp.toml
-//! - Project: <project root>/.claude/tmux-mcp.toml, found from the pane's directory
+//! - Project: `<project root>/.claude/tmux-mcp.toml`, found from the pane's directory
 
 mod format;
 #[cfg(test)]

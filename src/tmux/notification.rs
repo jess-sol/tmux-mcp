@@ -1,17 +1,17 @@
 /// Parsed notification from tmux control mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notification {
-    /// %output %<pane_id> <escaped-data>
+    /// `%output %<pane_id> <escaped-data>`
     Output { pane_id: String, data: Vec<u8> },
-    /// %window-close @<window_id>
+    /// `%window-close @<window_id>`
     WindowClose { window_id: String },
-    /// %session-closed $<session_id>
+    /// `%session-closed $<session_id>`
     SessionClose { session_id: String },
-    /// %exit [reason]
+    /// `%exit [reason]`
     Exit { reason: Option<String> },
-    /// %layout-change @<window_id> <layout_string>
+    /// `%layout-change @<window_id> <layout_string>`
     LayoutChange { window_id: String, layout: String },
-    /// %window-add @<window_id>
+    /// `%window-add @<window_id>`
     WindowAdd { window_id: String },
     /// Anything else (pane-mode-changed, etc.)
     Other { line: String },

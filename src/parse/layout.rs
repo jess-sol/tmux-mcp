@@ -1,17 +1,17 @@
-/// Parser for tmux layout strings.
-///
-/// Tmux encodes window layouts as compact strings in `%layout-change` notifications:
-///
-///   `4a06,204x51,0,0{102x51,0,0,3,101x51,103,0,4}`
-///
-/// The grammar is:
-///   layout  = checksum "," cell
-///   cell    = WxH "," X "," Y "," pane_number       (leaf)
-///           | WxH "," X "," Y "{" cell_list "}"      (horizontal split)
-///           | WxH "," X "," Y "[" cell_list "]"      (vertical split)
-///   cell_list = cell ("," cell)*
-///
-/// We extract leaf geometry: (pane_number, width, height, x, y).
+//! Parser for tmux layout strings.
+//!
+//! Tmux encodes window layouts as compact strings in `%layout-change` notifications:
+//!
+//!   `4a06,204x51,0,0{102x51,0,0,3,101x51,103,0,4}`
+//!
+//! The grammar is:
+//!   layout  = checksum "," cell
+//!   cell    = WxH "," X "," Y "," pane_number       (leaf)
+//!           | WxH "," X "," Y "{" cell_list "}"      (horizontal split)
+//!           | WxH "," X "," Y "[" cell_list "]"      (vertical split)
+//!   cell_list = cell ("," cell)*
+//!
+//! We extract leaf geometry: (pane_number, width, height, x, y).
 
 /// A leaf pane extracted from a tmux layout string.
 #[derive(Debug, Clone, PartialEq, Eq)]
