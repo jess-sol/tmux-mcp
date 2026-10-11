@@ -42,18 +42,38 @@ pub(super) fn separator(op: &ast::SeparatorOperator) -> &'static str {
 impl Joint {
     /// The line itself, which `after` ends: "&" when it runs in the background.
     pub(super) fn line(after: Option<&'static str>) -> Joint {
-        Joint { after, ..Joint::default() }
+        Joint {
+            after,
+            ..Joint::default()
+        }
     }
 
     /// The joint of part `i` of the parts inside `self`, with their extents;
     /// `ops[i]` joins part `i` to part `i + 1`.
-    pub(super) fn of_part(self, i: usize, ops: &[&'static str], extents: &[Option<(usize, usize)>]) -> Joint {
+    pub(super) fn of_part(
+        self,
+        i: usize,
+        ops: &[&'static str],
+        extents: &[Option<(usize, usize)>],
+    ) -> Joint {
         let last = i + 1 == extents.len();
         Joint {
-            before: if i == 0 { self.before } else { Some(ops[i - 1]) },
+            before: if i == 0 {
+                self.before
+            } else {
+                Some(ops[i - 1])
+            },
             after: if last { self.after } else { Some(ops[i]) },
-            prev_end: if i == 0 { self.prev_end } else { extents[i - 1].map(|(_, end)| end) },
-            next_start: if last { self.next_start } else { extents[i + 1].map(|(start, _)| start) },
+            prev_end: if i == 0 {
+                self.prev_end
+            } else {
+                extents[i - 1].map(|(_, end)| end)
+            },
+            next_start: if last {
+                self.next_start
+            } else {
+                extents[i + 1].map(|(start, _)| start)
+            },
         }
     }
 }
@@ -61,7 +81,15 @@ impl Joint {
 impl Place {
     /// A command outside the line's own shell: its text as `text` shows it.
     pub(super) fn away(text: String) -> Place {
-        Place { text, top: false, op_before: None, op_after: None, constant: false, expands: Vec::new(), cut: (0, 0) }
+        Place {
+            text,
+            top: false,
+            op_before: None,
+            op_after: None,
+            constant: false,
+            expands: Vec::new(),
+            cut: (0, 0),
+        }
     }
 }
 
@@ -70,7 +98,9 @@ impl Walker<'_> {
     /// it there. Dropping it cuts the operator before it, or after it when
     /// it comes first.
     pub(super) fn place(&self, simple: &ast::SimpleCommand, joint: Option<Joint>) -> Place {
-        let Some(joint) = joint else { return Place::away(simple.to_string()) };
+        let Some(joint) = joint else {
+            return Place::away(simple.to_string());
+        };
         let (start, end) = self.simple_extent(simple).unwrap_or((0, 0));
         let cut = match (joint.prev_end, joint.next_start) {
             (Some(prev_end), _) => (prev_end, end),
@@ -91,10 +121,16 @@ impl Walker<'_> {
     /// A command's redirects: the file each opens, resolved in the shell's
     /// context, and its text. A redirect of the line's own shell has its
     /// text from the line and the bytes that dropping it removes.
-    pub(super) fn redirects<'i>(&self, items: impl Iterator<Item = &'i ast::CommandPrefixOrSuffixItem>, top: bool) -> Vec<RedirectInfo> {
+    pub(super) fn redirects<'i>(
+        &self,
+        items: impl Iterator<Item = &'i ast::CommandPrefixOrSuffixItem>,
+        top: bool,
+    ) -> Vec<RedirectInfo> {
         let mut out = Vec::new();
         for item in items {
-            let ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) = item else { continue };
+            let ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) = item else {
+                continue;
+            };
             let (file, is_write) = match redirect {
                 ast::IoRedirect::File(_, kind, ast::IoFileRedirectTarget::Filename(w)) => {
                     let is_write = matches!(
@@ -118,7 +154,12 @@ impl Walker<'_> {
                 Some((start, end)) => (self.line[start..end].to_string(), (start, end)),
                 None => (redirect.to_string(), (0, 0)),
             };
-            out.push(RedirectInfo { target, is_write, text, cut });
+            out.push(RedirectInfo {
+                target,
+                is_write,
+                text,
+                cut,
+            });
         }
         out
     }
@@ -148,12 +189,19 @@ impl Walker<'_> {
     /// A simple command's bytes: its words, which brush places, and its
     /// redirects, which it does not.
     fn simple_extent(&self, simple: &ast::SimpleCommand) -> Option<(usize, usize)> {
-        let items = simple.prefix.iter().flat_map(|p| &p.0).chain(simple.suffix.iter().flat_map(|s| &s.0));
+        let items = simple
+            .prefix
+            .iter()
+            .flat_map(|p| &p.0)
+            .chain(simple.suffix.iter().flat_map(|s| &s.0));
         let redirects = items.filter_map(|item| match item {
             ast::CommandPrefixOrSuffixItem::IoRedirect(r) => self.redirect_extent(r),
             _ => None,
         });
-        self.bytes_of(simple.location()).into_iter().chain(redirects).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        self.bytes_of(simple.location())
+            .into_iter()
+            .chain(redirects)
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
     /// A redirect's bytes, from its fd and operator to the end of its target.
@@ -161,14 +209,25 @@ impl Walker<'_> {
     /// back over the operator and the fd digits.
     fn redirect_extent(&self, redirect: &ast::IoRedirect) -> Option<(usize, usize)> {
         let target = match redirect {
-            ast::IoRedirect::File(_, _, ast::IoFileRedirectTarget::Filename(w) | ast::IoFileRedirectTarget::Duplicate(w))
+            ast::IoRedirect::File(
+                _,
+                _,
+                ast::IoFileRedirectTarget::Filename(w) | ast::IoFileRedirectTarget::Duplicate(w),
+            )
             | ast::IoRedirect::HereString(_, w)
             | ast::IoRedirect::OutputAndError(w, _) => w,
             _ => return None,
         };
         let (start, end) = self.bytes_of(target.loc.clone())?;
-        let head = self.line.get(..start)?.trim_end().trim_end_matches(['<', '>', '&', '|']);
-        Some((head.trim_end_matches(|c: char| c.is_ascii_digit()).len(), end))
+        let head = self
+            .line
+            .get(..start)?
+            .trim_end()
+            .trim_end_matches(['<', '>', '&', '|']);
+        Some((
+            head.trim_end_matches(|c: char| c.is_ascii_digit()).len(),
+            end,
+        ))
     }
 
     /// The bytes of the line that a place in the syntax tree covers.

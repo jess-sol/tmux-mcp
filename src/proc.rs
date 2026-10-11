@@ -4,7 +4,6 @@
 /// - CWD: `readlink /proc/{pid}/cwd`
 /// - Process name: `/proc/{pid}/comm`
 /// - Foreground process: the terminal's foreground process group
-
 use std::path::PathBuf;
 
 /// Live process info for a shell PID.
@@ -31,7 +30,12 @@ pub fn proc_info(pid: u32) -> Option<ProcInfo> {
     let cwd = read_cwd(pid);
     let foreground = find_foreground(pid);
 
-    Some(ProcInfo { pid, comm, cwd, foreground })
+    Some(ProcInfo {
+        pid,
+        comm,
+        cwd,
+        foreground,
+    })
 }
 
 /// Read `/proc/{pid}/comm` — the process name (max 16 chars, kernel-truncated).

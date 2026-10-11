@@ -60,10 +60,7 @@ impl ApprovalStore {
         live_ctx: &PaneContext,
     ) -> Result<(), String> {
         let key = (origin.to_string(), pane_id.to_string());
-        let approval = self
-            .pending
-            .get(&key)
-            .ok_or("No pending approval")?;
+        let approval = self.pending.get(&key).ok_or("No pending approval")?;
 
         if approval.created_at.elapsed().as_secs() >= APPROVAL_TTL_SECS {
             self.pending.remove(&key);
@@ -114,7 +111,9 @@ mod tests {
         store.store("%0", "%1", "rm foo", &c);
         assert!(store.verify_and_consume("%0", "%1", "rm foo", &c).is_ok());
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &c).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &c)
+                .unwrap_err(),
             "No pending approval"
         );
     }
@@ -125,7 +124,9 @@ mod tests {
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm bar", &c).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm bar", &c)
+                .unwrap_err(),
             "Command changed since approval"
         );
     }
@@ -136,7 +137,9 @@ mod tests {
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         assert_eq!(
-            store.verify_and_consume("%99", "%1", "rm foo", &c).unwrap_err(),
+            store
+                .verify_and_consume("%99", "%1", "rm foo", &c)
+                .unwrap_err(),
             "No pending approval"
         );
     }
@@ -147,7 +150,9 @@ mod tests {
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         assert_eq!(
-            store.verify_and_consume("%0", "%2", "rm foo", &c).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%2", "rm foo", &c)
+                .unwrap_err(),
             "No pending approval"
         );
     }
@@ -160,7 +165,9 @@ mod tests {
         let mut drifted = c.clone();
         drifted.hostname = Some("prod-server".into());
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &drifted).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &drifted)
+                .unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -173,7 +180,9 @@ mod tests {
         let mut drifted = c.clone();
         drifted.cwd = Some("/etc".into());
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &drifted).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &drifted)
+                .unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -186,7 +195,9 @@ mod tests {
         let mut drifted = c.clone();
         drifted.foreground = Some("sudo".into());
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &drifted).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &drifted)
+                .unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -199,7 +210,9 @@ mod tests {
         let mut drifted = c.clone();
         drifted.user = Some("root".into());
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &drifted).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &drifted)
+                .unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -212,7 +225,9 @@ mod tests {
         store.store("%0", "%1", "rm bar", &c);
         // Old command should be gone
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &c).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &c)
+                .unwrap_err(),
             "Command changed since approval"
         );
         // New command should work
@@ -224,7 +239,9 @@ mod tests {
         let mut store = ApprovalStore::new();
         let c = ctx();
         assert_eq!(
-            store.verify_and_consume("%0", "%1", "rm foo", &c).unwrap_err(),
+            store
+                .verify_and_consume("%0", "%1", "rm foo", &c)
+                .unwrap_err(),
             "No pending approval"
         );
     }

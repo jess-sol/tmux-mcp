@@ -135,7 +135,10 @@ impl Grammars {
         let mut commands = BTreeMap::new();
         for source in sources {
             for (name, config) in source {
-                commands.insert(name.clone(), Level::compile(&format!("commands.{name}"), config)?);
+                commands.insert(
+                    name.clone(),
+                    Level::compile(&format!("commands.{name}"), config)?,
+                );
             }
         }
         Ok(Grammars { commands })
@@ -168,7 +171,10 @@ impl Grammars {
         let shown = command.join(" ");
         let Some(mut level) = self.lookup(&command[0]) else {
             if command.len() > 1 {
-                return Err(format!("`{}` has no grammar, so `{shown}` names no subcommand", command[0]));
+                return Err(format!(
+                    "`{}` has no grammar, so `{shown}` names no subcommand",
+                    command[0]
+                ));
             }
             return Ok(BTreeSet::new());
         };
@@ -181,14 +187,18 @@ impl Grammars {
             } else if !past_words && level.words.contains(word) {
                 past_words = true;
             } else {
-                return Err(format!("`{shown}`: `{word}` is not a subcommand that its grammar allows"));
+                return Err(format!(
+                    "`{shown}`: `{word}` is not a subcommand that its grammar allows"
+                ));
             }
         }
         Ok(names)
     }
 
     fn lookup(&self, name: &str) -> Option<&Level> {
-        self.commands.get(name).or_else(|| self.commands.get(name.rsplit('/').next()?))
+        self.commands
+            .get(name)
+            .or_else(|| self.commands.get(name.rsplit('/').next()?))
     }
 }
 
@@ -197,7 +207,11 @@ impl Grammars {
 impl Level {
     /// The names this level declares, its global options included.
     fn names(&self) -> BTreeSet<String> {
-        let slots = self.slots.iter().filter(|s| s.kind != SlotKind::Subcommand).map(|s| &s.name);
+        let slots = self
+            .slots
+            .iter()
+            .filter(|s| s.kind != SlotKind::Subcommand)
+            .map(|s| &s.name);
         let options = self.options.iter().chain(&self.global).map(|o| &o.name);
         slots.chain(options).cloned().collect()
     }
@@ -211,5 +225,8 @@ fn value_of(word: &Word) -> TriVal {
 }
 
 fn list(elements: Vec<TriVal>, exhaustive: bool) -> TriVal {
-    TriVal::List { elements, exhaustive }
+    TriVal::List {
+        elements,
+        exhaustive,
+    }
 }

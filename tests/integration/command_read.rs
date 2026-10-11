@@ -61,7 +61,11 @@ async fn read_parameters_shape_a_finished_commands_output() {
             Read::default().next(2).head(2),
             "next, head, and tail are mutually exclusive — use only one",
         ),
-        ("seq 5", Read::default().before(2), "before and after require search"),
+        (
+            "seq 5",
+            Read::default().before(2),
+            "before and after require search",
+        ),
     ];
 
     for (command, read, want) in corpus {
@@ -76,7 +80,10 @@ async fn a_window_on_a_finished_command_reports_its_exit_code() {
     let windows = [
         ("seq 10", Read::default().head(3)),
         ("seq 3", Read::default().next(3)),
-        ("seq 6 | sed 's/^[25]$/HIT&/'", Read::default().search("HIT").head(1).after(1)),
+        (
+            "seq 6 | sed 's/^[25]$/HIT&/'",
+            Read::default().search("HIT").head(1).after(1),
+        ),
     ];
 
     for (command, read) in windows {
@@ -101,10 +108,22 @@ async fn only_next_moves_the_cursor() {
     let rest = h.read(&shell, Read::default().next(100)).await;
     let past_the_end = h.read(&shell, Read::default().next(10)).await;
 
-    assert!(first.contains("1\n2\n3\n") && !first.contains("already read"), "{first:?}");
-    assert!(second.starts_with("<3 lines already read>\n4\n5\n6\n"), "{second:?}");
-    assert!(rest.starts_with("<6 lines already read>\n7\n8\n9\n10\n"), "{rest:?}");
-    assert!(past_the_end.contains("No unread output"), "{past_the_end:?}");
+    assert!(
+        first.contains("1\n2\n3\n") && !first.contains("already read"),
+        "{first:?}"
+    );
+    assert!(
+        second.starts_with("<3 lines already read>\n4\n5\n6\n"),
+        "{second:?}"
+    );
+    assert!(
+        rest.starts_with("<6 lines already read>\n7\n8\n9\n10\n"),
+        "{rest:?}"
+    );
+    assert!(
+        past_the_end.contains("No unread output"),
+        "{past_the_end:?}"
+    );
 }
 
 #[tokio::test]
@@ -113,11 +132,16 @@ async fn next_with_search_reads_on_past_the_context_it_showed() {
     let shell = h.shell().await;
     let read = || Read::default().next(1).search("HIT").after(1);
 
-    let first = h.run_with(&shell, "seq 5 | sed 's/^[14]$/HIT&/'", read()).await;
+    let first = h
+        .run_with(&shell, "seq 5 | sed 's/^[14]$/HIT&/'", read())
+        .await;
     let second = h.read(&shell, read()).await;
 
     assert!(first.contains("HIT1\n2\n"), "{first:?}");
-    assert!(second.contains("HIT4\n5\n") && !second.contains("HIT1"), "{second:?}");
+    assert!(
+        second.contains("HIT4\n5\n") && !second.contains("HIT1"),
+        "{second:?}"
+    );
 }
 
 // --- Reading a command that is still running ---
@@ -127,18 +151,23 @@ async fn next_waits_for_lines_a_running_command_has_not_printed_yet() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     // `tail` leaves the cursor where it was, so the read below starts at line 1.
-    h.run_with(&shell, "sleep 2; seq 5", Read::default().tail(3).timeout(1)).await;
+    h.run_with(&shell, "sleep 2; seq 5", Read::default().tail(3).timeout(1))
+        .await;
 
     let reply = h.read(&shell, Read::default().next(3).timeout(10)).await;
 
-    assert!(reply.contains("2\n3\n") && !reply.contains("\n4\n"), "{reply:?}");
+    assert!(
+        reply.contains("2\n3\n") && !reply.contains("\n4\n"),
+        "{reply:?}"
+    );
 }
 
 #[tokio::test]
 async fn a_line_still_being_written_is_read_once_it_ends() {
     let h = Harness::new().await;
     let shell = h.shell().await;
-    h.start(&shell, "seq 1 | tr -d '\\n'; sleep 2; seq 2 2").await;
+    h.start(&shell, "seq 1 | tr -d '\\n'; sleep 2; seq 2 2")
+        .await;
 
     let reply = h.read(&shell, Read::default().next(5).timeout(10)).await;
 
@@ -149,9 +178,12 @@ async fn a_line_still_being_written_is_read_once_it_ends() {
 async fn next_with_search_scans_forward_to_a_later_match() {
     let h = Harness::new().await;
     let shell = h.shell().await;
-    h.start(&shell, "seq 3; sleep 2; seq 5 | sed s/5/MARK/").await;
+    h.start(&shell, "seq 3; sleep 2; seq 5 | sed s/5/MARK/")
+        .await;
 
-    let reply = h.read(&shell, Read::default().next(1).search("MARK").timeout(10)).await;
+    let reply = h
+        .read(&shell, Read::default().next(1).search("MARK").timeout(10))
+        .await;
 
     assert!(reply.contains("MARK"), "{reply:?}");
 }
@@ -160,9 +192,15 @@ async fn next_with_search_scans_forward_to_a_later_match() {
 async fn head_with_search_waits_for_enough_matches() {
     let h = Harness::new().await;
     let shell = h.shell().await;
-    h.start(&shell, "seq 2 | sed s/2/HIT_1/; sleep 2; seq 2 | sed s/2/HIT_2/").await;
+    h.start(
+        &shell,
+        "seq 2 | sed s/2/HIT_1/; sleep 2; seq 2 | sed s/2/HIT_2/",
+    )
+    .await;
 
-    let reply = h.read(&shell, Read::default().head(2).search("HIT").timeout(10)).await;
+    let reply = h
+        .read(&shell, Read::default().head(2).search("HIT").timeout(10))
+        .await;
 
     assert!(reply.contains("HIT_1\nHIT_2\n"), "{reply:?}");
 }
@@ -181,7 +219,10 @@ async fn tail_of_a_running_command_waits_for_it_and_shows_nothing_on_timeout() {
         "returned after {:?}",
         started.elapsed()
     );
-    assert!(reply.contains("No new output. Command still running"), "{reply:?}");
+    assert!(
+        reply.contains("No new output. Command still running"),
+        "{reply:?}"
+    );
 }
 
 #[tokio::test]

@@ -48,7 +48,10 @@ async fn debug_pane_points_at_command_read_while_a_command_runs() {
 
     let screen = h.debug_pane(&shell).await;
 
-    assert!(screen.starts_with("[Command") && screen.contains("\"sleep 30\""), "{screen:?}");
+    assert!(
+        screen.starts_with("[Command") && screen.contains("\"sleep 30\""),
+        "{screen:?}"
+    );
     assert!(screen.contains("command_read"), "{screen:?}");
 }
 
@@ -77,5 +80,8 @@ async fn list_panes_answers_while_a_command_runs() {
     };
     let (_, waited) = tokio::join!(running, looking);
 
-    assert!(waited < Duration::from_secs(1), "list_panes waited {waited:?} behind command_run");
+    assert!(
+        waited < Duration::from_secs(1),
+        "list_panes waited {waited:?} behind command_run"
+    );
 }

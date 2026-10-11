@@ -193,15 +193,22 @@ mod tests {
     // --- Helper ---
 
     fn osc133(marker: u8, param: Option<&str>) -> OscEvent {
-        OscEvent::Osc133 { marker, param: param.map(|s| s.to_string()) }
+        OscEvent::Osc133 {
+            marker,
+            param: param.map(|s| s.to_string()),
+        }
     }
 
     fn osc7(uri: &str) -> OscEvent {
-        OscEvent::Osc7 { uri: uri.to_string() }
+        OscEvent::Osc7 {
+            uri: uri.to_string(),
+        }
     }
 
     fn osc9(text: &str) -> OscEvent {
-        OscEvent::Osc9 { text: text.to_string() }
+        OscEvent::Osc9 {
+            text: text.to_string(),
+        }
     }
 
     // --- OSC 133 with BEL terminator ---
@@ -339,10 +346,10 @@ mod tests {
     #[test]
     fn non_intercepted_osc_types_ignored() {
         for bytes in [
-            &b"\x1b]0;Window Title\x07"[..],       // window title
-            &b"\x1b]4;1;rgb:ff/00/00\x07"[..],     // color palette
-            &b"\x1b]52;c;SGVsbG8=\x07"[..],        // clipboard
-            &b"\x1b]10;rgb:ff/ff/ff\x07"[..],      // foreground color
+            &b"\x1b]0;Window Title\x07"[..],         // window title
+            &b"\x1b]4;1;rgb:ff/00/00\x07"[..],       // color palette
+            &b"\x1b]52;c;SGVsbG8=\x07"[..],          // clipboard
+            &b"\x1b]10;rgb:ff/ff/ff\x07"[..],        // foreground color
             &b"\x1b]8;;https://example.com\x07"[..], // hyperlink
         ] {
             assert!(find_next_osc(bytes).is_none(), "should ignore: {:?}", bytes);

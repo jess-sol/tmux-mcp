@@ -12,7 +12,10 @@ pub enum TriVal {
     String(String),
     Int(i64),
     Bool(bool),
-    List { elements: Vec<TriVal>, exhaustive: bool },
+    List {
+        elements: Vec<TriVal>,
+        exhaustive: bool,
+    },
     Map(HashMap<String, TriVal>),
     Null,
     Unknown,

@@ -1,5 +1,4 @@
 /// Unix socket server: accepts daemon clients, handles ndjson JSON-RPC.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,9 +25,9 @@ pub async fn serve(
     let lock_path = session.lock();
     let lock_file = std::fs::File::create(&lock_path)?;
     use fs2::FileExt;
-    lock_file.try_lock_exclusive().map_err(|_| {
-        format!("Another daemon is already running for session {}", session)
-    })?;
+    lock_file
+        .try_lock_exclusive()
+        .map_err(|_| format!("Another daemon is already running for session {}", session))?;
 
     // Remove stale socket if present
     let _ = std::fs::remove_file(&sock_path);
@@ -158,7 +157,10 @@ async fn answer(request: &Value, state: &Arc<DaemonState>) -> Value {
 
 /// Writes each reply as it comes, in the order the requests finish; the id
 /// in each reply tells the client which request it answers.
-async fn write_replies(mut write: OwnedWriteHalf, mut replies: mpsc::UnboundedReceiver<Value>) -> std::io::Result<()> {
+async fn write_replies(
+    mut write: OwnedWriteHalf,
+    mut replies: mpsc::UnboundedReceiver<Value>,
+) -> std::io::Result<()> {
     while let Some(reply) = replies.recv().await {
         let mut line = reply.to_string();
         line.push('\n');

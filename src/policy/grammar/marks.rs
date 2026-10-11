@@ -37,7 +37,11 @@ impl Run<'_> {
                 cwd_values.extend(self.parts.get(name).cloned());
             }
         }
-        let cwd = if has_cwd { compose_cwd(&cwd_values) } else { TriVal::Null };
+        let cwd = if has_cwd {
+            compose_cwd(&cwd_values)
+        } else {
+            TriVal::Null
+        };
         match &cwd {
             TriVal::String(_) => reads.elements.push(TriVal::String(".".into())),
             TriVal::Unknown => reads.elements.push(TriVal::Unknown),
@@ -52,7 +56,11 @@ impl Run<'_> {
                 variables.add_names(self.parts.get(name));
             }
             for name in &level.marks.command {
-                commands(self.parts.get(name), level.marks.appends.contains(name), &mut inner);
+                commands(
+                    self.parts.get(name),
+                    level.marks.appends.contains(name),
+                    &mut inner,
+                );
             }
             for name in &level.marks.shell {
                 inner.extend(line(self.parts.get(name)));
@@ -79,7 +87,12 @@ impl Run<'_> {
 /// would write; next to a non-exhaustive empty list it may stand in, so the
 /// list stays non-exhaustive.
 fn apply_default(part: Option<&mut TriVal>, default: &[String], home: &TriVal) {
-    let words = || default.iter().map(|w| value_of(&word(w, home))).collect::<Vec<_>>();
+    let words = || {
+        default
+            .iter()
+            .map(|w| value_of(&word(w, home)))
+            .collect::<Vec<_>>()
+    };
     match part {
         Some(v @ TriVal::Null) => {
             if let Some(first) = words().into_iter().next() {
@@ -104,7 +117,10 @@ fn compose_cwd(values: &[TriVal]) -> TriVal {
     for value in values {
         match value {
             TriVal::String(d) => step(d),
-            TriVal::List { elements, exhaustive: true } => {
+            TriVal::List {
+                elements,
+                exhaustive: true,
+            } => {
                 for e in elements {
                     match e {
                         TriVal::String(d) => step(d),
@@ -124,9 +140,16 @@ fn compose_cwd(values: &[TriVal]) -> TriVal {
 /// beyond those it shows make an Unknown word at the end of the command.
 fn commands(part: Option<&TriVal>, appends: bool, out: &mut Vec<Inner>) {
     match part {
-        Some(TriVal::List { elements, exhaustive }) if matches!(elements.first(), Some(TriVal::List { .. })) => {
+        Some(TriVal::List {
+            elements,
+            exhaustive,
+        }) if matches!(elements.first(), Some(TriVal::List { .. })) => {
             for use_ in elements {
-                if let TriVal::List { elements, exhaustive } = use_ {
+                if let TriVal::List {
+                    elements,
+                    exhaustive,
+                } = use_
+                {
                     out.extend(command(elements, *exhaustive, appends));
                 }
             }
@@ -134,7 +157,10 @@ fn commands(part: Option<&TriVal>, appends: bool, out: &mut Vec<Inner>) {
                 out.push(Inner::Words(vec![Word::Unknown { splits: true }]));
             }
         }
-        Some(TriVal::List { elements, exhaustive }) => out.extend(command(elements, *exhaustive, appends)),
+        Some(TriVal::List {
+            elements,
+            exhaustive,
+        }) => out.extend(command(elements, *exhaustive, appends)),
         Some(TriVal::Unknown) => out.push(Inner::Words(vec![Word::Unknown { splits: true }])),
         _ => {}
     }
@@ -162,8 +188,14 @@ fn command(elements: &[TriVal], exhaustive: bool, appends: bool) -> Option<Inner
 fn line(part: Option<&TriVal>) -> Option<Inner> {
     match part {
         Some(TriVal::String(s)) => Some(Inner::Line(Some(s.clone()))),
-        Some(TriVal::List { elements, exhaustive: true }) if elements.is_empty() => None,
-        Some(TriVal::List { elements, exhaustive: true }) => {
+        Some(TriVal::List {
+            elements,
+            exhaustive: true,
+        }) if elements.is_empty() => None,
+        Some(TriVal::List {
+            elements,
+            exhaustive: true,
+        }) => {
             let words: Option<Vec<&str>> = elements
                 .iter()
                 .map(|e| match e {
@@ -180,12 +212,18 @@ fn line(part: Option<&TriVal>) -> Option<Inner> {
 
 impl Gather {
     fn new(exhaustive: bool) -> Gather {
-        Gather { elements: Vec::new(), exhaustive }
+        Gather {
+            elements: Vec::new(),
+            exhaustive,
+        }
     }
 
     fn add(&mut self, part: Option<&TriVal>) {
         match part {
-            Some(TriVal::List { elements, exhaustive }) => {
+            Some(TriVal::List {
+                elements,
+                exhaustive,
+            }) => {
                 self.elements.extend(elements.iter().cloned());
                 self.exhaustive &= exhaustive;
             }
@@ -197,11 +235,16 @@ impl Gather {
     /// The variable names of `NAME=value` and `NAME` words.
     fn add_names(&mut self, part: Option<&TriVal>) {
         let name = |v: &TriVal| match v {
-            TriVal::String(w) => TriVal::String(w.split_once('=').map_or(w.as_str(), |(n, _)| n).to_string()),
+            TriVal::String(w) => {
+                TriVal::String(w.split_once('=').map_or(w.as_str(), |(n, _)| n).to_string())
+            }
             _ => TriVal::Unknown,
         };
         match part {
-            Some(TriVal::List { elements, exhaustive }) => {
+            Some(TriVal::List {
+                elements,
+                exhaustive,
+            }) => {
                 self.elements.extend(elements.iter().map(name));
                 self.exhaustive &= exhaustive;
             }

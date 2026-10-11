@@ -32,7 +32,10 @@ async fn the_typing_refusal_suggests_ctrl_c_only_when_nothing_sits_before_the_cu
         garbled.starts_with("User is typing") && garbled.contains("press_key C-c"),
         "{garbled}"
     );
-    assert!(typing.starts_with("User is typing") && !typing.contains("press_key C-c"), "{typing}");
+    assert!(
+        typing.starts_with("User is typing") && !typing.contains("press_key C-c"),
+        "{typing}"
+    );
 }
 
 #[tokio::test]
@@ -52,11 +55,16 @@ async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
     let h = Harness::new().await;
     let shell = h.shell().await;
 
-    let (first, second) =
-        tokio::join!(h.run(&shell, "sleep 1; seq 1"), h.run(&shell, "sleep 1; seq 2"));
+    let (first, second) = tokio::join!(
+        h.run(&shell, "sleep 1; seq 1"),
+        h.run(&shell, "sleep 1; seq 2")
+    );
 
     let replies = [&first, &second];
-    let ran = replies.iter().filter(|r| r.contains("Exit code: 0")).count();
+    let ran = replies
+        .iter()
+        .filter(|r| r.contains("Exit code: 0"))
+        .count();
     let refused = replies.iter().filter(|r| r.contains("busy")).count();
     assert_eq!((ran, refused), (1, 1), "{first:?}\n{second:?}");
 }
@@ -69,5 +77,8 @@ async fn a_pane_running_a_command_refuses_another() {
 
     let reply = h.run(&shell, "seq 1").await;
 
-    assert!(reply.contains("busy") && reply.contains("sleep 30"), "{reply:?}");
+    assert!(
+        reply.contains("busy") && reply.contains("sleep 30"),
+        "{reply:?}"
+    );
 }

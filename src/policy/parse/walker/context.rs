@@ -17,23 +17,29 @@ use crate::policy::value::TriVal;
 /// already evaluated. A string sets the field, null keeps it, and anything
 /// else makes it Unknown. A host or user that changes leaves the home Unknown,
 /// and a user that changes ends the shell's own user.
-pub(super) fn inner_context(outer: &Context, cwd: &TriVal, args: &BTreeMap<String, TriVal>, with: &With) -> Context {
+pub(super) fn inner_context(
+    outer: &Context,
+    cwd: &TriVal,
+    args: &BTreeMap<String, TriVal>,
+    with: &With,
+) -> Context {
     let args = TriVal::Map(args.clone().into_iter().collect());
     // The value a key gives its field; None keeps the field.
-    let value = |key: &Option<cel::IdedExpr>, evaluated: &HashMap<String, TriVal>, home: &TriVal| {
-        let vars = HashMap::from([
-            ("args".to_string(), args.clone()),
-            ("cwd".to_string(), cwd.clone()),
-            ("user".to_string(), outer.user.clone()),
-            ("host".to_string(), outer.host.clone()),
-            ("with".to_string(), TriVal::Map(evaluated.clone())),
-        ]);
-        match eval_with(key.as_ref()?, vars, home.clone()) {
-            TriVal::Null => None,
-            v @ TriVal::String(_) => Some(v),
-            _ => Some(TriVal::Unknown),
-        }
-    };
+    let value =
+        |key: &Option<cel::IdedExpr>, evaluated: &HashMap<String, TriVal>, home: &TriVal| {
+            let vars = HashMap::from([
+                ("args".to_string(), args.clone()),
+                ("cwd".to_string(), cwd.clone()),
+                ("user".to_string(), outer.user.clone()),
+                ("host".to_string(), outer.host.clone()),
+                ("with".to_string(), TriVal::Map(evaluated.clone())),
+            ]);
+            match eval_with(key.as_ref()?, vars, home.clone()) {
+                TriVal::Null => None,
+                v @ TriVal::String(_) => Some(v),
+                _ => Some(TriVal::Unknown),
+            }
+        };
     let same = |new: &TriVal, old: &TriVal| matches!(new, TriVal::String(_)) && new == old;
 
     let mut inner = outer.clone();
@@ -75,9 +81,13 @@ pub(super) fn join(base: &TriVal, dir: &TriVal) -> TriVal {
 /// Each path of a list, from the directory `cwd`.
 pub(super) fn resolved(paths: &TriVal, cwd: &TriVal) -> TriVal {
     match paths {
-        TriVal::List { elements, exhaustive } => {
-            TriVal::List { elements: elements.iter().map(|p| join(cwd, p)).collect(), exhaustive: *exhaustive }
-        }
+        TriVal::List {
+            elements,
+            exhaustive,
+        } => TriVal::List {
+            elements: elements.iter().map(|p| join(cwd, p)).collect(),
+            exhaustive: *exhaustive,
+        },
         _ => TriVal::Unknown,
     }
 }

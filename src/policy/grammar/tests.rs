@@ -33,7 +33,11 @@ fn open(vals: &[&str]) -> TriVal {
 /// `(line, part, value)` rows over one grammar.
 fn check(toml: &str, rows: &[(&str, &str, TriVal)]) {
     for (line, part, want) in rows {
-        let got = parse(toml, line).args.get(*part).cloned().unwrap_or(TriVal::Unknown);
+        let got = parse(toml, line)
+            .args
+            .get(*part)
+            .cloned()
+            .unwrap_or(TriVal::Unknown);
         assert_eq!(&got, want, "{line}: {part}");
     }
 }
@@ -83,7 +87,13 @@ fn the_posix_parser_stops_options_at_the_first_operand() {
         parser = "posix"
         arguments = ["files...", "--force|-f"]
     "#;
-    check(toml, &[("p -f a -f", "files", strings(&["a", "-f"])), ("p a -f", "force", TriVal::Bool(false))]);
+    check(
+        toml,
+        &[
+            ("p -f a -f", "files", strings(&["a", "-f"])),
+            ("p a -f", "force", TriVal::Bool(false)),
+        ],
+    );
 }
 
 #[test]
@@ -103,8 +113,20 @@ fn parser_settings_copy_one_tool() {
         parser = { name = "gnu", short_equals = true }
         arguments = ["files...", "--expr|-e:"]
     "#;
-    check(head, &[("head -5 a", "lines", strings(&["5"])), ("head +5 a", "lines", strings(&["+5"]))]);
-    check(head, &[("head a -5", "files", strings(&["a"])), ("head a -5", "lines", strings(&[]))]);
+    check(
+        head,
+        &[
+            ("head -5 a", "lines", strings(&["5"])),
+            ("head +5 a", "lines", strings(&["+5"])),
+        ],
+    );
+    check(
+        head,
+        &[
+            ("head a -5", "files", strings(&["a"])),
+            ("head a -5", "lines", strings(&[])),
+        ],
+    );
     check(log, &[("log a -5", "max_count", strings(&["5"]))]);
     check(pflag, &[("k -e=x", "expr", strings(&["x"]))]);
     check(SORT, &[("sort -o=x", "output", strings(&["=x"]))]);
@@ -123,7 +145,11 @@ fn the_find_parser_reads_single_dash_words_and_operators() {
         toml,
         &[
             ("find a b -name x", "files", strings(&["a", "b"])),
-            ("find ( -name x -o ! -newer y ) -delete", "delete", TriVal::Bool(true)),
+            (
+                "find ( -name x -o ! -newer y ) -delete",
+                "delete",
+                TriVal::Bool(true),
+            ),
             ("find ( -name x -o -newer y )", "newer", strings(&["y"])),
             ("find -name x", "files", strings(&["."])),
             ("find -L a -name x", "files", strings(&["a"])),
@@ -182,7 +208,10 @@ fn an_extra_operand_leaves_options_known() {
         ],
     );
     assert_eq!(parse(UNIQ, "u a b").writes, strings(&["b"]));
-    assert_eq!(parse(UNIQ, "u a b c").writes, list(vec![TriVal::Unknown], false));
+    assert_eq!(
+        parse(UNIQ, "u a b c").writes,
+        list(vec![TriVal::Unknown], false)
+    );
 }
 
 /// After an undeclared option, a later word may be its value: what is
@@ -203,7 +232,10 @@ fn an_undeclared_option_leaves_what_follows_it_unknown() {
         ],
     );
     assert_eq!(parse(UNIQ, "u a b -x").reads, strings(&["a"]));
-    assert_eq!(parse(UNIQ, "u -x a b").reads, list(vec![TriVal::Unknown], false));
+    assert_eq!(
+        parse(UNIQ, "u -x a b").reads,
+        list(vec![TriVal::Unknown], false)
+    );
 }
 
 /// A word that cannot be known may be any option, `--` or several words.
@@ -275,7 +307,10 @@ fn subcommand_words_choose_the_level_that_parses_the_rest() {
         ("git", strings(&[])),
         ("git frob x", list(vec![TriVal::Unknown], true)),
         ("git $X log", list(vec![TriVal::Unknown], true)),
-        ("git stash $X", list(vec![s("stash"), TriVal::Unknown], true)),
+        (
+            "git stash $X",
+            list(vec![s("stash"), TriVal::Unknown], true),
+        ),
     ];
     for (line, want) in rows {
         assert_eq!(parse(GIT, line).subcommands, want, "{line}");
@@ -293,7 +328,11 @@ fn subcommand_words_choose_the_level_that_parses_the_rest() {
             ("git $X log", "config", open(&[])),
             ("git --frob log", "config", strings(&[])),
             ("git --frob -c x log", "config", open(&[])),
-            ("cargo test --manifest-path m", "manifest_path", strings(&["m"])),
+            (
+                "cargo test --manifest-path m",
+                "manifest_path",
+                strings(&["m"]),
+            ),
         ],
     );
 }
@@ -301,7 +340,10 @@ fn subcommand_words_choose_the_level_that_parses_the_rest() {
 #[test]
 fn marks_turn_parts_into_paths_relative_to_the_marked_directory() {
     let p = parse(GIT, "git -C a -C b log --output o f");
-    assert_eq!((p.cwd, p.reads, p.writes), (s("a/b"), strings(&["f", "."]), strings(&["o"])));
+    assert_eq!(
+        (p.cwd, p.reads, p.writes),
+        (s("a/b"), strings(&["f", "."]), strings(&["o"]))
+    );
     let p = parse(GIT, "git -C / log");
     assert_eq!((p.cwd, p.reads), (s("/"), strings(&["."])));
     let p = parse(GIT, "git log $X");
@@ -357,24 +399,36 @@ fn marks_give_the_inner_commands_that_a_command_runs() {
         ("sh -c $X", vec![Inner::Line(None)]),
         ("sh script", vec![]),
         ("find . -exec rm {} ; -name x", vec![words(&[k("rm"), u()])]),
-        ("find . -exec ls {} + -exec cp {}.bak d ;", vec![words(&[k("ls"), u()]), words(&[k("cp"), u(), k("d")])]),
+        (
+            "find . -exec ls {} + -exec cp {}.bak d ;",
+            vec![words(&[k("ls"), u()]), words(&[k("cp"), u(), k("d")])],
+        ),
         ("find . -exec rm", vec![words(&[k("rm")])]),
         // `$X` may hold the `;`, and more `-exec` uses after it.
-        ("find . -exec rm $X ; -delete", vec![words(&[k("rm"), u()]), words(&[u()])]),
+        (
+            "find . -exec rm $X ; -delete",
+            vec![words(&[k("rm"), u()]), words(&[u()])],
+        ),
         ("find . -name $X", vec![words(&[u()])]),
         ("env A=1 ls", vec![words(&[k("ls")])]),
     ];
     for (line, want) in rows {
         assert_eq!(parse(WRAPPERS, line).inner, want, "{line}");
     }
-    check(WRAPPERS, &[("find . -exec rm {} ; -name x", "name", strings(&["x"]))]);
+    check(
+        WRAPPERS,
+        &[("find . -exec rm {} ; -name x", "name", strings(&["x"]))],
+    );
 }
 
 #[test]
 fn marks_name_the_variables_that_a_command_sets() {
     let p = parse(WRAPPERS, "env A=1 B ls");
     assert_eq!(p.variables, strings(&["A"]));
-    assert_eq!(parse(WRAPPERS, "env --frob A=1 ls").variables, list(vec![], false));
+    assert_eq!(
+        parse(WRAPPERS, "env --frob A=1 ls").variables,
+        list(vec![], false)
+    );
 }
 
 #[test]
@@ -386,7 +440,10 @@ fn a_default_is_read_as_a_word() {
 
 #[test]
 fn a_command_finds_its_grammar_by_its_last_path_component() {
-    assert_eq!(parse(GIT, "/usr/bin/git log").subcommands, strings(&["log"]));
+    assert_eq!(
+        parse(GIT, "/usr/bin/git log").subcommands,
+        strings(&["log"])
+    );
     assert_eq!(parse(GIT, "./bin/git log").subcommands, strings(&["log"]));
     assert_eq!(parse(GIT, "gti log").subcommands, strings(&[]));
 }
@@ -408,50 +465,131 @@ fn a_rule_command_declares_the_names_of_its_levels() {
 fn a_grammar_that_breaks_the_format_does_not_load() {
     let rows = [
         ("arguments = [\"x\"]", "needs `parser`"),
-        ("parser = \"gnu\"\narguments = [\"--a|b\"]", "not an argument string"),
-        ("parser = \"gnu\"\narguments = [\"x:\"]", "not an argument string"),
-        ("parser = \"gnu\"\narguments = [\"force=--force\"]", "repeats the name"),
+        (
+            "parser = \"gnu\"\narguments = [\"--a|b\"]",
+            "not an argument string",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x:\"]",
+            "not an argument string",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"force=--force\"]",
+            "repeats the name",
+        ),
         ("parser = \"gnu\"\narguments = [\"-C:\"]", "not snake_case"),
-        ("parser = \"gnu\"\narguments = [\"-newer:\"]", "single-dash word"),
-        ("parser = \"gnu\"\narguments = [\"x\", \"x...\"]", "declared twice"),
-        ("parser = \"gnu\"\nglobal = [\"x\"]", "`global` holds options"),
-        ("parser = \"gnu\"\narguments = [[\"x\", \"--y\"]]", "a group is"),
-        ("parser = \"gnu\"\narguments = [[\"x...\", \"--y:\"]]", "a group is"),
-        ("parser = \"gnu\"\narguments = [\"subcommand...\"]", "takes no `...`"),
-        ("parser = \"gnu\"\narguments = [\"subcommand\", \"subcommand\"]", "twice"),
-        ("parser = \"gnu\"\narguments = [\"x...\", \"subcommand\"]\nargument.subcommand.words = [\"a\"]", "list operand"),
-        ("parser = \"gnu\"\narguments = [\"subcommand\"]", "no words and no tables"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\n[commands.t.sub]\narguments = []", "without `subcommand`"),
+        (
+            "parser = \"gnu\"\narguments = [\"-newer:\"]",
+            "single-dash word",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\", \"x...\"]",
+            "declared twice",
+        ),
+        (
+            "parser = \"gnu\"\nglobal = [\"x\"]",
+            "`global` holds options",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [[\"x\", \"--y\"]]",
+            "a group is",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [[\"x...\", \"--y:\"]]",
+            "a group is",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"subcommand...\"]",
+            "takes no `...`",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"subcommand\", \"subcommand\"]",
+            "twice",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x...\", \"subcommand\"]\nargument.subcommand.words = [\"a\"]",
+            "list operand",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"subcommand\"]",
+            "no words and no tables",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\n[commands.t.sub]\narguments = []",
+            "without `subcommand`",
+        ),
         (
             "parser = \"gnu\"\narguments = [\"subcommand\"]\nargument.subcommand.words = [\"a\"]\n[commands.t.a]\narguments = []",
             "both in `words` and a table",
         ),
-        ("parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.with]\narguments = []", "unknown field"),
-        ("parser = \"gnu\"\narguments = [\"--run...\"]", "only for the `find` parser"),
-        ("parser = \"gnu\"\narguments = [\"xs...\"]\nargument.xs.appends = true", "`marks.command` does not name"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\nmarks.command = [\"x\"]", "a one-word operand"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\nmarks.shell = [\"y\"]", "does not declare"),
+        (
+            "parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.with]\narguments = []",
+            "unknown field",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"--run...\"]",
+            "only for the `find` parser",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"xs...\"]\nargument.xs.appends = true",
+            "`marks.command` does not name",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nmarks.command = [\"x\"]",
+            "a one-word operand",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nmarks.shell = [\"y\"]",
+            "does not declare",
+        ),
         ("parser = \"gnu\"\nwith.home = 'x'", "unknown field"),
         ("parser = \"gnu\"\nwith.cwd = '@@'", "CEL"),
         ("parser = \"gnu\"\nwith.cwd = 'path'", "`path`"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\nwith.user = 'args.y'", "`args.y`"),
-        ("parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.a]\narguments = [\"x\"]\n[commands.t.b]\nwith.cwd = 'args.x'", "`args.x`"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\nargument.x.words = [\"a\"]", "only for `subcommand`"),
-        ("parser = \"gnu\"\narguments = [\"--x:\"]\nargument.x.match = \"*\"", "only for an operand"),
-        ("parser = \"gnu\"\narguments = [\"--x\"]\nargument.x.default = [\"a\"]", "only for an operand or an option"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\nargument.y.default = [\"a\"]", "names no argument"),
-        ("parser = \"gnu\"\narguments = [\"x\"]\nmarks.read = [\"y\"]", "does not declare"),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nwith.user = 'args.y'",
+            "`args.y`",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.a]\narguments = [\"x\"]\n[commands.t.b]\nwith.cwd = 'args.x'",
+            "`args.x`",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nargument.x.words = [\"a\"]",
+            "only for `subcommand`",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"--x:\"]\nargument.x.match = \"*\"",
+            "only for an operand",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"--x\"]\nargument.x.default = [\"a\"]",
+            "only for an operand or an option",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nargument.y.default = [\"a\"]",
+            "names no argument",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nmarks.read = [\"y\"]",
+            "does not declare",
+        ),
         (
             "parser = \"gnu\"\narguments = [\"subcommand\"]\nglobal = [\"--g\"]\n[commands.t.a]\narguments = [\"other=--g\"]",
             "already a global option",
         ),
-        ("parser = \"gnu\"\narguments = [\"subcommand\", \"x\"]\n[commands.t.a]\narguments = [\"x\"]", "declared twice along"),
+        (
+            "parser = \"gnu\"\narguments = [\"subcommand\", \"x\"]\n[commands.t.a]\narguments = [\"x\"]",
+            "declared twice along",
+        ),
     ];
     for (body, want) in rows {
         let toml = format!("[commands.t]\n{body}");
         match grammars(&toml) {
             Ok(_) => panic!("loaded:\n{toml}"),
-            Err(err) => assert!(err.contains(want), "{toml}\n  error: {err}\n  wanted: {want}"),
+            Err(err) => assert!(
+                err.contains(want),
+                "{toml}\n  error: {err}\n  wanted: {want}"
+            ),
         }
     }
     assert!(grammars("[commands.t]\nparser = \"gnu\"\nwith.cwd = 'unknown'").is_ok());

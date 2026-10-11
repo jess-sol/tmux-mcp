@@ -16,7 +16,6 @@
 /// (delimiter between command echo and output). D consumes it. B clears
 /// it (new cycle). This captures output even when C is absent (subshells,
 /// shells without preexec support).
-
 use crate::pane::state::{Activity, TerminalState};
 
 // --- State Machine ---
@@ -144,9 +143,7 @@ impl Osc133Parser {
         if let Some(cmd) = state.active_command_mut() {
             // If we're in Executing and got B without D (pre-exec failure),
             // set exit code 1.
-            if cmd.exit_code.is_none()
-                && matches!(self.phase, Osc133Phase::Executing { .. })
-            {
+            if cmd.exit_code.is_none() && matches!(self.phase, Osc133Phase::Executing { .. }) {
                 cmd.exit_code = Some(1);
             }
             cmd.completed = true;
@@ -165,7 +162,12 @@ impl Osc133Parser {
     /// `screen_input` is the command text read from the terminal grid by
     /// PaneProcessor — it handles all editing (backspace, cursor movement,
     /// etc.) correctly because it reads from the real terminal emulator.
-    fn handle_c(&mut self, param: Option<&str>, state: &mut TerminalState, screen_input: Option<&str>) {
+    fn handle_c(
+        &mut self,
+        param: Option<&str>,
+        state: &mut TerminalState,
+        screen_input: Option<&str>,
+    ) {
         if matches!(self.phase, Osc133Phase::Executing { .. }) {
             tracing::debug!("Duplicate OSC 133;C — ignoring");
             return;
@@ -312,7 +314,6 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&result).into_owned()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,7 +324,12 @@ mod tests {
     }
 
     /// Shorthand for C marker with screen_input (simulating terminal grid read).
-    fn marker_c(parser: &mut Osc133Parser, param: Option<&str>, state: &mut TerminalState, screen_input: &str) {
+    fn marker_c(
+        parser: &mut Osc133Parser,
+        param: Option<&str>,
+        state: &mut TerminalState,
+        screen_input: &str,
+    ) {
         parser.handle_marker(b'C', param, state, Some(screen_input));
     }
 
@@ -417,7 +423,12 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         // C with cmdline_url parameter (URL-encoded)
-        marker(&mut p, b'C', Some("cmdline_url=echo%20hello%20world"), &mut s);
+        marker(
+            &mut p,
+            b'C',
+            Some("cmdline_url=echo%20hello%20world"),
+            &mut s,
+        );
 
         if let Osc133Phase::Executing { command } = &p.phase {
             assert_eq!(command, "echo hello world");
@@ -941,7 +952,10 @@ mod tests {
         assert!(!s.commands[0].completed, "D should not complete yet");
 
         marker(&mut p, b'A', None, &mut s);
-        assert!(!s.commands[0].completed, "A should not complete (that's B's job)");
+        assert!(
+            !s.commands[0].completed,
+            "A should not complete (that's B's job)"
+        );
 
         marker(&mut p, b'B', None, &mut s);
         assert!(s.commands[0].completed, "B should complete the command");
@@ -977,14 +991,21 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
 
-        assert_eq!(p.phase, Osc133Phase::Input, "should be in Input after D→A→B recovery");
+        assert_eq!(
+            p.phase,
+            Osc133Phase::Input,
+            "should be in Input after D→A→B recovery"
+        );
     }
 
     // --- Helpers ---
 
     #[test]
     fn parse_cmdline_url_basic() {
-        assert_eq!(parse_cmdline_url("cmdline_url=echo%20hello"), Some("echo hello".into()));
+        assert_eq!(
+            parse_cmdline_url("cmdline_url=echo%20hello"),
+            Some("echo hello".into())
+        );
     }
 
     #[test]
@@ -1013,7 +1034,10 @@ mod tests {
         assert_eq!(Osc133Phase::Prompt.executing_command(), None);
         assert_eq!(Osc133Phase::Input.executing_command(), None);
         assert_eq!(
-            Osc133Phase::Executing { command: "ls".into() }.executing_command(),
+            Osc133Phase::Executing {
+                command: "ls".into()
+            }
+            .executing_command(),
             Some("ls"),
         );
     }

@@ -8,10 +8,19 @@ use crate::policy::grammar::run::{Read, Run, push_value, set_flag, take_value};
 use crate::policy::parse::Word;
 
 pub(super) fn is_option(p: &Parser, text: &str, at_start: bool) -> bool {
-    (text.starts_with('-') && text.len() > 1) || (at_start && p.leading_number.is_some() && is_number(text, true))
+    (text.starts_with('-') && text.len() > 1)
+        || (at_start && p.leading_number.is_some() && is_number(text, true))
 }
 
-pub(super) fn option(p: &Parser, text: &str, rest: &[Word], at_start: bool, active: &[&Opt], scan: &mut Scan, run: &mut Run) -> Read {
+pub(super) fn option(
+    p: &Parser,
+    text: &str,
+    rest: &[Word],
+    at_start: bool,
+    active: &[&Opt],
+    scan: &mut Scan,
+    run: &mut Run,
+) -> Read {
     if text == "--" {
         scan.options_end = true;
         return Read::took(0);
@@ -20,7 +29,11 @@ pub(super) fn option(p: &Parser, text: &str, rest: &[Word], at_start: bool, acti
         && at_start
         && is_number(text, true)
     {
-        push_value(run, name, Word::Known(text.trim_start_matches('-').to_string()));
+        push_value(
+            run,
+            name,
+            Word::Known(text.trim_start_matches('-').to_string()),
+        );
         return Read::took(0);
     }
     if let Some(name) = &p.number

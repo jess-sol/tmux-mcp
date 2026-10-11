@@ -15,7 +15,10 @@ use super::{Decision, PolicyResult};
 /// command, `eval` included, so no rule can judge it.
 pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
     commands.iter().find(|cmd| cmd.name == TriVal::Unknown)?;
-    Some(PolicyResult { decision: Decision::Deny, rule: "dynamic command dispatch isn't allowed".into() })
+    Some(PolicyResult {
+        decision: Decision::Deny,
+        rule: "dynamic command dispatch isn't allowed".into(),
+    })
 }
 
 #[cfg(test)]
@@ -25,7 +28,13 @@ mod tests {
 
     fn denied(line: &str) -> bool {
         let unknown = TriVal::Unknown;
-        let start = Context { cwd: unknown.clone(), host: unknown.clone(), user: unknown.clone(), home: unknown, own_user: true };
+        let start = Context {
+            cwd: unknown.clone(),
+            host: unknown.clone(),
+            user: unknown.clone(),
+            home: unknown,
+            own_user: true,
+        };
         let cmds = parse_command(line, &Grammars::default(), &start).unwrap();
         check(&cmds).is_some_and(|r| r.decision == Decision::Deny)
     }

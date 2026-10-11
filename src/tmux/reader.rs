@@ -10,7 +10,9 @@ use std::collections::VecDeque;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::tmux::notification::{CommandResponse, Notification, ReaderMessage, parse_line, parse_output};
+use crate::tmux::notification::{
+    CommandResponse, Notification, ReaderMessage, parse_line, parse_output,
+};
 
 /// Handle to send commands to the reader for response routing.
 ///

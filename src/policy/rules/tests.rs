@@ -16,8 +16,14 @@ fn ruleset(rules_toml: &str) -> RuleSet {
 /// no match, the ruleset's `default`.
 fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> crate::policy::PolicyResult {
     match super::decide(rules, facts, env) {
-        (Some(decision), reasons) => crate::policy::PolicyResult { decision, rule: reasons.join("\n") },
-        (None, _) => crate::policy::PolicyResult { decision: rules.default.clone(), rule: "default".into() },
+        (Some(decision), reasons) => crate::policy::PolicyResult {
+            decision,
+            rule: reasons.join("\n"),
+        },
+        (None, _) => crate::policy::PolicyResult {
+            decision: rules.default.clone(),
+            rule: "default".into(),
+        },
     }
 }
 
@@ -36,10 +42,19 @@ fn facts_with_xs(xs: TriVal) -> Facts {
         relative: false,
         subcommands: vec![],
         args: TriVal::Map(HashMap::from([("xs".to_string(), xs)])),
-        paths: TriVal::List { elements: vec![], exhaustive: true },
-        writes: TriVal::List { elements: vec![], exhaustive: true },
+        paths: TriVal::List {
+            elements: vec![],
+            exhaustive: true,
+        },
+        writes: TriVal::List {
+            elements: vec![],
+            exhaustive: true,
+        },
         dir: Some("/src/proj".into()),
-        variables: TriVal::List { elements: vec![], exhaustive: true },
+        variables: TriVal::List {
+            elements: vec![],
+            exhaustive: true,
+        },
         host: Host::Here,
         user: TriVal::String("u".into()),
         own_user: true,
@@ -49,15 +64,28 @@ fn facts_with_xs(xs: TriVal) -> Facts {
 }
 
 fn on(host: Host) -> Facts {
-    Facts { host, ..facts_with_xs(strings(&[], true)) }
+    Facts {
+        host,
+        ..facts_with_xs(strings(&[], true))
+    }
 }
 
 fn vars(pairs: &[(&str, TriVal)]) -> Ctx<'static> {
-    Ctx { vars: pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(), site: None, home: TriVal::Unknown }
+    Ctx {
+        vars: pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+        site: None,
+        home: TriVal::Unknown,
+    }
 }
 
 fn strings(vals: &[&str], exhaustive: bool) -> TriVal {
-    TriVal::List { elements: vals.iter().map(|v| TriVal::String(v.to_string())).collect(), exhaustive }
+    TriVal::List {
+        elements: vals.iter().map(|v| TriVal::String(v.to_string())).collect(),
+        exhaustive,
+    }
 }
 
 fn eval_cel(expr: &str) -> TriVal {
@@ -65,7 +93,9 @@ fn eval_cel(expr: &str) -> TriVal {
 }
 
 fn eval_cel_with(expr: &str, ctx: &Ctx) -> TriVal {
-    let ast = cel_parser::Parser::new().parse(expr).unwrap_or_else(|e| panic!("CEL parse error: {:?}", e));
+    let ast = cel_parser::Parser::new()
+        .parse(expr)
+        .unwrap_or_else(|e| panic!("CEL parse error: {:?}", e));
     eval_expr(&ast.expr, ctx)
 }
 
@@ -81,9 +111,22 @@ fn cel_parser_names_operators_and_macros() {
     assert_eq!(func("a && b"), "_&&_");
     assert_eq!(func(r#"x in ["a"]"#), "@in");
     assert_eq!(func("xs[0]"), "_[_]");
-    assert!(matches!(cel_parser::Parser::new().parse("xs.exists(x, x)").unwrap().expr, cel::Expr::Comprehension(_)));
-    assert!(matches!(cel_parser::Parser::new().parse("a.b.c").unwrap().expr, cel::Expr::Select(_)));
-    assert!(cel_parser::Parser::new().parse("invalid @@@ syntax").is_err());
+    assert!(matches!(
+        cel_parser::Parser::new()
+            .parse("xs.exists(x, x)")
+            .unwrap()
+            .expr,
+        cel::Expr::Comprehension(_)
+    ));
+    assert!(matches!(
+        cel_parser::Parser::new().parse("a.b.c").unwrap().expr,
+        cel::Expr::Select(_)
+    ));
+    assert!(
+        cel_parser::Parser::new()
+            .parse("invalid @@@ syntax")
+            .is_err()
+    );
 }
 
 // --- Matching and combining ---
@@ -94,10 +137,34 @@ fn a_rule_that_may_match_fires_unless_it_allows() {
     // (action, when, beside, over a non-exhaustive xs, over an exhaustive xs):
     // each rule sits beside a rule of action `beside`, over xs = ["x"].
     let rows = [
-        ("ask", r#"args.xs.exists(a, a == "-r")"#, "allow", (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
-        ("ask", r#"(args.xs + ["y"]).exists(a, a == "-r")"#, "allow", (Decision::Ask, UNSURE), (Decision::Allow, "beside")),
-        ("deny", r#""-r" in args.xs"#, "allow", (Decision::Deny, UNSURE), (Decision::Allow, "beside")),
-        ("allow", r#"!args.xs.exists(a, a == "-r")"#, "ask", (Decision::Ask, "beside"), (Decision::Ask, "beside")),
+        (
+            "ask",
+            r#"args.xs.exists(a, a == "-r")"#,
+            "allow",
+            (Decision::Ask, UNSURE),
+            (Decision::Allow, "beside"),
+        ),
+        (
+            "ask",
+            r#"(args.xs + ["y"]).exists(a, a == "-r")"#,
+            "allow",
+            (Decision::Ask, UNSURE),
+            (Decision::Allow, "beside"),
+        ),
+        (
+            "deny",
+            r#""-r" in args.xs"#,
+            "allow",
+            (Decision::Deny, UNSURE),
+            (Decision::Allow, "beside"),
+        ),
+        (
+            "allow",
+            r#"!args.xs.exists(a, a == "-r")"#,
+            "ask",
+            (Decision::Ask, "beside"),
+            (Decision::Ask, "beside"),
+        ),
     ];
     for (action, when, beside, incomplete, complete) in rows {
         let rules = ruleset(&format!(
@@ -106,7 +173,11 @@ fn a_rule_that_may_match_fires_unless_it_allows() {
         ));
         for (exhaustive, want) in [(false, incomplete), (true, complete)] {
             let got = decide(&rules, &facts_with_xs(strings(&["x"], exhaustive)), &env());
-            assert_eq!((got.decision, got.rule.as_str()), want, "{when}, exhaustive={exhaustive}");
+            assert_eq!(
+                (got.decision, got.rule.as_str()),
+                want,
+                "{when}, exhaustive={exhaustive}"
+            );
         }
     }
 }
@@ -162,22 +233,77 @@ fn an_exemption_removes_the_named_rule_only_where_its_rule_surely_matches() {
     );
     // (rules, xs, paths, decision, rule)
     let rows = [
-        (&rules, strings(&[], true), strings(&["/etc/hosts"], true), Decision::Allow, "hosts"),
-        (&rules, strings(&[], true), strings(&["/etc/hosts", "/etc/shadow"], true), Decision::Ask, "out"),
-        (&rules, strings(&["-x"], true), strings(&[], true), Decision::Ask, "x-asks"),
+        (
+            &rules,
+            strings(&[], true),
+            strings(&["/etc/hosts"], true),
+            Decision::Allow,
+            "hosts",
+        ),
+        (
+            &rules,
+            strings(&[], true),
+            strings(&["/etc/hosts", "/etc/shadow"], true),
+            Decision::Ask,
+            "out",
+        ),
+        (
+            &rules,
+            strings(&["-x"], true),
+            strings(&[], true),
+            Decision::Ask,
+            "x-asks",
+        ),
         // An exempting rule that may match exempts nothing.
-        (&rules, strings(&[], false), strings(&[], true), Decision::Deny, "x-flag (could not be ruled out)"),
+        (
+            &rules,
+            strings(&[], false),
+            strings(&[], true),
+            Decision::Deny,
+            "x-flag (could not be ruled out)",
+        ),
         // An exempted rule's own exemptions do not apply.
-        (&rules, strings(&["-x", "-y"], true), strings(&[], true), Decision::Deny, "x-flag"),
+        (
+            &rules,
+            strings(&["-x", "-y"], true),
+            strings(&[], true),
+            Decision::Deny,
+            "x-flag",
+        ),
         // A path rule exempts a command rule only over every path of an exhaustive list.
-        (&under_tmp, strings(&["-x"], true), strings(&["/tmp/a"], true), Decision::Allow, "under-tmp"),
-        (&under_tmp, strings(&["-x"], true), strings(&["/tmp/a", "/etc/b"], true), Decision::Deny, "x-flag"),
-        (&under_tmp, strings(&["-x"], true), strings(&["/tmp/a"], false), Decision::Deny, "x-flag"),
+        (
+            &under_tmp,
+            strings(&["-x"], true),
+            strings(&["/tmp/a"], true),
+            Decision::Allow,
+            "under-tmp",
+        ),
+        (
+            &under_tmp,
+            strings(&["-x"], true),
+            strings(&["/tmp/a", "/etc/b"], true),
+            Decision::Deny,
+            "x-flag",
+        ),
+        (
+            &under_tmp,
+            strings(&["-x"], true),
+            strings(&["/tmp/a"], false),
+            Decision::Deny,
+            "x-flag",
+        ),
     ];
     for (rules, xs, paths, decision, rule) in rows {
-        let facts = Facts { paths: paths.clone(), ..facts_with_xs(xs.clone()) };
+        let facts = Facts {
+            paths: paths.clone(),
+            ..facts_with_xs(xs.clone())
+        };
         let got = decide(rules, &facts, &env());
-        assert_eq!((got.decision, got.rule.as_str()), (decision, rule), "xs={xs:?}, paths={paths:?}");
+        assert_eq!(
+            (got.decision, got.rule.as_str()),
+            (decision, rule),
+            "xs={xs:?}, paths={paths:?}"
+        );
     }
 }
 
@@ -228,7 +354,12 @@ fn a_rule_is_strict_by_default_and_its_host_loosens_an_allow() {
     // (host, strict, here, prod)
     let rows = [
         (Host::Here, Decision::Deny, Decision::Allow, Decision::Ask),
-        (Host::There("prod".into()), Decision::Deny, Decision::Ask, Decision::Allow),
+        (
+            Host::There("prod".into()),
+            Decision::Deny,
+            Decision::Ask,
+            Decision::Allow,
+        ),
         (Host::Unknown, Decision::Deny, Decision::Ask, Decision::Ask),
     ];
     for (host, want_strict, want_here, want_prod) in rows {
@@ -249,14 +380,40 @@ fn a_rule_is_strict_by_default_and_its_user_loosens_an_allow() {
     // (user, own_user, strict, own, root)
     let rows = [
         (u("u"), true, Decision::Ask, Decision::Allow, Decision::Ask),
-        (TriVal::Unknown, true, Decision::Ask, Decision::Allow, Decision::Ask),
-        (u("root"), false, Decision::Ask, Decision::Ask, Decision::Allow),
-        (TriVal::Unknown, false, Decision::Ask, Decision::Ask, Decision::Ask),
+        (
+            TriVal::Unknown,
+            true,
+            Decision::Ask,
+            Decision::Allow,
+            Decision::Ask,
+        ),
+        (
+            u("root"),
+            false,
+            Decision::Ask,
+            Decision::Ask,
+            Decision::Allow,
+        ),
+        (
+            TriVal::Unknown,
+            false,
+            Decision::Ask,
+            Decision::Ask,
+            Decision::Ask,
+        ),
     ];
     for (user, own_user, want_strict, want_own, want_root) in rows {
-        let facts = Facts { user: user.clone(), own_user, ..facts_with_xs(strings(&[], true)) };
+        let facts = Facts {
+            user: user.clone(),
+            own_user,
+            ..facts_with_xs(strings(&[], true))
+        };
         let got = [&strict, &own, &root].map(|rules| decide(rules, &facts, &env()).decision);
-        assert_eq!(got, [want_strict, want_own, want_root], "{user:?}, own_user={own_user}");
+        assert_eq!(
+            got,
+            [want_strict, want_own, want_root],
+            "{user:?}, own_user={own_user}"
+        );
     }
 }
 
@@ -293,17 +450,36 @@ action = "deny"
         (Via::Bash, &["x"][..], Decision::Deny, "t-x-in-bash"),
     ];
     for (via, xs, want, reason) in rows {
-        let got = decide(&rules, &facts_with_xs(strings(xs, true)), &Env { via, ..env() });
-        assert_eq!((got.decision, got.rule.as_str()), (want, reason), "{via:?} {xs:?}");
+        let got = decide(
+            &rules,
+            &facts_with_xs(strings(xs, true)),
+            &Env { via, ..env() },
+        );
+        assert_eq!(
+            (got.decision, got.rule.as_str()),
+            (want, reason),
+            "{via:?} {xs:?}"
+        );
     }
 }
 
 #[test]
 fn a_project_rule_applies_only_on_this_machine() {
     let config = parse_config("[[rules]]\nid = \"p\"\naction = \"deny\"").unwrap();
-    let rules = compile(&[(config.rules[0].clone(), true)], Decision::Ask, &Grammars::default()).unwrap();
-    assert_eq!(decide(&rules, &on(Host::There("prod".into())), &env()).decision, Decision::Ask);
-    assert_eq!(decide(&rules, &on(Host::Here), &env()).decision, Decision::Deny);
+    let rules = compile(
+        &[(config.rules[0].clone(), true)],
+        Decision::Ask,
+        &Grammars::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        decide(&rules, &on(Host::There("prod".into())), &env()).decision,
+        Decision::Ask
+    );
+    assert_eq!(
+        decide(&rules, &on(Host::Here), &env()).decision,
+        Decision::Deny
+    );
 }
 
 #[test]
@@ -313,11 +489,23 @@ fn a_path_rule_holds_for_any_path_and_is_unsure_over_an_open_list() {
         (strings(&["/src/proj/a"], true), "default"),
         (strings(&["/src/proj/a", "/etc/x"], true), "out"),
         (strings(&["/etc/x"], false), "out"),
-        (strings(&["/src/proj/a"], false), "out (could not be ruled out)"),
-        (TriVal::List { elements: vec![TriVal::Unknown], exhaustive: true }, "out (could not be ruled out)"),
+        (
+            strings(&["/src/proj/a"], false),
+            "out (could not be ruled out)",
+        ),
+        (
+            TriVal::List {
+                elements: vec![TriVal::Unknown],
+                exhaustive: true,
+            },
+            "out (could not be ruled out)",
+        ),
     ];
     for (paths, want) in rows {
-        let facts = Facts { paths: paths.clone(), ..facts_with_xs(strings(&[], true)) };
+        let facts = Facts {
+            paths: paths.clone(),
+            ..facts_with_xs(strings(&[], true))
+        };
         assert_eq!(decide(&rules, &facts, &env()).rule, want, "{paths:?}");
     }
 }
@@ -330,21 +518,54 @@ fn a_command_is_named_by_its_path_from_the_anchor() {
     let rows = [
         ("rm", Host::Here, TriVal::String("rm".into())),
         ("/usr/bin/rm", Host::Here, TriVal::String("rm".into())),
-        ("/src/proj/scripts/bench", Host::Here, TriVal::String("./scripts/bench".into())),
-        ("../scripts/bench", Host::Here, TriVal::String("./scripts/bench".into())),
-        ("./bin/cat", Host::Here, TriVal::String("./sub/bin/cat".into())),
-        ("../../other/x", Host::Here, TriVal::String("../other/x".into())),
+        (
+            "/src/proj/scripts/bench",
+            Host::Here,
+            TriVal::String("./scripts/bench".into()),
+        ),
+        (
+            "../scripts/bench",
+            Host::Here,
+            TriVal::String("./scripts/bench".into()),
+        ),
+        (
+            "./bin/cat",
+            Host::Here,
+            TriVal::String("./sub/bin/cat".into()),
+        ),
+        (
+            "../../other/x",
+            Host::Here,
+            TriVal::String("../other/x".into()),
+        ),
         ("~bob/bin/x", Host::Here, TriVal::String("x".into())),
-        ("/usr/bin/rm", Host::There("prod".into()), TriVal::String("rm".into())),
+        (
+            "/usr/bin/rm",
+            Host::There("prod".into()),
+            TriVal::String("rm".into()),
+        ),
         ("./run", Host::There("prod".into()), TriVal::Unknown),
     ];
     for (name, host, want) in rows {
-        assert_eq!(identity(&TriVal::String(name.into()), &host, &env(), sub), want, "{name}");
+        assert_eq!(
+            identity(&TriVal::String(name.into()), &host, &env(), sub),
+            want,
+            "{name}"
+        );
     }
     let here = Host::Here;
-    assert_eq!(identity(&TriVal::String("./run".into()), &here, &env(), None), TriVal::Unknown);
-    assert_eq!(identity(&TriVal::String("rm".into()), &here, &env(), None), TriVal::String("rm".into()));
-    assert_eq!(identity(&TriVal::Unknown, &here, &env(), None), TriVal::Unknown);
+    assert_eq!(
+        identity(&TriVal::String("./run".into()), &here, &env(), None),
+        TriVal::Unknown
+    );
+    assert_eq!(
+        identity(&TriVal::String("rm".into()), &here, &env(), None),
+        TriVal::String("rm".into())
+    );
+    assert_eq!(
+        identity(&TriVal::Unknown, &here, &env(), None),
+        TriVal::Unknown
+    );
     assert_eq!(identity(&TriVal::Null, &here, &env(), None), TriVal::Null);
 }
 
@@ -370,8 +591,16 @@ fn a_path_resolves_as_text() {
 #[test]
 fn path_functions_resolve_against_the_command_directory() {
     let env = env();
-    let site = Site { env: &env, dir: Some(Path::new("/src/proj/sub")), host: &Host::Here };
-    let ctx = Ctx { vars: HashMap::new(), site: Some(site), home: TriVal::Unknown };
+    let site = Site {
+        env: &env,
+        dir: Some(Path::new("/src/proj/sub")),
+        host: &Host::Here,
+    };
+    let ctx = Ctx {
+        vars: HashMap::new(),
+        site: Some(site),
+        home: TriVal::Unknown,
+    };
     let rows = [
         ("in_project('..')", TriVal::Bool(true)),
         ("in_project('../../proj-evil/x')", TriVal::Bool(false)),
@@ -385,9 +614,20 @@ fn path_functions_resolve_against_the_command_directory() {
     for (expr, want) in rows {
         assert_eq!(eval_cel_with(expr, &ctx), want, "{expr}");
     }
-    let site = Site { env: &env, dir: Some(Path::new("/src/proj")), host: &Host::Unknown };
-    let ctx = Ctx { vars: HashMap::new(), site: Some(site), home: TriVal::Unknown };
-    assert_eq!(eval_cel_with("in_project('/src/proj')", &ctx), TriVal::Unknown);
+    let site = Site {
+        env: &env,
+        dir: Some(Path::new("/src/proj")),
+        host: &Host::Unknown,
+    };
+    let ctx = Ctx {
+        vars: HashMap::new(),
+        site: Some(site),
+        home: TriVal::Unknown,
+    };
+    assert_eq!(
+        eval_cel_with("in_project('/src/proj')", &ctx),
+        TriVal::Unknown
+    );
 }
 
 #[test]
@@ -402,7 +642,10 @@ fn with_functions_read_lists_destinations_and_the_home() {
         (r#"last(["a", "b"])"#, TriVal::String("b".into())),
         ("host_of('prod')", TriVal::String("prod".into())),
         ("host_of('bob@prod')", TriVal::String("prod".into())),
-        ("host_of('ssh://bob@prod:22')", TriVal::String("prod".into())),
+        (
+            "host_of('ssh://bob@prod:22')",
+            TriVal::String("prod".into()),
+        ),
         ("user_of('prod')", TriVal::Null),
         ("user_of('bob@prod')", TriVal::String("bob".into())),
         ("user_of('ssh://bob@prod:22')", TriVal::String("bob".into())),
@@ -425,22 +668,43 @@ fn unknown_propagates_through_kleene_logic() {
     let ctx = vars(&[("x", TriVal::Unknown)]);
     assert_eq!(eval_cel_with(r#"x == "root""#, &ctx), TriVal::Unknown);
     assert_eq!(eval_cel_with(r#"x != "root""#, &ctx), TriVal::Unknown);
-    assert_eq!(eval_cel_with(r#"true || x == "root""#, &ctx), TriVal::Bool(true));
-    assert_eq!(eval_cel_with(r#"true && x == "root""#, &ctx), TriVal::Unknown);
-    assert_eq!(eval_cel_with(r#"false && x == "root""#, &ctx), TriVal::Bool(false));
+    assert_eq!(
+        eval_cel_with(r#"true || x == "root""#, &ctx),
+        TriVal::Bool(true)
+    );
+    assert_eq!(
+        eval_cel_with(r#"true && x == "root""#, &ctx),
+        TriVal::Unknown
+    );
+    assert_eq!(
+        eval_cel_with(r#"false && x == "root""#, &ctx),
+        TriVal::Bool(false)
+    );
     // `unknown` is a value, as `null` is; no variable binds it.
     let bound = vars(&[("unknown", TriVal::String("x".into()))]);
     assert_eq!(eval_cel_with("unknown", &bound), TriVal::Unknown);
-    assert_eq!(eval_cel_with("true ? unknown : null", &bound), TriVal::Unknown);
+    assert_eq!(
+        eval_cel_with("true ? unknown : null", &bound),
+        TriVal::Unknown
+    );
 }
 
 #[test]
 fn null_compares_definitely() {
     let ctx = vars(&[("x", TriVal::Null)]);
-    assert_eq!(eval_cel_with(r#"x.name == "sudo""#, &ctx), TriVal::Bool(false));
-    assert_eq!(eval_cel_with(r#"x.name != "sudo""#, &ctx), TriVal::Bool(true));
+    assert_eq!(
+        eval_cel_with(r#"x.name == "sudo""#, &ctx),
+        TriVal::Bool(false)
+    );
+    assert_eq!(
+        eval_cel_with(r#"x.name != "sudo""#, &ctx),
+        TriVal::Bool(true)
+    );
     assert_eq!(eval_cel_with("x == null", &ctx), TriVal::Bool(true));
-    assert_eq!(eval_cel_with(r#"x in [null, "show"]"#, &ctx), TriVal::Bool(true));
+    assert_eq!(
+        eval_cel_with(r#"x in [null, "show"]"#, &ctx),
+        TriVal::Bool(true)
+    );
 }
 
 #[test]
@@ -448,22 +712,50 @@ fn a_non_exhaustive_list_answers_only_what_it_can() {
     let open = vars(&[("xs", strings(&["-v"], false))]);
     let closed = vars(&[("xs", strings(&["-v"], true))]);
     let rows = [
-        (r#"xs.exists(a, a == "-v")"#, TriVal::Bool(true), TriVal::Bool(true)),
-        (r#"xs.exists(a, a == "-rf")"#, TriVal::Unknown, TriVal::Bool(false)),
+        (
+            r#"xs.exists(a, a == "-v")"#,
+            TriVal::Bool(true),
+            TriVal::Bool(true),
+        ),
+        (
+            r#"xs.exists(a, a == "-rf")"#,
+            TriVal::Unknown,
+            TriVal::Bool(false),
+        ),
         (r#""-rf" in xs"#, TriVal::Unknown, TriVal::Bool(false)),
-        (r#"xs.all(a, a == "-v")"#, TriVal::Unknown, TriVal::Bool(true)),
+        (
+            r#"xs.all(a, a == "-v")"#,
+            TriVal::Unknown,
+            TriVal::Bool(true),
+        ),
         ("xs.size()", TriVal::Unknown, TriVal::Int(1)),
-        ("xs[0]", TriVal::String("-v".into()), TriVal::String("-v".into())),
+        (
+            "xs[0]",
+            TriVal::String("-v".into()),
+            TriVal::String("-v".into()),
+        ),
         ("xs[1]", TriVal::Unknown, TriVal::Null),
         (r#"xs == ["-v"]"#, TriVal::Unknown, TriVal::Bool(true)),
         ("xs == []", TriVal::Bool(false), TriVal::Bool(false)),
         (r#"xs == ["-x"]"#, TriVal::Bool(false), TriVal::Bool(false)),
-        (r#"xs == ["-v", "-x"]"#, TriVal::Unknown, TriVal::Bool(false)),
+        (
+            r#"xs == ["-v", "-x"]"#,
+            TriVal::Unknown,
+            TriVal::Bool(false),
+        ),
         (r#"xs == "-v""#, TriVal::Unknown, TriVal::Unknown),
     ];
     for (expr, want_open, want_closed) in rows {
-        assert_eq!(eval_cel_with(expr, &open), want_open, "{expr} over an open list");
-        assert_eq!(eval_cel_with(expr, &closed), want_closed, "{expr} over a closed list");
+        assert_eq!(
+            eval_cel_with(expr, &open),
+            want_open,
+            "{expr} over an open list"
+        );
+        assert_eq!(
+            eval_cel_with(expr, &closed),
+            want_closed,
+            "{expr} over a closed list"
+        );
     }
 }
 
@@ -472,8 +764,14 @@ fn a_non_exhaustive_list_answers_only_what_it_can() {
 #[test]
 fn string_functions_test_their_operands() {
     let rows = [
-        (r#"glob("*.prod.*", "web.prod.example.com")"#, TriVal::Bool(true)),
-        (r#"glob("*.prod.*", "web.staging.example.com")"#, TriVal::Bool(false)),
+        (
+            r#"glob("*.prod.*", "web.prod.example.com")"#,
+            TriVal::Bool(true),
+        ),
+        (
+            r#"glob("*.prod.*", "web.staging.example.com")"#,
+            TriVal::Bool(false),
+        ),
         (r#"matches("abc123", "^[a-z]+[0-9]+$")"#, TriVal::Bool(true)),
         (r#""abc".matches("[")"#, TriVal::Unknown),
         (r#"contains("abc", "b")"#, TriVal::Bool(true)),
@@ -498,10 +796,16 @@ fn operators_compute_over_known_values() {
         (r#"["a"] + ["b"]"#, strings(&["a", "b"], true)),
         (r#""a" + 1"#, TriVal::Unknown),
         (r#"size("ls")"#, TriVal::Int(2)),
-        (r#"true ? (false ? "a" : "b") : "c""#, TriVal::String("b".into())),
+        (
+            r#"true ? (false ? "a" : "b") : "c""#,
+            TriVal::String("b".into()),
+        ),
         ("x ? 1 : 2", TriVal::Unknown),
         (r#"xs.filter(a, a != "-la")"#, strings(&["ls", "/"], true)),
-        (r#"xs.map(a, a == "-la" ? "long" : a)"#, strings(&["ls", "long", "/"], true)),
+        (
+            r#"xs.map(a, a == "-la" ? "long" : a)"#,
+            strings(&["ls", "long", "/"], true),
+        ),
     ];
     for (expr, want) in rows {
         assert_eq!(eval_cel_with(expr, &ctx), want, "{expr}");

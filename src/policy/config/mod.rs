@@ -17,7 +17,8 @@ use super::Decision;
 use super::grammar::Grammars;
 use super::rules::{self, RuleSet};
 pub use format::{
-    ArgumentConfig, ContextConfig, GrammarConfig, ParserConfig, ParserName, PolicyConfig, RuleConfig, parse_config,
+    ArgumentConfig, ContextConfig, GrammarConfig, ParserConfig, ParserName, PolicyConfig,
+    RuleConfig, parse_config,
 };
 
 // --- Types ---
@@ -130,12 +131,13 @@ impl PolicyEngine {
         let engine_clone = engine.clone();
         let cwd_clone = project_cwd.clone();
 
-        let mut watcher =
-            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
+        let mut watcher = notify::recommended_watcher(
+            move |res: Result<notify::Event, notify::Error>| match res {
                 Ok(_event) => engine_clone.check_reload(cwd_clone.as_deref()),
                 Err(e) => tracing::warn!("File watch error: {}", e),
-            })
-            .ok()?;
+            },
+        )
+        .ok()?;
 
         let home_dir = engine.home_path.parent()?;
         if home_dir.exists()
@@ -144,8 +146,10 @@ impl PolicyEngine {
             tracing::warn!("Failed to watch {}: {}", home_dir.display(), e);
         }
 
-        if let Some(project_dir) =
-            project_cwd.as_deref().and_then(project_config_path).and_then(|p| p.parent().map(Path::to_path_buf))
+        if let Some(project_dir) = project_cwd
+            .as_deref()
+            .and_then(project_config_path)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
             && let Err(e) = watcher.watch(&project_dir, RecursiveMode::NonRecursive)
         {
             tracing::warn!("Failed to watch {}: {}", project_dir.display(), e);
@@ -196,7 +200,10 @@ fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
         Err(err) => {
             tracing::error!("Policy did not load: {}", err);
             CompiledPolicy {
-                rules: RuleSet { rules: Vec::new(), default: Decision::Ask },
+                rules: RuleSet {
+                    rules: Vec::new(),
+                    default: Decision::Ask,
+                },
                 grammars: Grammars::default(),
                 remote_grammars: Grammars::default(),
                 project_dirs: vec![".".into()],
@@ -215,7 +222,9 @@ fn load_sources(project_root: Option<&Path>) -> Result<Vec<Source>, String> {
     let project = project_root.map(|root| root.join(".claude").join("tmux-mcp.toml"));
     for (path, is_project) in [(Some(home_config_path()), false), (project, true)] {
         let Some(path) = path else { continue };
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let config = parse_config(&content).map_err(|e| format!("{}: {e}", path.display()))?;
         sources.push(Source { config, is_project });
     }
@@ -224,8 +233,12 @@ fn load_sources(project_root: Option<&Path>) -> Result<Vec<Source>, String> {
 
 fn compile_sources(sources: &[Source]) -> Result<Compiled, String> {
     let grammars = Grammars::compile(sources.iter().map(|s| &s.config.commands))?;
-    let remote_grammars =
-        Grammars::compile(sources.iter().filter(|s| !s.is_project).map(|s| &s.config.commands))?;
+    let remote_grammars = Grammars::compile(
+        sources
+            .iter()
+            .filter(|s| !s.is_project)
+            .map(|s| &s.config.commands),
+    )?;
 
     let default = sources
         .iter()
@@ -243,7 +256,12 @@ fn compile_sources(sources: &[Source]) -> Result<Compiled, String> {
     // reply names the first, built-in before home before project.
     let rules: Vec<(RuleConfig, bool)> = sources
         .iter()
-        .flat_map(|s| s.config.rules.iter().map(move |r| (r.clone(), s.is_project)))
+        .flat_map(|s| {
+            s.config
+                .rules
+                .iter()
+                .map(move |r| (r.clone(), s.is_project))
+        })
         .collect();
     let rules = rules::compile(&rules, default, &grammars)?;
 

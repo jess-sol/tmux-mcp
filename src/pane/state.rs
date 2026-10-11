@@ -1,5 +1,4 @@
 /// Structured pane state — the queryable output of the parsing pipeline.
-
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -103,7 +102,10 @@ impl TerminalState {
     /// Look up a leaf PID in the OSC 133 cache.
     /// Returns Some(true) if confirmed, Some(false) if failed, None if unknown.
     pub fn osc133_lookup(&self, pid: u32) -> Option<bool> {
-        self.osc133_cache.iter().find(|(p, _)| *p == pid).map(|(_, v)| *v)
+        self.osc133_cache
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, v)| *v)
     }
 
     /// Mark a leaf PID as having working OSC 133.
@@ -153,7 +155,9 @@ impl TerminalState {
     /// The command still running, if any: it ends at its D marker, or at its B
     /// marker when no D arrives.
     pub fn running_command(&self) -> Option<&CommandRecord> {
-        self.commands.front().filter(|c| !c.completed && !c.output_done)
+        self.commands
+            .front()
+            .filter(|c| !c.completed && !c.output_done)
     }
 
     /// Get a mutable ref to the active command.

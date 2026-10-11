@@ -8,14 +8,21 @@
 /// `system`, `getline`, `|` (pipes and `||` alike), `>` (redirects and
 /// comparisons alike) or `@` (gawk's `@include`, `@load` and indirect calls).
 pub fn awk_is_plain(program: &str) -> bool {
-    !["system", "getline", "|", ">", "@"].iter().any(|s| program.contains(s))
+    !["system", "getline", "|", ">", "@"]
+        .iter()
+        .any(|s| program.contains(s))
 }
 
 /// True when a GNU sed script holds only commands that touch no file and
 /// run nothing: no `e`, `r`, `R`, `w`, `W`, no `s///e` or `s///w`, and
 /// nothing this reader does not know.
 pub fn sed_is_plain(script: &str) -> bool {
-    Sed { chars: script.chars().collect(), at: 0 }.plain().is_some()
+    Sed {
+        chars: script.chars().collect(),
+        at: 0,
+    }
+    .plain()
+    .is_some()
 }
 
 // --- sed ---
@@ -30,7 +37,9 @@ impl Sed {
     fn plain(&mut self) -> Option<()> {
         loop {
             self.skip(|c| c.is_whitespace() || c == ';');
-            let Some(c) = self.peek() else { return Some(()) };
+            let Some(c) = self.peek() else {
+                return Some(());
+            };
             if c == '#' {
                 self.skip(|c| c != '\n');
                 continue;
@@ -92,7 +101,8 @@ impl Sed {
 
     fn command(&mut self) -> Option<()> {
         match self.next()? {
-            '}' | '=' | 'd' | 'D' | 'g' | 'G' | 'h' | 'H' | 'n' | 'N' | 'p' | 'P' | 'x' | 'z' | 'F' => {}
+            '}' | '=' | 'd' | 'D' | 'g' | 'G' | 'h' | 'H' | 'n' | 'N' | 'p' | 'P' | 'x' | 'z'
+            | 'F' => {}
             'l' | 'q' | 'Q' | 'L' => {
                 self.skip(|c| c == ' ' || c == '\t');
                 self.skip(|c| c.is_ascii_digit());

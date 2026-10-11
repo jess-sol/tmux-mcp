@@ -139,11 +139,16 @@ struct Exempted {
 /// Compiles rules, each paired with whether it comes from the project:
 /// checks what each reads against the grammars, and resolves the ids that
 /// each exempts across all sources.
-pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Grammars) -> Result<RuleSet, String> {
+pub fn compile(
+    configs: &[(RuleConfig, bool)],
+    default: Decision,
+    grammars: &Grammars,
+) -> Result<RuleSet, String> {
     let mut rules: Vec<CompiledRule> = configs
         .iter()
         .map(|(config, is_project)| {
-            compile::rule(config, *is_project, grammars).map_err(|e| format!("rule `{}`: {e}", config.id))
+            compile::rule(config, *is_project, grammars)
+                .map_err(|e| format!("rule `{}`: {e}", config.id))
         })
         .collect::<Result<_, _>>()?;
     let ids = compile::ids(&rules)?;
@@ -171,14 +176,30 @@ pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Gra
 /// match gives the default.
 /// The decision of the rules that match `cmd`, with their reasons; None when
 /// no rule matches.
-pub(crate) fn evaluate(cmd: &CommandInfo, line: &str, env: &Env, rules: &RuleSet) -> (Option<Decision>, Vec<String>) {
+pub(crate) fn evaluate(
+    cmd: &CommandInfo,
+    line: &str,
+    env: &Env,
+    rules: &RuleSet,
+) -> (Option<Decision>, Vec<String>) {
     decide(rules, &Facts::of(cmd, line, env), env)
 }
 
 /// Evaluates the CEL of a grammar's `with` key over `vars`. `home(u)` gives
 /// `home` when `u` is the command's own user.
-pub(crate) fn eval_with(expr: &cel::IdedExpr, vars: HashMap<String, TriVal>, home: TriVal) -> TriVal {
-    eval_expr(&expr.expr, &Ctx { vars, site: None, home })
+pub(crate) fn eval_with(
+    expr: &cel::IdedExpr,
+    vars: HashMap<String, TriVal>,
+    home: TriVal,
+) -> TriVal {
+    eval_expr(
+        &expr.expr,
+        &Ctx {
+            vars,
+            site: None,
+            home,
+        },
+    )
 }
 
 // --- Deciding ---
@@ -190,7 +211,10 @@ impl Facts {
             _ => None,
         };
         let list = |paths: &TriVal| match paths {
-            TriVal::List { elements, exhaustive } => (elements.clone(), *exhaustive),
+            TriVal::List {
+                elements,
+                exhaustive,
+            } => (elements.clone(), *exhaustive),
             _ => (vec![TriVal::Unknown], false),
         };
         let (mut paths, reads_exhaustive) = list(&cmd.reads);
@@ -216,9 +240,20 @@ impl Facts {
                 TriVal::List { elements, .. } => elements.clone(),
                 _ => vec![TriVal::Unknown],
             },
-            args: TriVal::Map(cmd.args.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
-            paths: TriVal::List { elements: paths, exhaustive: reads_exhaustive && writes_exhaustive },
-            writes: TriVal::List { elements: writes, exhaustive: writes_exhaustive },
+            args: TriVal::Map(
+                cmd.args
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+            paths: TriVal::List {
+                elements: paths,
+                exhaustive: reads_exhaustive && writes_exhaustive,
+            },
+            writes: TriVal::List {
+                elements: writes,
+                exhaustive: writes_exhaustive,
+            },
             dir: as_dir(&cmd.cwd),
             variables: cmd.variables.clone(),
             host,
@@ -234,22 +269,38 @@ impl Facts {
 fn place(cmd: &CommandInfo) -> HashMap<String, TriVal> {
     let text = |s: &str| TriVal::String(s.to_string());
     let op = |o: &Option<String>| o.as_deref().map_or(TriVal::Null, text);
-    let strings = |items: Vec<TriVal>| TriVal::List { elements: items, exhaustive: true };
-    let range = |(start, end): (usize, usize)| strings(vec![TriVal::Int(start as i64), TriVal::Int(end as i64)]);
+    let strings = |items: Vec<TriVal>| TriVal::List {
+        elements: items,
+        exhaustive: true,
+    };
+    let range = |(start, end): (usize, usize)| {
+        strings(vec![TriVal::Int(start as i64), TriVal::Int(end as i64)])
+    };
     HashMap::from([
         ("text".to_string(), text(&cmd.text)),
         ("top".to_string(), TriVal::Bool(cmd.top)),
         ("op_before".to_string(), op(&cmd.op_before)),
         ("op_after".to_string(), op(&cmd.op_after)),
         ("constant".to_string(), TriVal::Bool(cmd.constant)),
-        ("expands".to_string(), strings(cmd.expands.iter().map(|e| text(e)).collect())),
-        ("redirects".to_string(), strings(cmd.redirects.iter().map(|r| text(&r.text)).collect())),
+        (
+            "expands".to_string(),
+            strings(cmd.expands.iter().map(|e| text(e)).collect()),
+        ),
+        (
+            "redirects".to_string(),
+            strings(cmd.redirects.iter().map(|r| text(&r.text)).collect()),
+        ),
         ("cwd".to_string(), cmd.cwd.clone()),
         ("shell_cwd".to_string(), cmd.context.cwd.clone()),
         (CUT.to_string(), range(cmd.cut)),
         (
             REDIRECT_CUTS.to_string(),
-            strings(cmd.redirects.iter().map(|r| strings(vec![text(&r.text), range(r.cut)])).collect()),
+            strings(
+                cmd.redirects
+                    .iter()
+                    .map(|r| strings(vec![text(&r.text), range(r.cut)]))
+                    .collect(),
+            ),
         ),
     ])
 }
@@ -263,7 +314,11 @@ pub(super) const REDIRECT_CUTS: &str = "@redirect_cuts";
 /// and the reason of each rule at that action, in rule order. No match
 /// gives the default.
 fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Option<Decision>, Vec<String>) {
-    let meetings: Vec<Meeting> = rules.rules.iter().map(|rule| meet(rule, facts, env)).collect();
+    let meetings: Vec<Meeting> = rules
+        .rules
+        .iter()
+        .map(|rule| meet(rule, facts, env))
+        .collect();
     let exempted = exemptions(rules, &meetings, facts);
     let matched: Vec<(&CompiledRule, Match)> = rules
         .rules
@@ -271,12 +326,23 @@ fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Option<Decision>, Vec<S
         .zip(&meetings)
         .zip(&exempted)
         .filter(|(_, exempted)| !exempted.whole)
-        .filter_map(|((rule, meeting), exempted)| Some((rule, rule_match(rule, meeting.truth(&exempted.paths))?)))
+        .filter_map(|((rule, meeting), exempted)| {
+            Some((rule, rule_match(rule, meeting.truth(&exempted.paths))?))
+        })
         .collect();
-    let Some(decision) = matched.iter().map(|(rule, _)| &rule.action).max_by_key(|a| super::severity(a)).cloned() else {
+    let Some(decision) = matched
+        .iter()
+        .map(|(rule, _)| &rule.action)
+        .max_by_key(|a| super::severity(a))
+        .cloned()
+    else {
         return (None, Vec::new());
     };
-    let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
+    let site = Site {
+        env,
+        dir: facts.dir.as_deref(),
+        host: &facts.host,
+    };
     let reasons = matched
         .into_iter()
         .filter(|(rule, _)| rule.action == decision)
@@ -296,16 +362,24 @@ fn exemptions(rules: &RuleSet, meetings: &[Meeting], facts: &Facts) -> Vec<Exemp
         _ => Vec::new(),
     };
     for action in [Decision::Allow, Decision::Ask] {
-        for (i, rule) in rules.rules.iter().enumerate().filter(|(_, r)| r.action == action) {
+        for (i, rule) in rules
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.action == action)
+        {
             let own = exempted[i].clone();
             if own.whole || meetings[i].truth(&own.paths) != TriBool::True {
                 continue;
             }
             for &target in &rule.exempts {
                 if rules.rules[target].is_per_path() {
-                    let sure = paths.iter().filter(|p| !own.paths.contains(**p) && meetings[i].sure_on(p));
+                    let sure = paths
+                        .iter()
+                        .filter(|p| !own.paths.contains(**p) && meetings[i].sure_on(p));
                     exempted[target].paths.extend(sure.map(|p| p.to_string()));
-                } else if !rule.is_per_path() || own.paths.is_empty() && meetings[i].sure_on_every() {
+                } else if !rule.is_per_path() || own.paths.is_empty() && meetings[i].sure_on_every()
+                {
                     exempted[target].whole = true;
                 }
             }
@@ -326,9 +400,17 @@ fn rule_match(rule: &CompiledRule, truth: TriBool) -> Option<Match> {
 /// How `rule` meets the command: every key but `path` and `write` judged on
 /// the command, and those two judged on each path.
 fn meet(rule: &CompiledRule, facts: &Facts, env: &Env) -> Meeting {
-    let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
+    let site = Site {
+        env,
+        dir: facts.dir.as_deref(),
+        host: &facts.host,
+    };
     // On another *Channel* the rule is False, so it neither matches nor exempts.
-    let mut command = if rule.via.is_some_and(|via| via != env.via) { TriBool::False } else { host_match(rule, facts, env) };
+    let mut command = if rule.via.is_some_and(|via| via != env.via) {
+        TriBool::False
+    } else {
+        host_match(rule, facts, env)
+    };
     if command != TriBool::False {
         command = command.and(user_match(rule, facts));
     }
@@ -338,8 +420,15 @@ fn meet(rule: &CompiledRule, facts: &Facts, env: &Env) -> Meeting {
     if let (Some(when), false) = (&rule.when, command == TriBool::False) {
         command = command.and(eval_expr(&when.expr, &when_ctx(rule, facts, site)).is_truthy());
     }
-    let judge = |key: &Option<cel::IdedExpr>, paths: &TriVal| key.as_ref().map(|expr| PathTruths::judge(expr, paths, site));
-    Meeting { command, path: judge(&rule.path, &facts.paths), write: judge(&rule.write, &facts.writes) }
+    let judge = |key: &Option<cel::IdedExpr>, paths: &TriVal| {
+        key.as_ref()
+            .map(|expr| PathTruths::judge(expr, paths, site))
+    };
+    Meeting {
+        command,
+        path: judge(&rule.path, &facts.paths),
+        write: judge(&rule.write, &facts.writes),
+    }
 }
 
 impl CompiledRule {
@@ -363,7 +452,10 @@ impl Meeting {
     /// Every key surely holds on the command and on `path`.
     fn sure_on(&self, path: &str) -> bool {
         self.command == TriBool::True
-            && [&self.path, &self.write].into_iter().flatten().all(|key| key.at(path) == TriBool::True)
+            && [&self.path, &self.write]
+                .into_iter()
+                .flatten()
+                .all(|key| key.at(path) == TriBool::True)
     }
 
     /// Every key surely holds on the command and on every path of an
@@ -379,18 +471,32 @@ impl Meeting {
 
 impl PathTruths {
     fn judge(expr: &cel::IdedExpr, paths: &TriVal, site: Site) -> PathTruths {
-        let TriVal::List { elements, exhaustive } = paths else {
-            return PathTruths { each: Vec::new(), exhaustive: false };
+        let TriVal::List {
+            elements,
+            exhaustive,
+        } = paths
+        else {
+            return PathTruths {
+                each: Vec::new(),
+                exhaustive: false,
+            };
         };
         let each = elements
             .iter()
             .map(|path| {
                 let vars = HashMap::from([("path".to_string(), path.clone())]);
-                let ctx = Ctx { vars, site: Some(site), home: TriVal::Unknown };
+                let ctx = Ctx {
+                    vars,
+                    site: Some(site),
+                    home: TriVal::Unknown,
+                };
                 (path.clone(), eval_expr(&expr.expr, &ctx).is_truthy())
             })
             .collect();
-        PathTruths { each, exhaustive: *exhaustive }
+        PathTruths {
+            each,
+            exhaustive: *exhaustive,
+        }
     }
 
     /// True when the key holds for any path but the exempted ones; over a
@@ -406,12 +512,19 @@ impl PathTruths {
                 return truth;
             }
         }
-        if self.exhaustive { truth } else { TriBool::Unknown }
+        if self.exhaustive {
+            truth
+        } else {
+            TriBool::Unknown
+        }
     }
 
     /// The key on `path`; False for a path it does not judge.
     fn at(&self, path: &str) -> TriBool {
-        self.each.iter().find(|(p, _)| text(p) == Some(path)).map_or(TriBool::False, |(_, t)| *t)
+        self.each
+            .iter()
+            .find(|(p, _)| text(p) == Some(path))
+            .map_or(TriBool::False, |(_, t)| *t)
     }
 }
 
@@ -453,7 +566,11 @@ fn user_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
 
 /// `expr` over the one variable `name`.
 fn eval_on(expr: &cel::IdedExpr, name: &str, value: TriVal) -> TriBool {
-    let ctx = Ctx { vars: HashMap::from([(name.to_string(), value)]), site: None, home: TriVal::Unknown };
+    let ctx = Ctx {
+        vars: HashMap::from([(name.to_string(), value)]),
+        site: None,
+        home: TriVal::Unknown,
+    };
     eval_expr(&expr.expr, &ctx).is_truthy()
 }
 
@@ -462,7 +579,9 @@ fn eval_on(expr: &cel::IdedExpr, name: &str, value: TriVal) -> TriBool {
 /// name: spelling a tool as a path can turn its deny into an ask, never
 /// gain an allow.
 fn command_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
-    let Some(path) = &rule.command else { return TriBool::True };
+    let Some(path) = &rule.command else {
+        return TriBool::True;
+    };
     if facts.relative && !path[0].starts_with("./") {
         return TriBool::False;
     }
@@ -476,7 +595,11 @@ fn command_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
 
 fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
     let depth = rule.command.as_ref().map_or(0, |c| c.len() - 1);
-    let subcommand = facts.subcommands.get(depth).cloned().unwrap_or(TriVal::Null);
+    let subcommand = facts
+        .subcommands
+        .get(depth)
+        .cloned()
+        .unwrap_or(TriVal::Null);
     let mut command = facts.place.clone();
     command.insert("name".to_string(), facts.identity.clone());
     let vars = HashMap::from([
@@ -486,7 +609,11 @@ fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
         ("variables".to_string(), facts.variables.clone()),
         ("line".to_string(), TriVal::String(facts.line.clone())),
     ]);
-    Ctx { vars, site: Some(site), home: TriVal::Unknown }
+    Ctx {
+        vars,
+        site: Some(site),
+        home: TriVal::Unknown,
+    }
 }
 
 /// The reason starts with the rule's id, the name an *Exemption* uses, then

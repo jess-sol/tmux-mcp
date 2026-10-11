@@ -8,8 +8,8 @@ use std::path::{Component, Path};
 use cel_parser::ast as cel;
 
 use super::eval::UNKNOWN;
-use super::{CompiledRule, Part};
 use super::identity::normalize;
+use super::{CompiledRule, Part};
 use crate::policy::Decision;
 use crate::policy::config::RuleConfig;
 use crate::policy::grammar::Grammars;
@@ -22,7 +22,11 @@ pub(crate) struct Refs {
     pub(crate) args: BTreeSet<String>,
 }
 
-pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -> Result<CompiledRule, String> {
+pub(super) fn rule(
+    config: &RuleConfig,
+    is_project: bool,
+    grammars: &Grammars,
+) -> Result<CompiledRule, String> {
     if !is_id(&config.id) {
         return Err("an id is lowercase words joined by `-`".into());
     }
@@ -46,8 +50,18 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
         Part::Text(_) => None,
     });
 
-    let keys = [("when", &when), ("path", &path), ("write", &write), ("host", &host), ("user", &user)];
-    for (key, expr) in keys.into_iter().filter_map(|(key, expr)| Some((key, expr.as_ref()?))).chain(holes) {
+    let keys = [
+        ("when", &when),
+        ("path", &path),
+        ("write", &write),
+        ("host", &host),
+        ("user", &user),
+    ];
+    for (key, expr) in keys
+        .into_iter()
+        .filter_map(|(key, expr)| Some((key, expr.as_ref()?)))
+        .chain(holes)
+    {
         let refs = Refs::of(&expr.expr);
         if refs.idents.contains("path") && !matches!(key, "path" | "write") {
             return Err("`path` is only for the `path` and `write` keys".into());
@@ -59,7 +73,9 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
         }
         let reads_parts = refs.idents.contains("args") || refs.idents.contains("subcommand");
         match (&declared, &command) {
-            (None, _) if reads_parts => return Err("`args` and `subcommand` need a `command`".into()),
+            (None, _) if reads_parts => {
+                return Err("`args` and `subcommand` need a `command`".into());
+            }
             (Some(names), Some(command)) => {
                 if let Some(name) = refs.args.iter().find(|n| !names.contains(*n)) {
                     let names: Vec<_> = names.iter().map(String::as_str).collect();
@@ -120,23 +136,37 @@ pub(super) fn ids(rules: &[CompiledRule]) -> Result<HashMap<&str, usize>, String
 
 /// The rule that rule `i` exempts as `id`: one that exists, is stricter,
 /// and is judged per path only if rule `i` is too.
-pub(super) fn exemption(rules: &[CompiledRule], i: usize, id: &str, ids: &HashMap<&str, usize>) -> Result<usize, String> {
+pub(super) fn exemption(
+    rules: &[CompiledRule],
+    i: usize,
+    id: &str,
+    ids: &HashMap<&str, usize>,
+) -> Result<usize, String> {
     let Some(&target) = ids.get(id) else {
         return Err(format!("`exempts` names `{id}`, which no rule has"));
     };
     let (rule, exempted) = (&rules[i], &rules[target]);
     if crate::policy::severity(&exempted.action) <= crate::policy::severity(&rule.action) {
-        return Err(format!("`{id}` is not stricter: an allow exempts asks and denies, an ask exempts denies"));
+        return Err(format!(
+            "`{id}` is not stricter: an allow exempts asks and denies, an ask exempts denies"
+        ));
     }
     if exempted.is_per_path() && !rule.is_per_path() {
-        return Err(format!("`{id}` is judged per path, so the rule that exempts it needs `path` or `write`"));
+        return Err(format!(
+            "`{id}` is judged per path, so the rule that exempts it needs `path` or `write`"
+        ));
     }
     Ok(target)
 }
 
 fn is_id(id: &str) -> bool {
     !id.is_empty()
-        && id.split('-').all(|word| !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+        && id.split('-').all(|word| {
+            !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
 }
 
 /// cel-parser panics on some malformed input (`@@`), so a panic is a parse
@@ -154,11 +184,19 @@ pub(crate) fn parse_cel(text: &str) -> Result<cel::IdedExpr, String> {
 /// subcommand words.
 fn command_path(command: &str) -> Result<Vec<String>, String> {
     let mut words: Vec<String> = command.split_whitespace().map(String::from).collect();
-    let Some(first) = words.first_mut() else { return Err("`command` is empty".into()) };
+    let Some(first) = words.first_mut() else {
+        return Err("`command` is empty".into());
+    };
     if first.contains('/') {
-        let rest = first.strip_prefix("./").filter(|r| Path::new(r).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)));
+        let rest = first.strip_prefix("./").filter(|r| {
+            Path::new(r)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        });
         let Some(rest) = rest else {
-            return Err(format!("`{first}`: a rule's `command` starts with a bare name or a `./` path"));
+            return Err(format!(
+                "`{first}`: a rule's `command` starts with a bare name or a `./` path"
+            ));
         };
         *first = format!("./{}", normalize(Path::new(rest)).display());
     }
@@ -174,7 +212,9 @@ impl Refs {
 
     fn walk(&mut self, expr: &cel::Expr, bound: &mut Vec<String>) {
         match expr {
-            cel::Expr::Ident(name) if !bound.contains(name) && name != UNKNOWN => _ = self.idents.insert(name.clone()),
+            cel::Expr::Ident(name) if !bound.contains(name) && name != UNKNOWN => {
+                _ = self.idents.insert(name.clone())
+            }
             cel::Expr::Select(s) => match &s.operand.expr {
                 cel::Expr::Ident(name) if name == "args" && !bound.contains(name) => {
                     self.idents.insert(name.clone());

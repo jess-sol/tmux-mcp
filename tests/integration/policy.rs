@@ -145,7 +145,10 @@ async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
 
     assert_eq!(got, want);
     let (_, reason) = h.bash("cd src && cargo build").unwrap();
-    assert!(reason.starts_with("prefer-tmux") && reason.contains("command_run"), "{reason}");
+    assert!(
+        reason.starts_with("prefer-tmux") && reason.contains("command_run"),
+        "{reason}"
+    );
     assert_eq!(h.other_tool(), None);
 }
 
@@ -367,7 +370,11 @@ async fn a_policy_that_does_not_load_denies_every_command() {
     let mended = h.decision(&shell, "ls");
 
     assert_eq!(refused.0, Deny);
-    assert!(refused.1.contains("commands.deploy") && refused.1.contains("parser"), "{}", refused.1);
+    assert!(
+        refused.1.contains("commands.deploy") && refused.1.contains("parser"),
+        "{}",
+        refused.1
+    );
     assert_eq!(mended, Allow);
 }
 
@@ -394,7 +401,11 @@ async fn a_command_is_named_by_its_path_from_the_project_root() {
     let got_at_root = at_root.map(|(command, _)| (command, h.decision(&shell, command)));
 
     h.run(&shell, "cd sub").await;
-    let in_sub = [("../scripts/bench", Allow), ("./scripts/bench", Ask), ("ls ..", Allow)];
+    let in_sub = [
+        ("../scripts/bench", Allow),
+        ("./scripts/bench", Ask),
+        ("ls ..", Allow),
+    ];
     let got_in_sub = in_sub.map(|(command, _)| (command, h.decision(&shell, command)));
 
     assert_eq!(got_at_root, at_root);
@@ -573,9 +584,20 @@ async fn a_sibling_directory_is_outside_the_project() {
 }
 
 const LINTS: [&str; 14] = [
-    "pipe-to-tail", "pipe-to-head", "pipe-to-grep", "pipe-to-egrep", "pipe-to-fgrep", "pipe-to-rg",
-    "pipe-to-tee", "echo-status", "echo-status-alone", "constant-echo", "constant-success-echo",
-    "stderr-to-stdout", "background", "redundant-cd",
+    "pipe-to-tail",
+    "pipe-to-head",
+    "pipe-to-grep",
+    "pipe-to-egrep",
+    "pipe-to-fgrep",
+    "pipe-to-rg",
+    "pipe-to-tee",
+    "echo-status",
+    "echo-status-alone",
+    "constant-echo",
+    "constant-success-echo",
+    "stderr-to-stdout",
+    "background",
+    "redundant-cd",
 ];
 
 /// The test inputs of the lints that were Rust code: each line a lint
@@ -585,7 +607,10 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     let dir = h.dir().display().to_string();
-    let (cd_dir, cd_dir_slash) = (format!("cd {dir} && cargo test"), format!("cd {dir}/ && cargo test"));
+    let (cd_dir, cd_dir_slash) = (
+        format!("cd {dir} && cargo test"),
+        format!("cd {dir}/ && cargo test"),
+    );
     let cd_alone = format!("cd {dir}");
     let rows: Vec<(&str, Option<&str>)> = vec![
         ("ls | tail -5", Some("tail=5")),
@@ -608,10 +633,19 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
         ("ls | tee out.txt", Some("command_run(command=\"ls\")")),
         ("tee output.log", None),
         ("make | tee build.log | wc -l", None),
-        ("helmfile -e localsync; echo \"HELMFILE_EXIT=$?\"", Some("command_run(command=\"helmfile -e localsync\")")),
+        (
+            "helmfile -e localsync; echo \"HELMFILE_EXIT=$?\"",
+            Some("command_run(command=\"helmfile -e localsync\")"),
+        ),
         ("make; echo $?", Some("command_run(command=\"make\")")),
-        ("cargo test && echo \"rc=$?\"", Some("command_run(command=\"cargo test\")")),
-        ("helmfile -e localsync 2>&1; echo \"HELMFILE_EXIT=$?\"", Some("command_run(command=\"helmfile -e localsync 2>&1\")")),
+        (
+            "cargo test && echo \"rc=$?\"",
+            Some("command_run(command=\"cargo test\")"),
+        ),
+        (
+            "helmfile -e localsync 2>&1; echo \"HELMFILE_EXIT=$?\"",
+            Some("command_run(command=\"helmfile -e localsync 2>&1\")"),
+        ),
         ("make; printf 'exit %d\\n' $?", Some("echo-status")),
         ("make; echo \"${?}\"", Some("echo-status")),
         ("echo $?", Some("command_history")),
@@ -623,7 +657,10 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
         ("make; [ $? -eq 0 ] && echo \"$msg\"", None),
         ("make; RC=$?; echo $RC", None),
         ("echo \"=== Building ===\"", Some("constant text")),
-        ("echo \"Building\"; cargo build", Some("Marker:    echo \"Building\"")),
+        (
+            "echo \"Building\"; cargo build",
+            Some("Marker:    echo \"Building\""),
+        ),
         ("cargo build; echo done", Some("constant-echo")),
         ("echo \"start\" && cargo build", Some("constant-echo")),
         ("printf '=== %s ===\\n' Building", Some("constant-echo")),
@@ -645,7 +682,9 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
         ("cargo build && echo ok", Some("exit code")),
         (
             "cargo update -p microlp && cargo build 2>/dev/null; cargo build --quiet && echo BUILD_OK",
-            Some("command_run(command=\"cargo update -p microlp && cargo build 2>/dev/null; cargo build --quiet\")"),
+            Some(
+                "command_run(command=\"cargo update -p microlp && cargo build 2>/dev/null; cargo build --quiet\")",
+            ),
         ),
         ("cargo build || echo failed", None),
         ("cargo build && echo \"$RESULT\"", None),
@@ -675,8 +714,14 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
     for (command, want) in rows {
         let (decision, reason) = h.hook(&shell, command);
         match want {
-            Some(text) => assert!(decision == Deny && reason.contains(text), "{command}: {decision:?} {reason}"),
-            None => assert!(!LINTS.iter().any(|id| reason.contains(id)), "{command}: {reason}"),
+            Some(text) => assert!(
+                decision == Deny && reason.contains(text),
+                "{command}: {decision:?} {reason}"
+            ),
+            None => assert!(
+                !LINTS.iter().any(|id| reason.contains(id)),
+                "{command}: {reason}"
+            ),
         }
     }
 }

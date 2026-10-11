@@ -1,5 +1,4 @@
 /// RPC method dispatch and handlers.
-
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -23,15 +22,24 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn method_not_found(method: &str) -> Self {
-        Self { code: -32601, message: format!("Unknown method: {}", method) }
+        Self {
+            code: -32601,
+            message: format!("Unknown method: {}", method),
+        }
     }
 
     pub fn invalid_params(msg: impl Into<String>) -> Self {
-        Self { code: -32602, message: msg.into() }
+        Self {
+            code: -32602,
+            message: msg.into(),
+        }
     }
 
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self { code: -32603, message: msg.into() }
+        Self {
+            code: -32603,
+            message: msg.into(),
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -79,9 +87,9 @@ fn resolve_caller_window(registry: &PaneRegistry, params: &Value) -> Result<Stri
     registry
         .window_for_pane(origin_pane)
         .map(|w| w.to_string())
-        .ok_or_else(|| RpcError::invalid_params(format!(
-            "Origin pane {} not tracked by daemon", origin_pane
-        )))
+        .ok_or_else(|| {
+            RpcError::invalid_params(format!("Origin pane {} not tracked by daemon", origin_pane))
+        })
 }
 
 /// Validate that a target pane belongs to the caller's window.
@@ -128,25 +136,30 @@ impl ReadParams {
             ));
         }
 
-        let search = if let Some(pattern) = params["search"].as_str() {
-            Some(
-                regex::Regex::new(pattern)
-                    .map_err(|e| RpcError::invalid_params(format!("invalid search regex: {}", e)))?,
-            )
-        } else {
-            None
-        };
+        let search =
+            if let Some(pattern) = params["search"].as_str() {
+                Some(regex::Regex::new(pattern).map_err(|e| {
+                    RpcError::invalid_params(format!("invalid search regex: {}", e))
+                })?)
+            } else {
+                None
+            };
 
         let before = params["before"].as_u64().unwrap_or(0) as usize;
         let after = params["after"].as_u64().unwrap_or(0) as usize;
 
         if (before > 0 || after > 0) && search.is_none() {
-            return Err(RpcError::invalid_params(
-                "before and after require search",
-            ));
+            return Err(RpcError::invalid_params("before and after require search"));
         }
 
-        Ok(Self { next, head, tail, search, before, after })
+        Ok(Self {
+            next,
+            head,
+            tail,
+            search,
+            before,
+            after,
+        })
     }
 }
 
@@ -155,7 +168,7 @@ struct ReadResult {
     lines: Vec<String>,
     total_lines: usize,
     skipped: usize,
-    matched: Option<usize>,  // number of search matches (if search was used)
+    matched: Option<usize>, // number of search matches (if search was used)
     /// The last selected match's after-context runs past the whole lines so far.
     context_pending: bool,
 }
@@ -219,8 +232,10 @@ fn apply_read_params(
     // The terminal adds `\r` to each `\n`, and shells injected with an older
     // PS0 line send readline's `\x01`/`\x02` markers; neither is the command's.
     let text = output.replace(['\x01', '\x02'], "");
-    let all_lines: Vec<String> =
-        text.split_terminator('\n').map(|line| line.trim_end_matches('\r').to_string()).collect();
+    let all_lines: Vec<String> = text
+        .split_terminator('\n')
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect();
     let total_lines = all_lines.len();
     let consumable = if output_done || text.ends_with('\n') {
         total_lines
@@ -228,7 +243,9 @@ fn apply_read_params(
         total_lines.saturating_sub(1)
     };
     let context_pending = |selected: &[usize]| {
-        selected.last().is_some_and(|&m| params.after > 0 && m + params.after >= consumable)
+        selected
+            .last()
+            .is_some_and(|&m| params.after > 0 && m + params.after >= consumable)
     };
 
     if let Some(re) = &params.search {
@@ -251,20 +268,31 @@ fn apply_read_params(
             let matched = match_indices.len();
 
             let lines = if has_context {
-                let ranges = merge_context_ranges(&match_indices, params.before, params.after, total_lines);
+                let ranges =
+                    merge_context_ranges(&match_indices, params.before, params.after, total_lines);
                 let display_end = ranges.last().map(|(_, e)| e + 1).unwrap_or(start + scanned);
                 *cursor = (start + scanned).max(display_end).min(consumable);
                 collect_context_lines(&all_lines, &ranges)
             } else {
                 *cursor = start + scanned;
-                match_indices.iter().map(|&i| all_lines[i].clone()).collect()
+                match_indices
+                    .iter()
+                    .map(|&i| all_lines[i].clone())
+                    .collect()
             };
 
             let context_pending = context_pending(&match_indices);
-            ReadResult { lines, total_lines, skipped: start, matched: Some(matched), context_pending }
+            ReadResult {
+                lines,
+                total_lines,
+                skipped: start,
+                matched: Some(matched),
+                context_pending,
+            }
         } else {
             // head/tail/bare: collect all match indices, then window.
-            let all_match_indices: Vec<usize> = all_lines.iter()
+            let all_match_indices: Vec<usize> = all_lines
+                .iter()
                 .enumerate()
                 .filter(|(_, l)| re.is_match(l))
                 .map(|(i, _)| i)
@@ -292,14 +320,28 @@ fn apply_read_params(
             };
 
             let lines = if has_context {
-                let ranges = merge_context_ranges(selected_indices, params.before, params.after, total_lines);
+                let ranges = merge_context_ranges(
+                    selected_indices,
+                    params.before,
+                    params.after,
+                    total_lines,
+                );
                 collect_context_lines(&all_lines, &ranges)
             } else {
-                selected_indices.iter().map(|&i| all_lines[i].clone()).collect()
+                selected_indices
+                    .iter()
+                    .map(|&i| all_lines[i].clone())
+                    .collect()
             };
 
             let context_pending = context_pending(selected_indices);
-            ReadResult { lines, total_lines, skipped, matched: Some(total_matches), context_pending }
+            ReadResult {
+                lines,
+                total_lines,
+                skipped,
+                matched: Some(total_matches),
+                context_pending,
+            }
         }
     } else {
         // No search: window raw lines.
@@ -324,7 +366,13 @@ fn apply_read_params(
             *cursor = consumable;
             (all_lines, 0)
         };
-        ReadResult { lines: selected, total_lines, skipped, matched: None, context_pending: false }
+        ReadResult {
+            lines: selected,
+            total_lines,
+            skipped,
+            matched: None,
+            context_pending: false,
+        }
     }
 }
 
@@ -384,7 +432,8 @@ async fn wait_and_read(
                 // D ends the output and carries the exit code; B follows only
                 // once the next prompt is drawn.
                 if cmd.completed || cmd.output_done {
-                    let result = apply_read_params(&cmd.output, true, &mut cmd.read_cursor, read_params);
+                    let result =
+                        apply_read_params(&cmd.output, true, &mut cmd.read_cursor, read_params);
                     return Ok(json!({
                         "command_id": cmd.id,
                         "command": cmd.command,
@@ -435,7 +484,8 @@ async fn wait_and_read(
                 }
             } else if let Some(id) = command_id {
                 return Err(RpcError::invalid_params(format!(
-                    "Command {} not found", id
+                    "Command {} not found",
+                    id
                 )));
             } else {
                 return Err(RpcError::invalid_params("No commands in history"));
@@ -474,7 +524,12 @@ async fn wait_and_read(
                 pane_state.commands.front_mut()
             };
             if let Some(cmd) = cmd {
-                let result = apply_read_params(&cmd.output, cmd.output_done, &mut cmd.read_cursor, read_params);
+                let result = apply_read_params(
+                    &cmd.output,
+                    cmd.output_done,
+                    &mut cmd.read_cursor,
+                    read_params,
+                );
                 return Ok(json!({
                     "command_id": cmd.id,
                     "command": cmd.command,
@@ -512,7 +567,11 @@ fn get_leaf_pid(shell_pid: u32) -> u32 {
 /// ignoring the blank rows below it.
 fn capture_screen(ps: &crate::pane::registry::PaneState, lines: usize) -> String {
     let all_lines = ps.processor.screen_text();
-    let end = all_lines.iter().rposition(|l| !l.is_empty()).map(|i| i + 1).unwrap_or(0);
+    let end = all_lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let start = end.saturating_sub(lines);
     all_lines[start..end].join("\n")
 }
@@ -592,10 +651,7 @@ struct PaneEntry {
     osc133_status: String,
 }
 
-async fn handle_list_panes(
-    params: &Value,
-    state: &Arc<DaemonState>,
-) -> Result<Value, RpcError> {
+async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let handles = {
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
@@ -621,8 +677,10 @@ async fn handle_list_panes(
         let (process_cwd, foreground) = if let Some(pid) = ps.pid {
             let info = proc::proc_info(pid);
             (
-                info.as_ref().and_then(|i| i.cwd.as_ref().map(|p| p.display().to_string())),
-                info.as_ref().and_then(|i| i.foreground.as_ref().map(|f| f.comm.clone())),
+                info.as_ref()
+                    .and_then(|i| i.cwd.as_ref().map(|p| p.display().to_string())),
+                info.as_ref()
+                    .and_then(|i| i.foreground.as_ref().map(|f| f.comm.clone())),
             )
         } else {
             (None, None)
@@ -654,7 +712,11 @@ async fn handle_list_panes(
             osc_cwd: term_state.cwd.clone(),
             osc_user: term_state.user.clone(),
             osc_hostname: term_state.hostname.as_ref().and_then(|h: &String| {
-                if h == &local_hostname { None } else { Some(h.clone()) }
+                if h == &local_hostname {
+                    None
+                } else {
+                    Some(h.clone())
+                }
             }),
             foreground,
             activity: format!("{:?}", term_state.activity),
@@ -684,7 +746,8 @@ async fn handle_command_history(
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        registry.get_handle(pane_id)
+        registry
+            .get_handle(pane_id)
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
@@ -693,7 +756,12 @@ async fn handle_command_history(
     let entries: Vec<Value> = cmds
         .iter()
         .map(|cmd| {
-            let line_count = cmd.output.strip_suffix('\n').unwrap_or(&cmd.output).lines().count();
+            let line_count = cmd
+                .output
+                .strip_suffix('\n')
+                .unwrap_or(&cmd.output)
+                .lines()
+                .count();
             json!({
                 "command_id": cmd.id,
                 "command": cmd.command,
@@ -706,10 +774,7 @@ async fn handle_command_history(
     Ok(json!(entries))
 }
 
-async fn handle_command_read(
-    params: &Value,
-    state: &Arc<DaemonState>,
-) -> Result<Value, RpcError> {
+async fn handle_command_read(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
@@ -722,18 +787,23 @@ async fn handle_command_read(
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        registry.get_handle(pane_id)
+        registry
+            .get_handle(pane_id)
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
-    wait_and_read(&pane_handle, command_id, &read_params, deadline, BareReadPolicy::ReturnNow).await
+    wait_and_read(
+        &pane_handle,
+        command_id,
+        &read_params,
+        deadline,
+        BareReadPolicy::ReturnNow,
+    )
+    .await
 }
 
-async fn handle_command_run(
-    params: &Value,
-    state: &Arc<DaemonState>,
-) -> Result<Value, RpcError> {
+async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
@@ -750,11 +820,13 @@ async fn handle_command_run(
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        let handle = registry.get_handle(pane_id)
+        let handle = registry
+            .get_handle(pane_id)
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
         let pid = {
             let tp = handle.lock().await;
-            tp.pid.ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+            tp.pid
+                .ok_or_else(|| RpcError::internal("Pane has no known PID"))?
         };
         (handle, pid)
     };
@@ -766,16 +838,20 @@ async fn handle_command_run(
         match result.decision {
             policy::Decision::Allow => { /* proceed */ }
             policy::Decision::Deny => {
-                return Err(RpcError { code: -32001, message: result.rule });
+                return Err(RpcError {
+                    code: -32001,
+                    message: result.rule,
+                });
             }
             // *Passthrough* comes only from the Bash *Channel*.
             policy::Decision::Ask | policy::Decision::Passthrough => {
                 let live_ctx = read_pane_context(state, pane_id).await?;
-                let verify = state
-                    .approvals
-                    .lock()
-                    .await
-                    .verify_and_consume(origin_pane, pane_id, command, &live_ctx);
+                let verify = state.approvals.lock().await.verify_and_consume(
+                    origin_pane,
+                    pane_id,
+                    command,
+                    &live_ctx,
+                );
                 if let Err(msg) = verify {
                     return Err(RpcError {
                         code: -32001,
@@ -869,7 +945,10 @@ async fn handle_command_run(
             // Known failed — instant reject
             let tp = pane_handle.lock().await;
             let screen = capture_screen(&tp, 20);
-            let marker_secs = tp.processor.state().last_osc133_marker
+            let marker_secs = tp
+                .processor
+                .state()
+                .last_osc133_marker
                 .map(|t| t.elapsed().as_secs_f64());
             return Err(RpcError::internal(format!(
                 "OSC 133 not active for this pane. Use inject_osc133 to enable shell integration.\n\nosc133_last_marker_secs: {:?}\n\nScreen:\n{}",
@@ -906,7 +985,12 @@ async fn handle_command_run(
     // Snapshot the front command ID so we can wait for a *new* record
     let id_before = {
         let tp = pane_handle.lock().await;
-        tp.processor.state().commands.front().map(|c| c.id).unwrap_or(0)
+        tp.processor
+            .state()
+            .commands
+            .front()
+            .map(|c| c.id)
+            .unwrap_or(0)
     };
 
     {
@@ -933,7 +1017,10 @@ async fn handle_command_run(
                 }
             }
             if tokio::time::Instant::now() >= marker_deadline {
-                tracing::warn!("OSC 133 markers not seen after sending command to pane {}", pane_id);
+                tracing::warn!(
+                    "OSC 133 markers not seen after sending command to pane {}",
+                    pane_id
+                );
                 let mut tp = pane_handle.lock().await;
                 tp.processor.state_mut().osc133_fail(leaf_pid);
                 let screen = capture_screen(&tp, 20);
@@ -965,10 +1052,7 @@ async fn handle_command_run(
     .await
 }
 
-async fn handle_capture_pane(
-    params: &Value,
-    state: &Arc<DaemonState>,
-) -> Result<Value, RpcError> {
+async fn handle_capture_pane(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
@@ -979,7 +1063,8 @@ async fn handle_capture_pane(
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        registry.get_handle(pane_id)
+        registry
+            .get_handle(pane_id)
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
@@ -1009,10 +1094,7 @@ pub const OSC133_INJECT_LINES: &[&str] = &[
     " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\e]133;C\\e\\\\'",
 ];
 
-async fn handle_inject_osc133(
-    params: &Value,
-    state: &Arc<DaemonState>,
-) -> Result<Value, RpcError> {
+async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
@@ -1022,11 +1104,13 @@ async fn handle_inject_osc133(
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        let handle = registry.get_handle(pane_id)
+        let handle = registry
+            .get_handle(pane_id)
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
         let pid = {
             let tp = handle.lock().await;
-            tp.pid.ok_or_else(|| RpcError::internal("Pane has no known PID"))?
+            tp.pid
+                .ok_or_else(|| RpcError::internal("Pane has no known PID"))?
         };
         (handle, pid)
     };
@@ -1072,13 +1156,11 @@ async fn handle_inject_osc133(
 }
 
 /// The key names press_key's schema documents; they skip its length cap.
-const KEY_NAMES: &[&str] =
-    &["Enter", "Escape", "BSpace", "Tab", "Space", "Up", "Down", "Left", "Right", "C-c", "C-d", "C-z"];
+const KEY_NAMES: &[&str] = &[
+    "Enter", "Escape", "BSpace", "Tab", "Space", "Up", "Down", "Left", "Right", "C-c", "C-d", "C-z",
+];
 
-async fn handle_send_keys(
-    params: &Value,
-    state: &Arc<DaemonState>,
-) -> Result<Value, RpcError> {
+async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
@@ -1106,7 +1188,8 @@ async fn handle_send_keys(
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        registry.get_handle(pane_id)
+        registry
+            .get_handle(pane_id)
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
@@ -1125,7 +1208,10 @@ async fn handle_send_keys(
     // second for a key that changes nothing.
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
     while pane_view(&*pane_handle.lock().await) == before {
-        if !matches!(tokio::time::timeout_at(deadline, rx.changed()).await, Ok(Ok(()))) {
+        if !matches!(
+            tokio::time::timeout_at(deadline, rx.changed()).await,
+            Ok(Ok(()))
+        ) {
             break;
         }
     }
@@ -1205,7 +1291,9 @@ async fn handle_request_approval(
         policy::Decision::Allow => Ok(json!({"result": "allow", "rule": result.rule})),
         policy::Decision::Deny => {
             let mut resp = json!({"result": "deny", "rule": result.rule});
-            resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
+            resp.as_object_mut()
+                .unwrap()
+                .extend(ctx_json.as_object().unwrap().clone());
             Ok(resp)
         }
         // *Passthrough* comes only from the Bash *Channel*.
@@ -1216,7 +1304,9 @@ async fn handle_request_approval(
                 .await
                 .store(&origin_pane, pane_id, command, &ctx);
             let mut resp = json!({"result": "ask", "rule": result.rule});
-            resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
+            resp.as_object_mut()
+                .unwrap()
+                .extend(ctx_json.as_object().unwrap().clone());
             Ok(resp)
         }
     }

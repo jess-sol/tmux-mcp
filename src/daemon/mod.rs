@@ -3,7 +3,6 @@
 /// and reacting to topology changes via layout-change events.
 ///
 /// Also runs a Unix socket server for RPC clients (MCP servers).
-
 pub mod rpc;
 pub mod server;
 
@@ -30,9 +29,7 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
 
     // Bootstrap: discover all existing panes in one query
     let output = commands
-        .execute(
-            "list-panes -s -F '#{window_id}\t#{pane_id}\t#{pane_pid}\t#{window_layout}'",
-        )
+        .execute("list-panes -s -F '#{window_id}\t#{pane_id}\t#{pane_pid}\t#{window_layout}'")
         .await?;
     let (windows, panes) = parse_bootstrap(&output);
 
@@ -132,7 +129,9 @@ async fn event_loop(
                     let registry = state.registry.read().await;
                     registry.get_handle(&pane_id)
                 };
-                let Some(handle) = handle else { continue; };
+                let Some(handle) = handle else {
+                    continue;
+                };
                 {
                     let mut tp = handle.lock().await;
                     let bytes = unescape_tmux_output(&data);

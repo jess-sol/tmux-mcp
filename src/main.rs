@@ -33,10 +33,7 @@ async fn main() {
         Some(Commands::Daemon) => {
             // Daemon mode: logs to stderr
             tracing_subscriber::registry()
-                .with(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info")),
-                )
+                .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                 .init();
 
@@ -48,10 +45,7 @@ async fn main() {
         None => {
             // MCP server mode: logs to stderr, MCP protocol on stdio
             tracing_subscriber::registry()
-                .with(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("warn")),
-                )
+                .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                 .init();
 
@@ -85,7 +79,12 @@ fn check_bash(input: &serde_json::Value) {
     let command = input["tool_input"]["command"].as_str().unwrap_or("");
     let cwd = input["cwd"].as_str().map(str::to_string);
     let engine = policy::PolicyEngine::new(cwd.as_deref());
-    let ctx = policy::PaneContext { hostname: None, cwd, foreground: None, user: std::env::var("USER").ok() };
+    let ctx = policy::PaneContext {
+        hostname: None,
+        cwd,
+        foreground: None,
+        user: std::env::var("USER").ok(),
+    };
     let result = policy::evaluate(command, &ctx, policy::Via::Bash, &engine);
     match result.decision {
         policy::Decision::Passthrough => {}
@@ -95,7 +94,9 @@ fn check_bash(input: &serde_json::Value) {
     }
 }
 
-async fn check_command_run(tool_input: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+async fn check_command_run(
+    tool_input: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
     let pane_id = tool_input["pane_id"].as_str().unwrap_or("");
     let command = tool_input["command"].as_str().unwrap_or("");
 
@@ -160,12 +161,15 @@ async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
 
     let session = TmuxSession::from_env()?;
 
-    let origin_pane = std::env::var("TMUX_PANE")
-        .map_err(|_| -> Box<dyn std::error::Error> {
-            "TMUX_PANE not set — are you inside a tmux session?".into()
-        })?;
+    let origin_pane = std::env::var("TMUX_PANE").map_err(|_| -> Box<dyn std::error::Error> {
+        "TMUX_PANE not set — are you inside a tmux session?".into()
+    })?;
 
-    tracing::info!("Connecting to daemon for session {}, origin pane {}", session, origin_pane);
+    tracing::info!(
+        "Connecting to daemon for session {}, origin pane {}",
+        session,
+        origin_pane
+    );
     let client = tmux_mcp::client::DaemonClient::connect(&session).await?;
 
     let server = tmux_mcp::mcp::TmuxMcp::new(client, origin_pane);

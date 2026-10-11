@@ -7,10 +7,10 @@
 //! parses them into parts as the walker reaches it (`walker`). The walker
 //! gives each command its context and resolves every path it touches.
 
-mod walker;
-mod word;
 #[cfg(test)]
 mod tests;
+mod walker;
+mod word;
 
 use std::collections::BTreeMap;
 
@@ -107,23 +107,35 @@ pub struct ParseError {
 pub(crate) enum Word {
     Known(String),
     /// Expanded at run time. `splits` when it can become several words, or none.
-    Unknown { splits: bool },
+    Unknown {
+        splits: bool,
+    },
 }
 
 // --- Public API ---
 
 /// Parse a command string into the flat list of commands it runs, the first
 /// in `start`. A shell line that an *Inner command* runs must parse too.
-pub fn parse_command(command: &str, grammars: &Grammars, start: &Context) -> Result<Vec<CommandInfo>, ParseError> {
+pub fn parse_command(
+    command: &str,
+    grammars: &Grammars,
+    start: &Context,
+) -> Result<Vec<CommandInfo>, ParseError> {
     walker::walk(command, &parse_with_brush(command)?, grammars, start)
 }
 
 /// `line` without the bytes `start..end`; the spaces left at the cut
 /// collapse to one.
 pub(crate) fn cut(line: &str, (start, end): (usize, usize)) -> String {
-    let (Some(left), Some(right)) = (line.get(..start), line.get(end..)) else { return line.to_string() };
+    let (Some(left), Some(right)) = (line.get(..start), line.get(end..)) else {
+        return line.to_string();
+    };
     let (left, right) = (left.trim_end(), right.trim_start());
-    if left.is_empty() || right.is_empty() { format!("{left}{right}") } else { format!("{left} {right}") }
+    if left.is_empty() || right.is_empty() {
+        format!("{left}{right}")
+    } else {
+        format!("{left} {right}")
+    }
 }
 
 // --- brush-parser integration ---
@@ -136,5 +148,7 @@ fn parse_with_brush(command: &str) -> Result<ast::Program, ParseError> {
         &brush_parser::ParserOptions::default(),
         &brush_parser::SourceInfo::default(),
     );
-    parser.parse_program().map_err(|e| ParseError { message: format!("{}", e) })
+    parser.parse_program().map_err(|e| ParseError {
+        message: format!("{}", e),
+    })
 }

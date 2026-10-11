@@ -1,12 +1,11 @@
+use alacritty_terminal::Term;
 /// Pane processor: owns a headless alacritty terminal instance and
 /// processes byte chunks with OSC boundary splitting for synchronized
 /// metadata extraction. Integrates the OSC 133 state machine for
 /// structured command tracking.
-
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config;
-use alacritty_terminal::Term;
 use vte::ansi::Processor;
 
 use crate::pane::osc::{OscEvent, OscMatch, find_next_osc_from};
@@ -165,10 +164,17 @@ impl PaneProcessor {
         let (cursor_line, cursor_col) = self.cursor_position();
         (start_line..=cursor_line).any(|line| {
             let from = if line == start_line { start_col } else { 0 };
-            let to = if line == cursor_line { cursor_col } else { usize::MAX };
+            let to = if line == cursor_line {
+                cursor_col
+            } else {
+                usize::MAX
+            };
             // One char per column, as in `read_input`.
             let text = self.screen_line_text(line);
-            text.chars().skip(from).take(to.saturating_sub(from)).any(|c| !c.is_whitespace())
+            text.chars()
+                .skip(from)
+                .take(to.saturating_sub(from))
+                .any(|c| !c.is_whitespace())
         })
     }
 
@@ -371,8 +377,20 @@ mod tests {
         let mut p = PaneProcessor::new(24, 80);
         let events = p.process_chunk(b"\x1b]133;A\x07$ \x1b]133;B\x07");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'A', param: None });
-        assert_eq!(events[1].event, OscEvent::Osc133 { marker: b'B', param: None });
+        assert_eq!(
+            events[0].event,
+            OscEvent::Osc133 {
+                marker: b'A',
+                param: None
+            }
+        );
+        assert_eq!(
+            events[1].event,
+            OscEvent::Osc133 {
+                marker: b'B',
+                param: None
+            }
+        );
     }
 
     #[test]
@@ -382,7 +400,13 @@ mod tests {
         let events = p.process_chunk(b"ls -la\x1b]133;C\x07");
         assert_eq!(p.screen_line_text(0), "$ ls -la");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'C', param: None });
+        assert_eq!(
+            events[0].event,
+            OscEvent::Osc133 {
+                marker: b'C',
+                param: None
+            }
+        );
     }
 
     #[test]
@@ -401,7 +425,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].event,
-            OscEvent::Osc7 { uri: "file://myhost/home/user".to_string() }
+            OscEvent::Osc7 {
+                uri: "file://myhost/home/user".to_string()
+            }
         );
         // State should be updated
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
@@ -484,7 +510,7 @@ mod tests {
 
         // E arrives first, then C with cmdline_url — E wins
         p.process_chunk(
-            b"echo correct\x1b]133;E;echo correct\x1b\\\x1b]133;C;cmdline_url=wrong\x1b\\"
+            b"echo correct\x1b]133;E;echo correct\x1b\\\x1b]133;C;cmdline_url=wrong\x1b\\",
         );
         p.process_chunk(b"\r\ncorrect\r\n\x1b]133;D;0\x1b\\");
         p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
@@ -524,7 +550,11 @@ mod tests {
 
         if let Osc133Phase::Executing { command } = p.osc133_phase() {
             assert!(command.contains("echo hello"), "command: {:?}", command);
-            assert!(!command.contains("\x1b"), "should not contain raw escapes: {:?}", command);
+            assert!(
+                !command.contains("\x1b"),
+                "should not contain raw escapes: {:?}",
+                command
+            );
         } else {
             panic!("Expected Executing");
         }
@@ -904,5 +934,4 @@ mod tests {
             panic!("Expected Executing");
         }
     }
-
 }

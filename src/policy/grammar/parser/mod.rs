@@ -34,9 +34,12 @@ pub(super) struct Scan {
 impl Parser {
     pub(super) fn from(config: &ParserConfig) -> Parser {
         match config {
-            ParserConfig::Name(name) => {
-                Parser { name: *name, leading_number: None, number: None, short_equals: false }
-            }
+            ParserConfig::Name(name) => Parser {
+                name: *name,
+                leading_number: None,
+                number: None,
+                short_equals: false,
+            },
             ParserConfig::Settings(s) => Parser {
                 name: s.name,
                 leading_number: s.leading_number.clone(),
@@ -58,10 +61,20 @@ impl Parser {
     }
 
     /// Reads the option word `text`: matched exactly, never by prefix.
-    pub(super) fn option(&self, text: &str, rest: &[Word], at_start: bool, active: &[&Opt], scan: &mut Scan, run: &mut Run) -> Read {
+    pub(super) fn option(
+        &self,
+        text: &str,
+        rest: &[Word],
+        at_start: bool,
+        active: &[&Opt],
+        scan: &mut Scan,
+        run: &mut Run,
+    ) -> Read {
         match self.name {
             ParserName::Find => find::option(text, rest, active, scan, run),
-            ParserName::Gnu | ParserName::Posix => gnu::option(self, text, rest, at_start, active, scan, run),
+            ParserName::Gnu | ParserName::Posix => {
+                gnu::option(self, text, rest, at_start, active, scan, run)
+            }
         }
     }
 

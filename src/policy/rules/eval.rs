@@ -44,8 +44,15 @@ pub(super) fn eval_expr(expr: &cel::Expr, ctx: &Ctx) -> TriVal {
             eval_field_access(&obj, &select.field)
         }
         cel::Expr::List(list) => {
-            let elements: Vec<TriVal> = list.elements.iter().map(|e| eval_expr(&e.expr, ctx)).collect();
-            TriVal::List { elements, exhaustive: true }
+            let elements: Vec<TriVal> = list
+                .elements
+                .iter()
+                .map(|e| eval_expr(&e.expr, ctx))
+                .collect();
+            TriVal::List {
+                elements,
+                exhaustive: true,
+            }
         }
         cel::Expr::Call(call) => eval_call(call, ctx),
         cel::Expr::Comprehension(comp) => eval_comprehension(comp, ctx),
@@ -56,9 +63,16 @@ pub(super) fn eval_expr(expr: &cel::Expr, ctx: &Ctx) -> TriVal {
 pub(super) fn tri_eq(a: &TriVal, b: &TriVal) -> TriBool {
     match (a, b) {
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriBool::Unknown,
-        (TriVal::List { elements: xs, exhaustive: x_ex }, TriVal::List { elements: ys, exhaustive: y_ex }) => {
-            list_eq(xs, *x_ex, ys, *y_ex)
-        }
+        (
+            TriVal::List {
+                elements: xs,
+                exhaustive: x_ex,
+            },
+            TriVal::List {
+                elements: ys,
+                exhaustive: y_ex,
+            },
+        ) => list_eq(xs, *x_ex, ys, *y_ex),
         // A list holds more than one value, so it equals no single one, and
         // a rule that compares them is unsure what it means.
         (TriVal::List { .. }, _) | (_, TriVal::List { .. }) => TriBool::Unknown,
@@ -111,8 +125,12 @@ fn eval_call(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
         "_?_:_" => eval_ternary(&call.args, ctx),
         "size" => eval_size(call, ctx),
         "in_project" => eval_path_fn(call, ctx, in_project),
-        "is_device" => eval_path_fn(call, ctx, |path, _| TriBool::of(path.starts_with("/dev")).to_trival()),
-        "path" => eval_path_fn(call, ctx, |path, _| TriVal::String(path.to_string_lossy().into_owned())),
+        "is_device" => eval_path_fn(call, ctx, |path, _| {
+            TriBool::of(path.starts_with("/dev")).to_trival()
+        }),
+        "path" => eval_path_fn(call, ctx, |path, _| {
+            TriVal::String(path.to_string_lossy().into_owned())
+        }),
         "awk_is_plain" => eval_string_test(call, ctx, programs::awk_is_plain),
         "sed_is_plain" => eval_string_test(call, ctx, programs::sed_is_plain),
         "last" => eval_last(call, ctx),
@@ -155,7 +173,9 @@ fn eval_eq(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
 
 fn eval_ne(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
     let [a, b] = args else { return TriVal::Unknown };
-    tri_eq(&eval_expr(&a.expr, ctx), &eval_expr(&b.expr, ctx)).not().to_trival()
+    tri_eq(&eval_expr(&a.expr, ctx), &eval_expr(&b.expr, ctx))
+        .not()
+        .to_trival()
 }
 
 fn eval_cmp(args: &[cel::IdedExpr], ctx: &Ctx, op: fn(i64, i64) -> bool) -> TriVal {
@@ -194,16 +214,28 @@ fn eval_not(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
 // --- Membership operator ---
 
 fn eval_in(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
-    let [needle, haystack] = args else { return TriVal::Unknown };
+    let [needle, haystack] = args else {
+        return TriVal::Unknown;
+    };
     let needle = eval_expr(&needle.expr, ctx);
     match (&needle, eval_expr(&haystack.expr, ctx)) {
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
-        (_, TriVal::List { elements, exhaustive }) => {
+        (
+            _,
+            TriVal::List {
+                elements,
+                exhaustive,
+            },
+        ) => {
             let mut truth = TriBool::False;
             for elem in &elements {
                 truth = truth.or(tri_eq(&needle, elem));
             }
-            if truth == TriBool::False && !exhaustive { TriVal::Unknown } else { truth.to_trival() }
+            if truth == TriBool::False && !exhaustive {
+                TriVal::Unknown
+            } else {
+                truth.to_trival()
+            }
         }
         (TriVal::String(key), TriVal::Map(map)) => TriVal::Bool(map.contains_key(key.as_str())),
         _ => TriVal::Unknown,
@@ -214,7 +246,10 @@ fn eval_in(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
 
 fn eval_comprehension(comp: &cel::ComprehensionExpr, ctx: &Ctx) -> TriVal {
     let (elements, exhaustive) = match eval_expr(&comp.iter_range.expr, ctx) {
-        TriVal::List { elements, exhaustive } => (elements, exhaustive),
+        TriVal::List {
+            elements,
+            exhaustive,
+        } => (elements, exhaustive),
         _ => return TriVal::Unknown,
     };
 
@@ -269,7 +304,9 @@ fn one_operand(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
 fn string_test(a: TriVal, b: TriVal, test: impl Fn(&str, &str) -> Option<bool>) -> TriVal {
     match (a, b) {
         (TriVal::Unknown, _) | (_, TriVal::Unknown) => TriVal::Unknown,
-        (TriVal::String(a), TriVal::String(b)) => test(&a, &b).map_or(TriVal::Unknown, TriVal::Bool),
+        (TriVal::String(a), TriVal::String(b)) => {
+            test(&a, &b).map_or(TriVal::Unknown, TriVal::Bool)
+        }
         _ => TriVal::Bool(false),
     }
 }
@@ -277,7 +314,9 @@ fn string_test(a: TriVal, b: TriVal, test: impl Fn(&str, &str) -> Option<bool>) 
 /// `glob(pattern, text)` or `pattern.glob(text)`.
 fn eval_glob(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
     let (pattern, text) = two_operands(call, ctx);
-    string_test(pattern, text, |p, t| Some(globset::Glob::new(p).is_ok_and(|g| g.compile_matcher().is_match(t))))
+    string_test(pattern, text, |p, t| {
+        Some(globset::Glob::new(p).is_ok_and(|g| g.compile_matcher().is_match(t)))
+    })
 }
 
 fn eval_contains(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
@@ -293,7 +332,9 @@ fn eval_starts_with(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
 /// `matches(text, regex)` or `text.matches(regex)`; an invalid regex is Unknown.
 fn eval_matches(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
     let (text, regex) = two_operands(call, ctx);
-    string_test(text, regex, |t, r| regex::Regex::new(r).ok().map(|re| re.is_match(t)))
+    string_test(text, regex, |t, r| {
+        regex::Regex::new(r).ok().map(|re| re.is_match(t))
+    })
 }
 
 fn eval_string_test(call: &cel::CallExpr, ctx: &Ctx, test: fn(&str) -> bool) -> TriVal {
@@ -306,7 +347,9 @@ fn eval_string_test(call: &cel::CallExpr, ctx: &Ctx, test: fn(&str) -> bool) -> 
 /// A function of one resolved path. Null stays Null; a path that cannot be
 /// resolved, or a call with no paths to resolve against, is Unknown.
 fn eval_path_fn(call: &cel::CallExpr, ctx: &Ctx, f: fn(&Path, &Site) -> TriVal) -> TriVal {
-    let Some(site) = ctx.site else { return TriVal::Unknown };
+    let Some(site) = ctx.site else {
+        return TriVal::Unknown;
+    };
     match one_operand(call, ctx) {
         TriVal::String(word) => match resolve(&word, site.dir) {
             TriVal::String(p) => f(Path::new(&p), &site),
@@ -330,7 +373,9 @@ fn in_project(path: &Path, site: &Site) -> TriVal {
 /// end of one that may hold more.
 fn eval_last(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
     match one_operand(call, ctx) {
-        TriVal::List { exhaustive: false, .. } => TriVal::Unknown,
+        TriVal::List {
+            exhaustive: false, ..
+        } => TriVal::Unknown,
         TriVal::List { elements, .. } => elements.last().cloned().unwrap_or(TriVal::Null),
         TriVal::Null => TriVal::Null,
         _ => TriVal::Unknown,
@@ -341,17 +386,23 @@ fn eval_last(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
 /// it to its neighbour. `drop(command, r)`: the line without its redirect
 /// written `r`. Unknown for anything but a command of the line's own shell.
 fn eval_drop(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
-    let (Some(TriVal::String(line)), [command, redirect @ ..]) = (ctx.vars.get("line"), &call.args[..]) else {
+    let (Some(TriVal::String(line)), [command, redirect @ ..]) =
+        (ctx.vars.get("line"), &call.args[..])
+    else {
         return TriVal::Unknown;
     };
-    let TriVal::Map(command) = eval_expr(&command.expr, ctx) else { return TriVal::Unknown };
+    let TriVal::Map(command) = eval_expr(&command.expr, ctx) else {
+        return TriVal::Unknown;
+    };
     let range = match redirect {
         [] => command.get(CUT).cloned(),
         [r] => {
             let r = eval_expr(&r.expr, ctx);
             match command.get(REDIRECT_CUTS) {
                 Some(TriVal::List { elements, .. }) => elements.iter().find_map(|e| match e {
-                    TriVal::List { elements, .. } if elements.first() == Some(&r) => elements.get(1).cloned(),
+                    TriVal::List { elements, .. } if elements.first() == Some(&r) => {
+                        elements.get(1).cloned()
+                    }
                     _ => None,
                 }),
                 _ => None,
@@ -378,7 +429,9 @@ fn eval_destination(
     pick: for<'a> fn((Option<&'a str>, &'a str)) -> Option<&'a str>,
 ) -> TriVal {
     match one_operand(call, ctx) {
-        TriVal::String(d) => pick(destination(&d)).map_or(TriVal::Null, |s| TriVal::String(s.to_string())),
+        TriVal::String(d) => {
+            pick(destination(&d)).map_or(TriVal::Null, |s| TriVal::String(s.to_string()))
+        }
         TriVal::Null => TriVal::Null,
         _ => TriVal::Unknown,
     }
@@ -412,7 +465,10 @@ fn eval_home(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
 
 fn eval_size(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
     match one_operand(call, ctx) {
-        TriVal::List { elements, exhaustive: true } => TriVal::Int(elements.len() as i64),
+        TriVal::List {
+            elements,
+            exhaustive: true,
+        } => TriVal::Int(elements.len() as i64),
         TriVal::String(s) => TriVal::Int(s.len() as i64),
         _ => TriVal::Unknown,
     }
@@ -420,7 +476,9 @@ fn eval_size(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
 
 /// `cond ? then : else`
 fn eval_ternary(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
-    let [cond, then, otherwise] = args else { return TriVal::Unknown };
+    let [cond, then, otherwise] = args else {
+        return TriVal::Unknown;
+    };
     match eval_expr(&cond.expr, ctx).is_truthy() {
         TriBool::True => eval_expr(&then.expr, ctx),
         TriBool::False => eval_expr(&otherwise.expr, ctx),
@@ -433,9 +491,21 @@ fn eval_add(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
     let [a, b] = args else { return TriVal::Unknown };
     match (eval_expr(&a.expr, ctx), eval_expr(&b.expr, ctx)) {
         (TriVal::Int(a), TriVal::Int(b)) => TriVal::Int(a + b),
-        (TriVal::List { elements: mut a, exhaustive: a_ex }, TriVal::List { elements: b, exhaustive: b_ex }) => {
+        (
+            TriVal::List {
+                elements: mut a,
+                exhaustive: a_ex,
+            },
+            TriVal::List {
+                elements: b,
+                exhaustive: b_ex,
+            },
+        ) => {
             a.extend(b);
-            TriVal::List { elements: a, exhaustive: a_ex && b_ex }
+            TriVal::List {
+                elements: a,
+                exhaustive: a_ex && b_ex,
+            }
         }
         _ => TriVal::Unknown,
     }
@@ -444,9 +514,17 @@ fn eval_add(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
 /// `list[index]`: past the end, Null on an exhaustive list and Unknown on a
 /// non-exhaustive one.
 fn eval_index(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
-    let [list, index] = args else { return TriVal::Unknown };
+    let [list, index] = args else {
+        return TriVal::Unknown;
+    };
     match (eval_expr(&list.expr, ctx), eval_expr(&index.expr, ctx)) {
-        (TriVal::List { elements, exhaustive }, TriVal::Int(i)) => match usize::try_from(i) {
+        (
+            TriVal::List {
+                elements,
+                exhaustive,
+            },
+            TriVal::Int(i),
+        ) => match usize::try_from(i) {
             Ok(i) if i < elements.len() => elements[i].clone(),
             Ok(_) if exhaustive => TriVal::Null,
             _ => TriVal::Unknown,
@@ -458,7 +536,9 @@ fn eval_index(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
 
 /// `or(val, fallback)` — null coalescing
 fn eval_or_func(args: &[cel::IdedExpr], ctx: &Ctx) -> TriVal {
-    let [val, fallback] = args else { return TriVal::Unknown };
+    let [val, fallback] = args else {
+        return TriVal::Unknown;
+    };
     match eval_expr(&val.expr, ctx) {
         TriVal::Null => eval_expr(&fallback.expr, ctx),
         val => val,
