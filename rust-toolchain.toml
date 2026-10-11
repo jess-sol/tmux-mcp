@@ -1,0 +1,13 @@
+# The single source of truth for this project's toolchain.
+#
+# Honoured by BOTH rustup (which installs and switches to this version inside
+# the checkout) and the flake's devShell and package (which read this file via
+# rust-overlay's `fromRustupToolchainFile`). Bump the version here and every
+# environment moves together; never pin the toolchain in flake.nix instead.
+# Kept on fern's channel, so both checkouts share one toolchain.
+#
+# `rust-src` and `rust-analyzer` are for editor integration.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]
+profile = "minimal"
