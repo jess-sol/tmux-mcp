@@ -125,6 +125,59 @@ async fn a_rule_with_via_counts_only_on_that_channel() {
     assert_eq!(got, (Allow, Deny));
 }
 
+/// A Bash call is judged without tmux; a line that is not explicitly
+/// allowed, asked or denied passes through to Claude Code's permissions.
+#[tokio::test]
+async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
+    let h = Harness::new().await;
+    let want = [
+        ("ls src", Some(Allow)),
+        ("ls && frobnicate", None),
+        ("frobnicate", None),
+        ("", None),
+        ("eval x", Some(Deny)),
+        ("git push --force origin main", Some(Ask)),
+        ("echo $(date) | tail -5", Some(Allow)),
+        ("cd src && cargo build", Some(Deny)),
+    ];
+
+    let got = want.map(|(command, _)| (command, h.bash(command).map(|(d, _)| d)));
+
+    assert_eq!(got, want);
+    let (_, reason) = h.bash("cd src && cargo build").unwrap();
+    assert!(reason.starts_with("prefer-tmux") && reason.contains("command_run"), "{reason}");
+    assert_eq!(h.other_tool(), None);
+}
+
+#[tokio::test]
+async fn a_project_exempts_prefer_tmux_for_bash() {
+    let h = Harness::new().await;
+    h.project_policy(
+        r#"
+        [[rules]]
+        id = "cargo-in-bash"
+        command = "cargo"
+        via = "bash"
+        action = "allow"
+        exempts = ["prefer-tmux"]
+        "#,
+    );
+
+    assert_eq!(h.bash("cargo build").map(|(d, _)| d), Some(Allow));
+    assert_eq!(h.bash("make").map(|(d, _)| d), Some(Deny));
+}
+
+#[tokio::test]
+async fn a_broken_policy_denies_a_bash_call() {
+    let h = Harness::new().await;
+    h.project_policy("[[rules]]\nid = \"x\"\n");
+
+    let (decision, reason) = h.bash("ls").unwrap();
+
+    assert_eq!(decision, Deny);
+    assert!(reason.contains("policy:load_error"), "{reason}");
+}
+
 #[tokio::test]
 async fn a_rule_reads_the_parts_its_grammar_names() {
     let h = Harness::new().await;

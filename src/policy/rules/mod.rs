@@ -169,7 +169,9 @@ pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Gra
 /// every rule at that action. Every rule that matches and is not exempted
 /// counts, and the strictest action wins: deny, then ask, then allow. No
 /// match gives the default.
-pub(crate) fn evaluate(cmd: &CommandInfo, line: &str, env: &Env, rules: &RuleSet) -> (Decision, Vec<String>) {
+/// The decision of the rules that match `cmd`, with their reasons; None when
+/// no rule matches.
+pub(crate) fn evaluate(cmd: &CommandInfo, line: &str, env: &Env, rules: &RuleSet) -> (Option<Decision>, Vec<String>) {
     decide(rules, &Facts::of(cmd, line, env), env)
 }
 
@@ -260,7 +262,7 @@ pub(super) const REDIRECT_CUTS: &str = "@redirect_cuts";
 /// The strictest action among the rules that match and are not exempted,
 /// and the reason of each rule at that action, in rule order. No match
 /// gives the default.
-fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Decision, Vec<String>) {
+fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Option<Decision>, Vec<String>) {
     let meetings: Vec<Meeting> = rules.rules.iter().map(|rule| meet(rule, facts, env)).collect();
     let exempted = exemptions(rules, &meetings, facts);
     let matched: Vec<(&CompiledRule, Match)> = rules
@@ -272,7 +274,7 @@ fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Decision, Vec<String>) 
         .filter_map(|((rule, meeting), exempted)| Some((rule, rule_match(rule, meeting.truth(&exempted.paths))?)))
         .collect();
     let Some(decision) = matched.iter().map(|(rule, _)| &rule.action).max_by_key(|a| super::severity(a)).cloned() else {
-        return (rules.default.clone(), vec!["default".to_string()]);
+        return (None, Vec::new());
     };
     let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
     let reasons = matched
@@ -280,7 +282,7 @@ fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> (Decision, Vec<String>) 
         .filter(|(rule, _)| rule.action == decision)
         .map(|(rule, how)| reason(rule, how, &when_ctx(rule, facts, site)))
         .collect();
-    (decision, reasons)
+    (Some(decision), reasons)
 }
 
 /// The *Exemption*s that apply, loosest rules first: allows exempt asks and

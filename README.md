@@ -157,7 +157,7 @@ Add to `~/.claude/settings.json` (merge with existing):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__tmux-mcp__command_run",
+        "matcher": "Bash|mcp__tmux-mcp__command_run",
         "hooks": [
           {
             "type": "command",
@@ -178,6 +178,7 @@ Add to `~/.claude/settings.json` (merge with existing):
   - Risky commands, and anything touching paths outside the project, trigger Claude Code's native approval prompt
   - Denied commands are blocked with a reason telling Claude what to do instead
   - Approvals are context-aware — if the pane's hostname, cwd, user, or foreground process changes between approval and execution, the approval is invalidated
+- **`Bash`** goes through the same hook and the same policy, judged in the hook itself, so it works outside tmux too (see step 5).
 - **`press_key`** is intentionally omitted. It's a potential bypass for command_run policy (type a command, press Enter). Claude Code prompts for each use.
 
 ### 4. Install the policy skill (optional)
@@ -199,26 +200,20 @@ This adds the `/tmux-policy` command, which writes a rule, a command grammar, or
 
 Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.toml` (project). Changes take effect on the next command.
 
-### 5. Steer Bash toward tmux (optional)
+### 5. Bash commands
 
-Claude Code's own Bash tool runs where you can't see it. A `PreToolUse` hook on `Bash` can turn away the commands you'd rather watch in a pane. Exit status 2 blocks the call and hands stderr to Claude. Save this as `~/.claude/hooks/prefer-tmux.sh` and make it executable:
+With `Bash` in the hook's matcher, the policy also judges Claude Code's own Bash tool. A line is allowed only when every command in it is; a line that no rule asks about or denies passes through to Claude Code's own permissions. Lints apply only to `command_run`.
 
-```sh
-#!/usr/bin/env bash
-cmd=$(jq -r '.tool_input.command')
-if grep -qE '^(cargo|make|npm|podman|kubectl)( |$)' <<<"$cmd"; then
-  echo "Run this in tmux with mcp__tmux-mcp__command_run so the user can watch it." >&2
-  exit 2
-fi
+The built-in `prefer-tmux` rule denies `cargo`, `make`, `npm`, `podman` and `kubectl` through Bash and tells Claude to run them in a pane you can watch. A rule with `via = "bash"` or `via = "tmux"` counts only there; to let one project run `cargo` through Bash:
+
+```toml
+[[rules]]
+id = "cargo-in-bash"
+command = "cargo"
+via = "bash"
+action = "allow"
+exempts = ["prefer-tmux"]
 ```
-
-Then add it beside the policy hook in `~/.claude/settings.json`:
-
-```json
-{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "~/.claude/hooks/prefer-tmux.sh" }] }
-```
-
-The match is on the line's first word only, so `cd x && cargo build` passes through.
 
 ### Without the hook (autonomous mode)
 

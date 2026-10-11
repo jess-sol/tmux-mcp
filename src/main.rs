@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use tmux_mcp::client::TmuxSession;
+use tmux_mcp::policy;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -62,17 +63,41 @@ async fn main() {
     }
 }
 
+/// The `PreToolUse` hook. A `command_run` call is judged by the daemon; a
+/// `Bash` call here, so it needs neither tmux nor the daemon. Any other tool,
+/// and a *Passthrough*, get no output: Claude Code's own permissions decide.
 async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
     let input: serde_json::Value = serde_json::from_reader(std::io::stdin())?;
-    let tool_input = &input["tool_input"];
+    let tool_name = input["tool_name"].as_str().unwrap_or("");
+    if tool_name == "Bash" {
+        check_bash(&input);
+        Ok(())
+    } else if tool_name.ends_with("__command_run") {
+        check_command_run(&input["tool_input"]).await
+    } else {
+        Ok(())
+    }
+}
 
+/// A Bash call starts from the payload's `cwd`, on this machine, as the
+/// shell's own user.
+fn check_bash(input: &serde_json::Value) {
+    let command = input["tool_input"]["command"].as_str().unwrap_or("");
+    let cwd = input["cwd"].as_str().map(str::to_string);
+    let engine = policy::PolicyEngine::new(cwd.as_deref());
+    let ctx = policy::PaneContext { hostname: None, cwd, foreground: None, user: std::env::var("USER").ok() };
+    let result = policy::evaluate(command, &ctx, policy::Via::Bash, &engine);
+    match result.decision {
+        policy::Decision::Passthrough => {}
+        policy::Decision::Allow => print_hook_response("allow", None),
+        policy::Decision::Ask => print_hook_response("ask", Some(&result.rule)),
+        policy::Decision::Deny => print_hook_response("deny", Some(&result.rule)),
+    }
+}
+
+async fn check_command_run(tool_input: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
     let pane_id = tool_input["pane_id"].as_str().unwrap_or("");
     let command = tool_input["command"].as_str().unwrap_or("");
-
-    if pane_id.is_empty() || command.is_empty() {
-        print_hook_response("allow", None); // let daemon handle validation
-        return Ok(());
-    }
 
     let session = TmuxSession::from_env()?;
     let origin_pane = std::env::var("TMUX_PANE").unwrap_or_default();

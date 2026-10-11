@@ -223,20 +223,52 @@ impl Harness {
 
     /// The hook's decision and its reason, which a deny shows to Claude.
     pub fn hook(&self, shell: &Shell, command: &str) -> (Decision, String) {
-        let mut hook = tmux_mcp(&self.env)
+        let input = json!({
+            "tool_name": "mcp__tmux-mcp__command_run",
+            "tool_input": {"pane_id": shell.pane, "command": command},
+        });
+        self.ask_hook(&self.env, input).expect("a decision for command_run")
+    }
+
+    /// Asks the hook about a Claude Code `Bash` call in the project, from
+    /// outside tmux. None: the hook leaves it to Claude Code's permissions.
+    pub fn bash(&self, command: &str) -> Option<(Decision, String)> {
+        let env: Vec<_> = self.env.iter().filter(|(name, _)| !name.starts_with("TMUX")).cloned().collect();
+        let input = json!({
+            "tool_name": "Bash",
+            "cwd": self.dir().to_str().expect("a UTF-8 project dir"),
+            "tool_input": {"command": command},
+        });
+        self.ask_hook(&env, input)
+    }
+
+    /// The hook's answer to a payload for any other tool: None.
+    pub fn other_tool(&self) -> Option<(Decision, String)> {
+        self.ask_hook(&self.env, json!({"tool_name": "Read", "tool_input": {"file_path": "x"}}))
+    }
+}
+
+impl Harness {
+    /// Runs `policy-check` on `input` under `env`. No output means no
+    /// decision.
+    fn ask_hook(&self, env: &[(&'static str, String)], input: Value) -> Option<(Decision, String)> {
+        let mut hook = tmux_mcp(env)
             .arg("policy-check")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("the tmux-mcp policy-check hook");
-        let input = json!({"tool_input": {"pane_id": shell.pane, "command": command}});
         hook.stdin
             .take()
             .expect("piped stdin")
             .write_all(input.to_string().as_bytes())
             .expect("hook input");
         let output = hook.wait_with_output().expect("the hook's answer");
+        assert!(output.status.success(), "hook failed: {}", String::from_utf8_lossy(&output.stderr));
+        if output.stdout.iter().all(u8::is_ascii_whitespace) {
+            return None;
+        }
         let answer: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|_| panic!("hook said {:?}", String::from_utf8_lossy(&output.stdout)));
         let answer = &answer["hookSpecificOutput"];
@@ -247,7 +279,7 @@ impl Harness {
             Some("deny") => Decision::Deny,
             other => panic!("hook decided {other:?}"),
         };
-        (decision, reason)
+        Some((decision, reason))
     }
 }
 

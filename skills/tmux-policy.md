@@ -222,6 +222,14 @@ exempts = ["cargo-install"]        # stricter rule ids that stop counting while 
 A rule with `via` counts only on that channel, where it neither matches nor exempts on the other;
 `via` is a plain string, not CEL.
 
+**The Bash channel:** with `Bash` in the hook's matcher, Claude Code's Bash calls meet the same
+rules, judged in the hook from the payload's `cwd` on this machine. A command no rule matches gets
+passthrough: the hook prints nothing and Claude Code's own permissions decide (`default` applies to
+tmux only). A line is the strictest of its commands, allow < passthrough < ask < deny, so a Bash line
+is allowed only when every command is. The built-in `prefer-tmux` denies `cargo`, `make`, `npm`,
+`podman` and `kubectl` through Bash; lift it per tool with an allow that has `via = "bash"` and
+`exempts = ["prefer-tmux"]`.
+
 Only `id` and `action` are required. A rule without `when`, `path`, `write`, `host` or `user`
 matches every command on its `command` path. A rule with `path` or `write` matches only through a
 path that satisfies the key: `write = 'true'` never matches `cat a`, only `cat a > b`.

@@ -1036,6 +1036,21 @@ Try:         command_run(command="{{ drop(command) }}")
 
 The pane's working directory is already {{ command.shell_cwd }}.'''
 
+# Long-running tools belong in a pane the user can watch. A project lifts it
+# with an allow that exempts `prefer-tmux`.
+
+[[rules]]
+id = "prefer-tmux"
+via = "bash"
+when = 'command.name in ["cargo", "make", "npm", "podman", "kubectl"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, where the user can watch it:
+
+  command_run(command="{{ line }}")
+
+Use list_panes to pick the pane.'''
+
 # =============================================================================
 # Rules: paths
 # =============================================================================

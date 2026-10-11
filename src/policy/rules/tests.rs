@@ -12,10 +12,13 @@ fn ruleset(rules_toml: &str) -> RuleSet {
     compile(&rules, Decision::Ask, &grammars).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// The decision for one command, its reasons joined as a line's are.
+/// The decision for one command, its reasons joined as a line's are; with
+/// no match, the ruleset's `default`.
 fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> crate::policy::PolicyResult {
-    let (decision, reasons) = super::decide(rules, facts, env);
-    crate::policy::PolicyResult { decision, rule: reasons.join("\n") }
+    match super::decide(rules, facts, env) {
+        (Some(decision), reasons) => crate::policy::PolicyResult { decision, rule: reasons.join("\n") },
+        (None, _) => crate::policy::PolicyResult { decision: rules.default.clone(), rule: "default".into() },
+    }
 }
 
 fn env() -> Env {

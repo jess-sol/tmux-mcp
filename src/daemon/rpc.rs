@@ -768,7 +768,8 @@ async fn handle_command_run(
             policy::Decision::Deny => {
                 return Err(RpcError { code: -32001, message: result.rule });
             }
-            policy::Decision::Ask => {
+            // *Passthrough* comes only from the Bash *Channel*.
+            policy::Decision::Ask | policy::Decision::Passthrough => {
                 let live_ctx = read_pane_context(state, pane_id).await?;
                 let verify = state
                     .approvals
@@ -1207,7 +1208,8 @@ async fn handle_request_approval(
             resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
             Ok(resp)
         }
-        policy::Decision::Ask => {
+        // *Passthrough* comes only from the Bash *Channel*.
+        policy::Decision::Ask | policy::Decision::Passthrough => {
             state
                 .approvals
                 .lock()

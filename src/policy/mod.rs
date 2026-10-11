@@ -54,6 +54,9 @@ pub enum Via {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
+    /// *Passthrough*: Claude Code's own permissions decide. Only a command
+    /// on the Bash *Channel* that no rule matches gets it.
+    Passthrough,
     Ask,
     Deny,
 }
@@ -86,7 +89,8 @@ pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngin
     let env = env(ctx, &compiled, here, via);
     let commands = match parse::parse_command(command, grammars, &start) {
         Ok(cmds) if cmds.is_empty() => {
-            return PolicyResult { decision: Decision::Ask, rule: "default".into() };
+            let (decision, reasons) = unmatched(via, &compiled.rules);
+            return PolicyResult { decision, rule: reasons.join("\n") };
         }
         Ok(cmds) => cmds,
         Err(err) => {
@@ -146,13 +150,21 @@ fn this_host() -> String {
     HOST.get_or_init(|| hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()).clone()
 }
 
-/// Every command of `line` meets the rules; the most restrictive decision
-/// wins (deny, ask, allow), and its reason lists, once each, the reasons of
-/// every command at that decision.
+/// Every command of `line` meets the rules, and one that no rule matches
+/// takes its *Channel*'s default. The most restrictive decision wins (deny,
+/// ask, passthrough, allow), so a line is allowed only when every command is;
+/// its reason lists, once each, the reasons of every command at that decision.
 fn evaluate_all(commands: &[parse::CommandInfo], line: &str, env: &rules::Env, ruleset: &rules::RuleSet) -> PolicyResult {
-    let results: Vec<_> = commands.iter().map(|cmd| rules::evaluate(cmd, line, env, ruleset)).collect();
+    let results: Vec<_> = commands
+        .iter()
+        .map(|cmd| match rules::evaluate(cmd, line, env, ruleset) {
+            (Some(decision), reasons) => (decision, reasons),
+            (None, _) => unmatched(env.via, ruleset),
+        })
+        .collect();
     let Some(decision) = results.iter().map(|(d, _)| d).max_by_key(|d| severity(d)).cloned() else {
-        return PolicyResult { decision: ruleset.default.clone(), rule: "default".into() };
+        let (decision, reasons) = unmatched(env.via, ruleset);
+        return PolicyResult { decision, rule: reasons.join("\n") };
     };
     let mut reasons: Vec<String> = Vec::new();
     for reason in results.into_iter().filter(|(d, _)| *d == decision).flat_map(|(_, r)| r) {
@@ -163,11 +175,21 @@ fn evaluate_all(commands: &[parse::CommandInfo], line: &str, env: &rules::Env, r
     PolicyResult { decision, rule: reasons.join("\n") }
 }
 
+/// The decision for a command that no rule matches: `default` on tmux,
+/// *Passthrough* on Bash.
+fn unmatched(via: Via, ruleset: &rules::RuleSet) -> (Decision, Vec<String>) {
+    match via {
+        Via::Tmux => (ruleset.default.clone(), vec!["default".into()]),
+        Via::Bash => (Decision::Passthrough, Vec::new()),
+    }
+}
+
 fn severity(d: &Decision) -> u8 {
     match d {
         Decision::Allow => 0,
-        Decision::Ask => 1,
-        Decision::Deny => 2,
+        Decision::Passthrough => 1,
+        Decision::Ask => 2,
+        Decision::Deny => 3,
     }
 }
 
