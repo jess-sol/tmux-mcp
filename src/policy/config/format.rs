@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use crate::policy::Via;
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
@@ -42,6 +44,9 @@ pub struct RuleConfig {
     /// The ids of the stricter rules it exempts: its *Exemption*s.
     #[serde(default)]
     pub exempts: Vec<String>,
+    /// The one *Channel* it counts on; without it, both.
+    #[serde(default)]
+    pub via: Option<Via>,
 }
 
 /// One level of a grammar: `[commands.<name>]` or `[commands.<name>.<word>]`.

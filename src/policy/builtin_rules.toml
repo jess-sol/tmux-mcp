@@ -827,6 +827,7 @@ message = "git -c and --exec-path can set a command to run (core.pager, core.ssh
 
 [[rules]]
 id = "pipe-to-tail"
+via = "tmux"
 command = "tail"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -840,6 +841,7 @@ This preserves full output in history. Use command_read(search=...) to search it
 
 [[rules]]
 id = "pipe-to-head"
+via = "tmux"
 command = "head"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -853,6 +855,7 @@ This preserves full output in history. Use command_read(search=...) to search it
 
 [[rules]]
 id = "pipe-to-grep"
+via = "tmux"
 command = "grep"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -866,6 +869,7 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-egrep"
+via = "tmux"
 command = "egrep"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -879,6 +883,7 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-fgrep"
+via = "tmux"
 command = "fgrep"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -892,6 +897,7 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-rg"
+via = "tmux"
 command = "rg"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -905,6 +911,7 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-tee"
+via = "tmux"
 command = "tee"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -921,6 +928,7 @@ Use command_read to access full output as many times as needed.'''
 
 [[rules]]
 id = "echo-status"
+via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
   && command.op_after == null && command.op_before != null && command.op_before != "|"
@@ -936,6 +944,7 @@ The exit status of the last command is captured and shown automatically; reading
 
 [[rules]]
 id = "echo-status-alone"
+via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
   && command.op_before == null && command.op_after == null
@@ -953,6 +962,7 @@ command_history lists recent commands with their exit codes, captured directly w
 
 [[rules]]
 id = "constant-echo"
+via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
   && !(command.op_before in ["|", "&&", "||"]) && command.op_after != "|"
@@ -968,6 +978,7 @@ A top-level echo of a fixed string is almost always a leftover progress marker (
 
 [[rules]]
 id = "constant-success-echo"
+via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
   && command.op_before == "&&" && command.op_after == null
@@ -983,6 +994,7 @@ A trailing `&& echo …` runs only when the preceding command succeeds, so it ju
 
 [[rules]]
 id = "stderr-to-stdout"
+via = "tmux"
 when = 'command.top && command.op_after == null && "2>&1" in command.redirects'
 action = "deny"
 message = '''
@@ -995,6 +1007,7 @@ Both stdout and stderr are visible in the terminal and captured automatically.''
 
 [[rules]]
 id = "background"
+via = "tmux"
 when = 'command.top && command.op_after == "&"'
 action = "deny"
 message = '''
@@ -1008,6 +1021,7 @@ Background jobs bypass output capture and can't be monitored reliably. Use list_
 
 [[rules]]
 id = "redundant-cd"
+via = "tmux"
 command = "cd"
 when = '''
   command.top && command.op_before == null && command.op_after in ["&&", ";"]

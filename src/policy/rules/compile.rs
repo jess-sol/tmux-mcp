@@ -85,6 +85,7 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
         action,
         message,
         local_only: is_project,
+        via: config.via,
         exempts: Vec::new(),
     })
 }

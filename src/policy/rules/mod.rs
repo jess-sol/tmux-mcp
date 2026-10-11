@@ -22,7 +22,7 @@ use super::config::RuleConfig;
 use super::grammar::Grammars;
 use super::parse::CommandInfo;
 use super::value::{TriBool, TriVal};
-use super::Decision;
+use super::{Decision, Via};
 use eval::{Ctx, Site, eval_expr, tri_eq};
 use identity::identity;
 
@@ -44,6 +44,8 @@ pub struct CompiledRule {
     message: Option<Vec<Part>>,
     /// A project rule, which applies only on this machine.
     local_only: bool,
+    /// The one *Channel* it counts on; None for both.
+    via: Option<Via>,
     /// The indices of the stricter rules it exempts.
     exempts: Vec<usize>,
 }
@@ -53,7 +55,8 @@ pub struct RuleSet {
     pub default: Decision,
 }
 
-/// What the rules know beyond the command: this machine and its project.
+/// What the rules know beyond the command: this machine, its project, and
+/// the *Channel* the line arrived through.
 #[derive(Clone)]
 pub(crate) struct Env {
     /// The hostname of the tmux-mcp process: "this machine".
@@ -61,6 +64,7 @@ pub(crate) struct Env {
     /// The directory that relative command identities start from.
     pub anchor: Option<PathBuf>,
     pub project_dirs: Vec<PathBuf>,
+    pub via: Via,
 }
 
 /// The machine a command runs on, against this one.
@@ -321,7 +325,8 @@ fn rule_match(rule: &CompiledRule, truth: TriBool) -> Option<Match> {
 /// the command, and those two judged on each path.
 fn meet(rule: &CompiledRule, facts: &Facts, env: &Env) -> Meeting {
     let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
-    let mut command = host_match(rule, facts, env);
+    // On another *Channel* the rule is False, so it neither matches nor exempts.
+    let mut command = if rule.via.is_some_and(|via| via != env.via) { TriBool::False } else { host_match(rule, facts, env) };
     if command != TriBool::False {
         command = command.and(user_match(rule, facts));
     }

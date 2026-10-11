@@ -101,6 +101,31 @@ async fn an_exemption_loosens_only_the_rule_it_names() {
 }
 
 #[tokio::test]
+async fn a_rule_with_via_counts_only_on_that_channel() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    h.project_policy(
+        r#"
+        [[rules]]
+        id = "no-ls-in-bash"
+        command = "ls"
+        via = "bash"
+        action = "deny"
+
+        [[rules]]
+        id = "no-pwd-in-tmux"
+        command = "pwd"
+        via = "tmux"
+        action = "deny"
+        "#,
+    );
+
+    let got = (h.decision(&shell, "ls"), h.decision(&shell, "pwd"));
+
+    assert_eq!(got, (Allow, Deny));
+}
+
+#[tokio::test]
 async fn a_rule_reads_the_parts_its_grammar_names() {
     let h = Harness::new().await;
     let shell = h.shell().await;

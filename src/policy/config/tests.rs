@@ -65,6 +65,7 @@ fn a_source_that_breaks_the_format_does_not_load() {
         ("[[rules]]\nid = \"x\"\naction = \"ask\"\nexempts = [\"rm-r\"]", "stricter"),
         ("[[rules]]\nid = \"x\"\ncommand = \"cat\"\naction = \"allow\"\nexempts = [\"outside-project\"]", "per path"),
         ("[[rules]]\nid = \"x\"\naction = \"allow\"\noverride = true", "override"),
+        ("[[rules]]\nid = \"x\"\naction = \"allow\"\nvia = \"zsh\"", "expected `bash` or `tmux`"),
     ];
     for (toml, want) in rows {
         match compile(toml) {

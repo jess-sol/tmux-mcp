@@ -762,7 +762,7 @@ async fn handle_command_run(
     // --- Policy check ---
     {
         let ctx = read_pane_context(state, pane_id).await?;
-        let result = policy::evaluate(command, &ctx, &state.policy);
+        let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
         match result.decision {
             policy::Decision::Allow => { /* proceed */ }
             policy::Decision::Deny => {
@@ -1191,7 +1191,7 @@ async fn handle_request_approval(
     };
 
     let ctx = read_pane_context(state, pane_id).await?;
-    let result = policy::evaluate(command, &ctx, &state.policy);
+    let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
 
     let ctx_json = json!({
         "hostname": ctx.hostname,

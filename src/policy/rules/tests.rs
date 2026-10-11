@@ -19,7 +19,12 @@ fn decide(rules: &RuleSet, facts: &Facts, env: &Env) -> crate::policy::PolicyRes
 }
 
 fn env() -> Env {
-    Env { this_host: "here".into(), anchor: Some("/src/proj".into()), project_dirs: vec!["/src/proj".into()] }
+    Env {
+        this_host: "here".into(),
+        anchor: Some("/src/proj".into()),
+        project_dirs: vec!["/src/proj".into()],
+        via: Via::Tmux,
+    }
 }
 
 fn facts_with_xs(xs: TriVal) -> Facts {
@@ -249,6 +254,44 @@ fn a_rule_is_strict_by_default_and_its_user_loosens_an_allow() {
         let facts = Facts { user: user.clone(), own_user, ..facts_with_xs(strings(&[], true)) };
         let got = [&strict, &own, &root].map(|rules| decide(rules, &facts, &env()).decision);
         assert_eq!(got, [want_strict, want_own, want_root], "{user:?}, own_user={own_user}");
+    }
+}
+
+/// A rule with `via` neither matches nor exempts on the other *Channel*.
+#[test]
+fn a_rule_with_via_counts_only_on_its_channel() {
+    let rules = ruleset(
+        r#"
+[[rules]]
+id = "t-asks"
+command = "t"
+action = "ask"
+
+[[rules]]
+id = "t-in-tmux"
+command = "t"
+via = "tmux"
+action = "allow"
+exempts = ["t-asks"]
+
+[[rules]]
+id = "t-x-in-bash"
+command = "t"
+when = 'args.xs == ["x"]'
+via = "bash"
+action = "deny"
+"#,
+    );
+    // (via, xs, decision, reason)
+    let rows = [
+        (Via::Tmux, &[][..], Decision::Allow, "t-in-tmux"),
+        (Via::Tmux, &["x"][..], Decision::Allow, "t-in-tmux"),
+        (Via::Bash, &[][..], Decision::Ask, "t-asks"),
+        (Via::Bash, &["x"][..], Decision::Deny, "t-x-in-bash"),
+    ];
+    for (via, xs, want, reason) in rows {
+        let got = decide(&rules, &facts_with_xs(strings(xs, true)), &Env { via, ..env() });
+        assert_eq!((got.decision, got.rule.as_str()), (want, reason), "{via:?} {xs:?}");
     }
 }
 

@@ -43,6 +43,14 @@ pub struct PolicyResult {
     pub rule: String,
 }
 
+/// The *Channel* a line arrives through, which a rule's `via` names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Via {
+    Bash,
+    Tmux,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -52,8 +60,9 @@ pub enum Decision {
 
 // --- Public API ---
 
-/// Evaluate whether a command should be allowed in the given pane context.
-pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> PolicyResult {
+/// Evaluate whether a command arriving through `via` should be allowed in
+/// the given pane context.
+pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngine) -> PolicyResult {
     let command = command.trim();
 
     // Reject unprintable/control characters (except common whitespace)
@@ -74,7 +83,7 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         value::TriVal::String(_) if !here => &compiled.remote_grammars,
         _ => &compiled.grammars,
     };
-    let env = env(ctx, &compiled, here);
+    let env = env(ctx, &compiled, here, via);
     let commands = match parse::parse_command(command, grammars, &start) {
         Ok(cmds) if cmds.is_empty() => {
             return PolicyResult { decision: Decision::Ask, rule: "default".into() };
@@ -115,9 +124,9 @@ fn start(ctx: &PaneContext) -> parse::Context {
     parse::Context { cwd: known(&ctx.cwd), host, user: known(&ctx.user), home, own_user: true }
 }
 
-/// This machine and its project, for the rules. The project lies on this
-/// machine, so a line that runs elsewhere has no anchor.
-fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool) -> rules::Env {
+/// This machine, its project and the line's *Channel*, for the rules. The
+/// project lies on this machine, so a line that runs elsewhere has no anchor.
+fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool, via: Via) -> rules::Env {
     let cwd = ctx.cwd.as_ref().map(PathBuf::from);
     let anchor = if here { compiled.project_root.clone().or(cwd) } else { None };
     let project_dirs = compiled
@@ -128,7 +137,7 @@ fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool) -> rule
             _ => None,
         })
         .collect();
-    rules::Env { this_host: this_host(), anchor, project_dirs }
+    rules::Env { this_host: this_host(), anchor, project_dirs, via }
 }
 
 /// The hostname of the tmux-mcp process: "this machine".
@@ -167,6 +176,10 @@ mod tests {
     use super::*;
 
     fn evaluate_test(command: &str) -> PolicyResult {
+        evaluate_via(command, Via::Tmux)
+    }
+
+    fn evaluate_via(command: &str, via: Via) -> PolicyResult {
         let engine = PolicyEngine::new(None);
         let ctx = PaneContext {
             hostname: None,
@@ -174,7 +187,16 @@ mod tests {
             foreground: Some("bash".into()),
             user: Some("user".into()),
         };
-        evaluate(command, &ctx, &engine)
+        evaluate(command, &ctx, via, &engine)
+    }
+
+    /// The lints name `command_run` parameters, so they count only on its
+    /// *Channel*.
+    #[test]
+    fn a_lint_fires_on_tmux_only() {
+        let got = [Via::Tmux, Via::Bash].map(|via| evaluate_via("echo $(date) | tail -5", via).rule);
+        assert!(got[0].starts_with("pipe-to-tail"), "{}", got[0]);
+        assert!(!got[1].contains("pipe-to-tail"), "{}", got[1]);
     }
 
     // --- Structural deny ---

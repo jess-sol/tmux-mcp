@@ -216,7 +216,11 @@ exempts = ["cargo-install"]        # stricter rule ids that stop counting while 
 # host = 'host == "prod"'          # CEL over the host the command runs on
 # user = 'user == "root"'          # CEL over the user it runs as
 # message = "use {{ drop(command) }}"  # shown in the reason; {{ }} holes are CEL read like `when`
+# via = "tmux"                     # "tmux" (command_run) or "bash" (Claude Code's Bash tool); omit for both
 ```
+
+A rule with `via` counts only on that channel, where it neither matches nor exempts on the other;
+`via` is a plain string, not CEL.
 
 Only `id` and `action` are required. A rule without `when`, `path`, `write`, `host` or `user`
 matches every command on its `command` path. A rule with `path` or `write` matches only through a
@@ -315,7 +319,7 @@ certainly true. It is the only way one rule loosens another.
 
 ## Lints
 
-A lint is a built-in deny whose message says how to fix the command; most render the fixed line
+A lint is a built-in deny with `via = "tmux"` whose message says how to fix the command; most render the fixed line
 with `drop`. Ids: `pipe-to-tail`, `pipe-to-head`, `pipe-to-grep`, `pipe-to-egrep`, `pipe-to-fgrep`, `pipe-to-rg`,
 `pipe-to-tee`, `echo-status`, `echo-status-alone`, `constant-echo`, `constant-success-echo`,
 `stderr-to-stdout`, `background`, `redundant-cd`. Usually the right answer is the fix the message
