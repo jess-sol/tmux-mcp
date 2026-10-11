@@ -5,7 +5,7 @@
 //! expressed as rules.
 
 use super::parse::CommandInfo;
-use super::rules::TriVal;
+use super::value::TriVal;
 use super::{Decision, PolicyResult};
 
 /// Check structural invariants. Returns Some(Deny) if violated, None to proceed.

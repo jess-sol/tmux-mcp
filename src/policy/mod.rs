@@ -17,6 +17,7 @@ mod parse;
 mod programs;
 mod rules;
 mod structural;
+mod value;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -112,7 +113,7 @@ fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy) -> rules::Env {
         .project_dirs
         .iter()
         .filter_map(|d| match rules::resolve(d, anchor.as_deref(), home.as_deref()) {
-            rules::TriVal::String(p) => Some(PathBuf::from(p)),
+            value::TriVal::String(p) => Some(PathBuf::from(p)),
             _ => None,
         })
         .collect();
