@@ -215,12 +215,11 @@ async fn the_builtin_policy_decides_common_lines() {
         ("env LD_PRELOAD=x ls", Ask),
         ("export PATH=/tmp", Ask),
         ("PATH=/tmp; ls", Ask),
-        // env's `with.cwd` leaves the directory of its inner command Unknown
-        ("env X=1 echo hi", Allow),
-        ("env X=1 cat notes", Ask),
         ("X=1 ls", Allow),
         ("export X=1", Allow),
-        // Context
+        // Context: a wrapper's `with` sets the context of its inner command
+        ("env X=1 cat notes", Allow),
+        ("env -C src cat notes", Allow),
         ("env -C /etc cat shadow", Ask),
         ("sudo -u root id", Ask),
         ("sudo eval x", Deny),
@@ -228,13 +227,23 @@ async fn the_builtin_policy_decides_common_lines() {
         ("ssh prod ls", Ask),
         ("ssh prod 'eval x'", Deny),
         ("ssh -o ProxyCommand=x prod ls", Ask),
+        ("cat ~/notes", Allow),
+        // A cd moves the rest of its && chain; after ;, || or a newline it may have failed
         ("cd src", Allow),
         ("cd /etc", Ask),
-        ("cd src && cat notes", Ask),
+        ("cd src && cat notes", Allow),
+        ("cd src && cd .. && cat notes", Allow),
+        ("pushd src && cat notes", Allow),
+        ("cd src; cat notes", Ask),
+        ("cd src || cat notes", Ask),
+        ("popd && cat notes", Ask),
         ("cd src && echo hi", Allow),
         ("(cd src) && cat notes", Allow),
         ("cd src | cat notes", Allow),
         ("{ cd src; } && cat notes", Ask),
+        ("for x in a b; do cat notes; cd src; done", Ask),
+        ("ls() { cd src; }; ls && cat notes", Ask),
+        ("CDPATH=x cd src", Ask),
         // A relative name stays a path, which never meets a rule for a bare name
         ("cd src && ./run", Ask),
         ("ssh prod ./deploy.sh", Ask),
@@ -293,7 +302,7 @@ async fn a_command_is_named_by_its_path_from_the_project_root() {
 }
 
 #[tokio::test]
-async fn a_rule_without_a_host_meets_only_this_machine() {
+async fn a_rule_meets_only_this_machine_and_the_shells_own_user_unless_it_says_otherwise() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     h.project_policy(
@@ -311,14 +320,29 @@ async fn a_rule_without_a_host_meets_only_this_machine() {
         command = "ls"
         host = 'host == "elsewhere"'
         action = "allow"
+
+        [[rules]]
+        description = "root may cat"
+        command = "cat"
+        user = 'user == "root"'
+        action = "allow"
         "#,
     );
-    let here = [("deploy", Allow), ("cat notes", Allow), ("ls", Allow)];
+    let here = [
+        ("deploy", Allow),
+        ("cat notes", Allow),
+        ("ls", Allow),
+        ("sudo cat notes", Allow),
+        ("sudo cat /etc/shadow", Ask),
+        ("sudo -u nobody cat notes", Ask),
+        ("sudo -u nobody eval x", Deny),
+    ];
     let got_here = here.map(|(command, _)| (command, h.decision(&shell, command)));
 
     // The prompt reports its host with `hostname`, as a remote shell would.
     h.run(&shell, "hostname() { echo elsewhere; }").await;
-    let there = [("deploy", Ask), ("cat notes", Ask), ("ls", Allow), ("eval true", Deny)];
+    // `ls` reads a path, and no path there is in the project: the path rule asks on every host.
+    let there = [("deploy", Ask), ("cat notes", Ask), ("ls", Ask), ("eval true", Deny)];
     let got_there = there.map(|(command, _)| (command, h.decision(&shell, command)));
 
     assert_eq!(got_here, here);

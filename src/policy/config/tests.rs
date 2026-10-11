@@ -53,6 +53,7 @@ fn a_source_that_breaks_the_format_does_not_load() {
         ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\ncommand = \"scripts/bench\"", "`./`"),
         ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = 'path == \"/\"'", "`path`"),
         ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\npath = 'host == \"x\"'", "`host`"),
+        ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = 'user == \"root\"'", "`user`"),
         ("[[rules]]\ndescription = \"x\"\naction = \"maybe\"", "maybe"),
         ("[[rules]]\ndescription = \"x\"\naction = \"allow\"\nwhen = '@@'", "CEL"),
         ("[[wrappers]]\nname = \"x\"", "wrappers"),

@@ -12,17 +12,21 @@ use super::{Env, Host};
 use crate::policy::programs;
 use crate::policy::value::{TriBool, TriVal};
 
-/// The variables of one CEL evaluation, and where its paths resolve.
+/// The variables of one CEL evaluation, where its paths resolve, and the
+/// home that `home()` gives the command's own user.
 #[derive(Clone)]
 pub(super) struct Ctx<'a> {
     pub(super) vars: HashMap<String, TriVal>,
     pub(super) site: Option<Site<'a>>,
+    pub(super) home: TriVal,
 }
 
+/// The command a rule judges: its directory and the machine it runs on.
 #[derive(Clone, Copy)]
 pub(super) struct Site<'a> {
     pub(super) env: &'a Env,
     pub(super) dir: Option<&'a Path>,
+    pub(super) host: &'a Host,
 }
 
 pub(super) fn eval_expr(expr: &cel::Expr, ctx: &Ctx) -> TriVal {
@@ -105,6 +109,10 @@ fn eval_call(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
         "path" => eval_path_fn(call, ctx, |path, _| TriVal::String(path.to_string_lossy().into_owned())),
         "awk_is_plain" => eval_string_test(call, ctx, programs::awk_is_plain),
         "sed_is_plain" => eval_string_test(call, ctx, programs::sed_is_plain),
+        "last" => eval_last(call, ctx),
+        "host_of" => eval_destination(call, ctx, |(_, host)| Some(host)),
+        "user_of" => eval_destination(call, ctx, |(user, _)| user),
+        "home" => eval_home(call, ctx),
         _ => TriVal::Unknown,
     }
 }
@@ -289,11 +297,11 @@ fn eval_string_test(call: &cel::CallExpr, ctx: &Ctx, test: fn(&str) -> bool) -> 
 
 /// A function of one resolved path. Null stays Null; a path that cannot be
 /// resolved, or a call with no paths to resolve against, is Unknown.
-fn eval_path_fn(call: &cel::CallExpr, ctx: &Ctx, f: fn(&Path, &Env) -> TriVal) -> TriVal {
+fn eval_path_fn(call: &cel::CallExpr, ctx: &Ctx, f: fn(&Path, &Site) -> TriVal) -> TriVal {
     let Some(site) = ctx.site else { return TriVal::Unknown };
     match one_operand(call, ctx) {
-        TriVal::String(word) => match resolve(&word, site.dir, site.env.home.as_deref()) {
-            TriVal::String(p) => f(Path::new(&p), site.env),
+        TriVal::String(word) => match resolve(&word, site.dir) {
+            TriVal::String(p) => f(Path::new(&p), &site),
             other => other,
         },
         TriVal::Null => TriVal::Null,
@@ -302,11 +310,62 @@ fn eval_path_fn(call: &cel::CallExpr, ctx: &Ctx, f: fn(&Path, &Env) -> TriVal) -
 }
 
 /// Under a project directory of this machine, by whole path components.
-fn in_project(path: &Path, env: &Env) -> TriVal {
-    match env.host {
-        Host::Here if path.is_absolute() => TriVal::Bool(env.project_dirs.iter().any(|d| path.starts_with(d))),
-        Host::Here | Host::There(_) => TriVal::Bool(false),
+fn in_project(path: &Path, site: &Site) -> TriVal {
+    match site.host {
+        Host::Here => TriVal::Bool(site.env.project_dirs.iter().any(|d| path.starts_with(d))),
+        Host::There(_) => TriVal::Bool(false),
         Host::Unknown => TriVal::Unknown,
+    }
+}
+
+/// `last(list)`: null past the end of an exhaustive list, Unknown past the
+/// end of one that may hold more.
+fn eval_last(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
+    match one_operand(call, ctx) {
+        TriVal::List { exhaustive: false, .. } => TriVal::Unknown,
+        TriVal::List { elements, .. } => elements.last().cloned().unwrap_or(TriVal::Null),
+        TriVal::Null => TriVal::Null,
+        _ => TriVal::Unknown,
+    }
+}
+
+/// A part of an ssh destination, picked from its user and its host; null
+/// when that part is absent.
+fn eval_destination(
+    call: &cel::CallExpr,
+    ctx: &Ctx,
+    pick: for<'a> fn((Option<&'a str>, &'a str)) -> Option<&'a str>,
+) -> TriVal {
+    match one_operand(call, ctx) {
+        TriVal::String(d) => pick(destination(&d)).map_or(TriVal::Null, |s| TriVal::String(s.to_string())),
+        TriVal::Null => TriVal::Null,
+        _ => TriVal::Unknown,
+    }
+}
+
+/// The user and the host of `host`, `user@host` or `ssh://user@host:port`.
+fn destination(d: &str) -> (Option<&str>, &str) {
+    let (url, rest) = match d.strip_prefix("ssh://") {
+        Some(rest) => (true, rest),
+        None => (false, d),
+    };
+    let (user, host) = match rest.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, rest),
+    };
+    match host.rsplit_once(':') {
+        Some((h, port)) if url && port.chars().all(|c| c.is_ascii_digit()) => (user, h),
+        _ => (user, host),
+    }
+}
+
+/// `home(u)`: the context's home when `u` is the command's own user.
+fn eval_home(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
+    let u = one_operand(call, ctx);
+    let own = ctx.vars.get("user").cloned().unwrap_or(TriVal::Unknown);
+    match (&u, tri_eq(&u, &own)) {
+        (TriVal::String(_), TriBool::True) => ctx.home.clone(),
+        _ => TriVal::Unknown,
     }
 }
 

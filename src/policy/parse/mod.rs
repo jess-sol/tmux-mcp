@@ -4,7 +4,8 @@
 //! command that will execute. Pipelines, logical operators, compound commands,
 //! command substitutions and *Inner command*s produce additional independent
 //! entries. Each command's words lose their quotes (`word`), and its grammar
-//! parses them into parts as the walker reaches it (`walker`).
+//! parses them into parts as the walker reaches it (`walker`). The walker
+//! gives each command its context and resolves every path it touches.
 
 mod walker;
 mod word;
@@ -34,32 +35,42 @@ pub struct CommandInfo {
     pub subcommands: TriVal,
     /// The parts of every level that parsed, by name.
     pub args: BTreeMap<String, TriVal>,
-    /// The directory the command runs in, relative to the pane's: Null when
-    /// nothing changes it; Unknown when an earlier `cd` or an outer
-    /// command's `with` changed it.
+    /// The directory the command runs in: its context's, with its
+    /// `marks.cwd` applied. Absolute or Unknown.
     pub cwd: TriVal,
-    /// The words the grammar marks as read paths, relative to `cwd`.
+    /// The paths the grammar marks as read, resolved: absolute or Unknown.
     pub reads: TriVal,
-    /// The words the grammar marks as write paths, relative to `cwd`.
+    /// The paths the grammar marks as written, resolved: absolute or Unknown.
     pub writes: TriVal,
     /// The names of the variables the command sets: its prefix assignments
     /// and its `marks.variables` words.
     pub variables: TriVal,
-    /// The user the command runs as. Null: the pane's; Unknown: changed.
-    pub user: TriVal,
-    /// The host the command runs on. Null: the pane's; Unknown: changed.
+    /// The context of the shell that runs the command.
+    pub context: Context,
+}
+
+/// Where a command runs. A line starts from the context that OSC 7 reported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Context {
+    /// Absolute or Unknown.
+    pub cwd: TriVal,
+    /// A host name or Unknown.
     pub host: TriVal,
+    /// A user name or Unknown.
+    pub user: TriVal,
+    /// Absolute or Unknown; only tilde expansion and `home()` read it.
+    pub home: TriVal,
+    /// It runs as the shell's own user, whose name may be Unknown.
+    pub own_user: bool,
 }
 
 /// A shell redirect (>, >>, <, etc.) attached to a command.
 #[derive(Debug, Clone)]
 pub struct RedirectInfo {
-    /// The target path without its quotes; as written when `has_expansion`.
-    pub target: String,
+    /// The target resolved against the shell's directory: absolute or Unknown.
+    pub target: TriVal,
     /// True for write redirects (>, >>, &>, >|). False for read (<).
     pub is_write: bool,
-    /// True when the target cannot be known before it runs.
-    pub has_expansion: bool,
 }
 
 /// Error returned when brush-parser can't parse the command.
@@ -78,10 +89,10 @@ pub(crate) enum Word {
 
 // --- Public API ---
 
-/// Parse a command string into the flat list of commands it runs. A shell
-/// line that an *Inner command* runs must parse too.
-pub fn parse_command(command: &str, grammars: &Grammars) -> Result<Vec<CommandInfo>, ParseError> {
-    walker::walk(&parse_with_brush(command)?, grammars)
+/// Parse a command string into the flat list of commands it runs, the first
+/// in `start`. A shell line that an *Inner command* runs must parse too.
+pub fn parse_command(command: &str, grammars: &Grammars, start: &Context) -> Result<Vec<CommandInfo>, ParseError> {
+    walker::walk(&parse_with_brush(command)?, grammars, start)
 }
 
 // --- brush-parser integration ---

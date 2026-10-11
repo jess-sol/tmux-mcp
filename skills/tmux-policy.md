@@ -34,7 +34,8 @@ when = 'subcommand in ["list", "show"]'  # CEL over args.<name>, subcommand, com
 action = "allow"                       # or "ask" or "deny"
 # path = '!in_project(path)'           # CEL over each path the command reads or writes
 # write = '...'                        # CEL over each path it writes
-# host = 'true'                        # without host, a rule matches only this machine
+# host = 'host == "prod"'              # an allow without host matches only this machine; an ask or deny every host
+# user = 'user == "root"'              # an allow without user matches only the shell's own user; an ask or deny every user
 # message = "shown when triggered"
 # override = true                      # an override rule decides alone when it matches
 ```

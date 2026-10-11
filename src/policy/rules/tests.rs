@@ -12,15 +12,8 @@ fn ruleset(rules_toml: &str) -> RuleSet {
     compile(&rules, Decision::Ask, &grammars).unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn env(host: Host) -> Env {
-    Env {
-        host,
-        this_host: "here".into(),
-        pane_cwd: Some("/src/proj/sub".into()),
-        home: Some("/home/u".into()),
-        anchor: Some("/src/proj".into()),
-        project_dirs: vec!["/src/proj".into()],
-    }
+fn env() -> Env {
+    Env { this_host: "here".into(), anchor: Some("/src/proj".into()), project_dirs: vec!["/src/proj".into()] }
 }
 
 fn facts_with_xs(xs: TriVal) -> Facts {
@@ -33,12 +26,18 @@ fn facts_with_xs(xs: TriVal) -> Facts {
         writes: TriVal::List { elements: vec![], exhaustive: true },
         dir: Some("/src/proj".into()),
         variables: TriVal::List { elements: vec![], exhaustive: true },
-        user: TriVal::Null,
+        host: Host::Here,
+        user: TriVal::String("u".into()),
+        own_user: true,
     }
 }
 
+fn on(host: Host) -> Facts {
+    Facts { host, ..facts_with_xs(strings(&[], true)) }
+}
+
 fn vars(pairs: &[(&str, TriVal)]) -> Ctx<'static> {
-    Ctx { vars: pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(), site: None }
+    Ctx { vars: pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(), site: None, home: TriVal::Unknown }
 }
 
 fn strings(vals: &[&str], exhaustive: bool) -> TriVal {
@@ -91,47 +90,60 @@ fn a_rule_that_may_match_fires_unless_it_allows_or_overrides() {
              [[rules]]\ndescription = \"beside\"\naction = \"{beside}\"\n"
         ));
         for (exhaustive, want) in [(false, incomplete), (true, complete)] {
-            let got = decide(&rules, &facts_with_xs(strings(&["x"], exhaustive)), &env(Host::Here));
+            let got = decide(&rules, &facts_with_xs(strings(&["x"], exhaustive)), &env());
             assert_eq!((got.decision, got.rule.as_str()), want, "{when}, exhaustive={exhaustive}");
         }
     }
 }
 
+/// An ask or deny rule without `host` meets every host; an allow rule
+/// without it only this machine, and `host` loosens it.
 #[test]
-fn a_rule_meets_only_this_machine_unless_its_host_says_otherwise() {
-    let rules = ruleset(
-        r#"
-        [[rules]]
-        description = "anywhere"
-        host = 'true'
-        action = "deny"
-        [[rules]]
-        description = "here"
-        action = "ask"
-        "#,
-    );
-    let facts = facts_with_xs(strings(&[], true));
+fn a_rule_is_strict_by_default_and_its_host_loosens_an_allow() {
+    let strict = ruleset("[[rules]]\ndescription = \"strict\"\naction = \"deny\"\n");
+    let here = ruleset("[[rules]]\ndescription = \"here\"\naction = \"allow\"\n");
+    let prod = ruleset("[[rules]]\ndescription = \"prod\"\nhost = 'host == \"prod\"'\naction = \"allow\"\n");
+    // (host, strict, here, prod)
     let rows = [
-        (Host::Here, Decision::Deny),
-        (Host::There("prod".into()), Decision::Deny),
-        (Host::Unknown, Decision::Deny),
+        (Host::Here, Decision::Deny, Decision::Allow, Decision::Ask),
+        (Host::There("prod".into()), Decision::Deny, Decision::Ask, Decision::Allow),
+        (Host::Unknown, Decision::Deny, Decision::Ask, Decision::Ask),
     ];
-    for (host, want) in rows {
-        assert_eq!(decide(&rules, &facts, &env(host)).decision, want);
+    for (host, want_strict, want_here, want_prod) in rows {
+        let facts = on(host);
+        let got = [&strict, &here, &prod].map(|rules| decide(rules, &facts, &env()).decision);
+        assert_eq!(got, [want_strict, want_here, want_prod]);
     }
-    let here_only = ruleset("[[rules]]\ndescription = \"here\"\naction = \"allow\"\n");
-    assert_eq!(decide(&here_only, &facts, &env(Host::There("prod".into()))).decision, Decision::Ask);
-    assert_eq!(decide(&here_only, &facts, &env(Host::Unknown)).decision, Decision::Ask);
-    assert_eq!(decide(&here_only, &facts, &env(Host::Here)).decision, Decision::Allow);
+}
+
+/// An ask or deny rule without `user` meets every user; an allow rule
+/// without it only the shell's own user, and `user` loosens it.
+#[test]
+fn a_rule_is_strict_by_default_and_its_user_loosens_an_allow() {
+    let strict = ruleset("[[rules]]\ndescription = \"strict\"\naction = \"ask\"\n");
+    let own = ruleset("[[rules]]\ndescription = \"own\"\naction = \"allow\"\n");
+    let root = ruleset("[[rules]]\ndescription = \"root\"\nuser = 'user == \"root\"'\naction = \"allow\"\n");
+    let u = |name: &str| TriVal::String(name.into());
+    // (user, own_user, strict, own, root)
+    let rows = [
+        (u("u"), true, Decision::Ask, Decision::Allow, Decision::Ask),
+        (TriVal::Unknown, true, Decision::Ask, Decision::Allow, Decision::Ask),
+        (u("root"), false, Decision::Ask, Decision::Ask, Decision::Allow),
+        (TriVal::Unknown, false, Decision::Ask, Decision::Ask, Decision::Ask),
+    ];
+    for (user, own_user, want_strict, want_own, want_root) in rows {
+        let facts = Facts { user: user.clone(), own_user, ..facts_with_xs(strings(&[], true)) };
+        let got = [&strict, &own, &root].map(|rules| decide(rules, &facts, &env()).decision);
+        assert_eq!(got, [want_strict, want_own, want_root], "{user:?}, own_user={own_user}");
+    }
 }
 
 #[test]
 fn a_project_rule_applies_only_on_this_machine() {
-    let config = parse_config("[[rules]]\ndescription = \"p\"\nhost = 'true'\naction = \"deny\"").unwrap();
+    let config = parse_config("[[rules]]\ndescription = \"p\"\naction = \"deny\"").unwrap();
     let rules = compile(&[(config.rules[0].clone(), true)], Decision::Ask, &Grammars::default()).unwrap();
-    let facts = facts_with_xs(strings(&[], true));
-    assert_eq!(decide(&rules, &facts, &env(Host::There("prod".into()))).decision, Decision::Ask);
-    assert_eq!(decide(&rules, &facts, &env(Host::Here)).decision, Decision::Deny);
+    assert_eq!(decide(&rules, &on(Host::There("prod".into())), &env()).decision, Decision::Ask);
+    assert_eq!(decide(&rules, &on(Host::Here), &env()).decision, Decision::Deny);
 }
 
 #[test]
@@ -146,7 +158,7 @@ fn a_path_rule_holds_for_any_path_and_is_unsure_over_an_open_list() {
     ];
     for (paths, want) in rows {
         let facts = Facts { paths: paths.clone(), ..facts_with_xs(strings(&[], true)) };
-        assert_eq!(decide(&rules, &facts, &env(Host::Here)).rule, want, "{paths:?}");
+        assert_eq!(decide(&rules, &facts, &env()).rule, want, "{paths:?}");
     }
 }
 
@@ -154,6 +166,7 @@ fn a_path_rule_holds_for_any_path_and_is_unsure_over_an_open_list() {
 
 #[test]
 fn a_command_is_named_by_its_path_from_the_anchor() {
+    let sub = Some(Path::new("/src/proj/sub"));
     let rows = [
         ("rm", Host::Here, TriVal::String("rm".into())),
         ("/usr/bin/rm", Host::Here, TriVal::String("rm".into())),
@@ -161,19 +174,18 @@ fn a_command_is_named_by_its_path_from_the_anchor() {
         ("../scripts/bench", Host::Here, TriVal::String("./scripts/bench".into())),
         ("./bin/cat", Host::Here, TriVal::String("./sub/bin/cat".into())),
         ("../../other/x", Host::Here, TriVal::String("../other/x".into())),
-        ("~/bin/x", Host::Here, TriVal::String("x".into())),
+        ("~bob/bin/x", Host::Here, TriVal::String("x".into())),
         ("/usr/bin/rm", Host::There("prod".into()), TriVal::String("rm".into())),
         ("./run", Host::There("prod".into()), TriVal::Unknown),
     ];
     for (name, host, want) in rows {
-        let env = env(host);
-        assert_eq!(identity(&TriVal::String(name.into()), &env, env.pane_cwd.as_deref()), want, "{name}");
+        assert_eq!(identity(&TriVal::String(name.into()), &host, &env(), sub), want, "{name}");
     }
-    let here = env(Host::Here);
-    assert_eq!(identity(&TriVal::String("./run".into()), &here, None), TriVal::Unknown);
-    assert_eq!(identity(&TriVal::String("rm".into()), &here, None), TriVal::String("rm".into()));
-    assert_eq!(identity(&TriVal::Unknown, &here, None), TriVal::Unknown);
-    assert_eq!(identity(&TriVal::Null, &here, None), TriVal::Null);
+    let here = Host::Here;
+    assert_eq!(identity(&TriVal::String("./run".into()), &here, &env(), None), TriVal::Unknown);
+    assert_eq!(identity(&TriVal::String("rm".into()), &here, &env(), None), TriVal::String("rm".into()));
+    assert_eq!(identity(&TriVal::Unknown, &here, &env(), None), TriVal::Unknown);
+    assert_eq!(identity(&TriVal::Null, &here, &env(), None), TriVal::Null);
 }
 
 // --- Paths ---
@@ -181,30 +193,30 @@ fn a_command_is_named_by_its_path_from_the_anchor() {
 #[test]
 fn a_path_resolves_as_text() {
     let base = Some(Path::new("/src/proj"));
-    let home = Some(Path::new("/home/u"));
     let rows = [
         ("a/../b", TriVal::String("/src/proj/b".into())),
         ("../../..", TriVal::String("/".into())),
         ("/etc/./x", TriVal::String("/etc/x".into())),
-        ("~/x", TriVal::String("/home/u/x".into())),
-        ("~bob/x", TriVal::String("~bob/x".into())),
+        ("~/x", TriVal::Unknown),
+        ("~bob/x", TriVal::Unknown),
     ];
     for (word, want) in rows {
-        assert_eq!(resolve(word, base, home), want, "{word}");
+        assert_eq!(resolve(word, base), want, "{word}");
     }
-    assert_eq!(resolve("a", None, home), TriVal::Unknown);
+    assert_eq!(resolve("a", None), TriVal::Unknown);
+    assert_eq!(resolve("/a", None), TriVal::String("/a".into()));
 }
 
 #[test]
 fn path_functions_resolve_against_the_command_directory() {
-    let env = env(Host::Here);
-    let site = Site { env: &env, dir: Some(Path::new("/src/proj/sub")) };
-    let ctx = Ctx { vars: HashMap::new(), site: Some(site) };
+    let env = env();
+    let site = Site { env: &env, dir: Some(Path::new("/src/proj/sub")), host: &Host::Here };
+    let ctx = Ctx { vars: HashMap::new(), site: Some(site), home: TriVal::Unknown };
     let rows = [
         ("in_project('..')", TriVal::Bool(true)),
         ("in_project('../../proj-evil/x')", TriVal::Bool(false)),
         ("in_project('/src/projx')", TriVal::Bool(false)),
-        ("in_project('~bob/x')", TriVal::Bool(false)),
+        ("in_project('~bob/x')", TriVal::Unknown),
         ("is_device('/dev/null')", TriVal::Bool(true)),
         ("is_device('/devx')", TriVal::Bool(false)),
         ("path('a/../b')", TriVal::String("/src/proj/sub/b".into())),
@@ -213,9 +225,37 @@ fn path_functions_resolve_against_the_command_directory() {
     for (expr, want) in rows {
         assert_eq!(eval_cel_with(expr, &ctx), want, "{expr}");
     }
-    let elsewhere = Env { host: Host::Unknown, ..env };
-    let ctx = Ctx { vars: HashMap::new(), site: Some(Site { env: &elsewhere, dir: Some(Path::new("/src/proj")) }) };
+    let site = Site { env: &env, dir: Some(Path::new("/src/proj")), host: &Host::Unknown };
+    let ctx = Ctx { vars: HashMap::new(), site: Some(site), home: TriVal::Unknown };
     assert_eq!(eval_cel_with("in_project('/src/proj')", &ctx), TriVal::Unknown);
+}
+
+#[test]
+fn with_functions_read_lists_destinations_and_the_home() {
+    let ctx = Ctx {
+        vars: HashMap::from([("user".to_string(), TriVal::String("u".into()))]),
+        site: None,
+        home: TriVal::String("/home/u".into()),
+    };
+    let rows = [
+        ("last([])", TriVal::Null),
+        (r#"last(["a", "b"])"#, TriVal::String("b".into())),
+        ("host_of('prod')", TriVal::String("prod".into())),
+        ("host_of('bob@prod')", TriVal::String("prod".into())),
+        ("host_of('ssh://bob@prod:22')", TriVal::String("prod".into())),
+        ("user_of('prod')", TriVal::Null),
+        ("user_of('bob@prod')", TriVal::String("bob".into())),
+        ("user_of('ssh://bob@prod:22')", TriVal::String("bob".into())),
+        ("host_of(null)", TriVal::Null),
+        ("home('u')", TriVal::String("/home/u".into())),
+        ("home('root')", TriVal::Unknown),
+        ("home(null)", TriVal::Unknown),
+    ];
+    for (expr, want) in rows {
+        assert_eq!(eval_cel_with(expr, &ctx), want, "{expr}");
+    }
+    let open = vars(&[("xs", strings(&["a"], false))]);
+    assert_eq!(eval_cel_with("last(xs)", &open), TriVal::Unknown);
 }
 
 // --- Unknown, Null and lists ---

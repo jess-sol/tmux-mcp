@@ -15,6 +15,7 @@ mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cel_parser::ast as cel;
 use globset::GlobMatcher;
 
 use super::config::GrammarConfig;
@@ -42,7 +43,7 @@ pub(crate) struct Parse {
     pub variables: TriVal,
     /// The *Inner command*s that the marked words run.
     pub inner: Vec<Inner>,
-    /// The context fields that a `with` key changes for the inner commands.
+    /// The `with` keys of the levels that parsed; a lower level's key wins.
     pub with: With,
 }
 
@@ -55,12 +56,13 @@ pub(crate) enum Inner {
     Line(Option<String>),
 }
 
-/// The context fields that `with` keys set.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+/// The CEL of a level's `with` keys, one per context field it sets for the
+/// level's *Inner command*s.
+#[derive(Default, Clone)]
 pub(crate) struct With {
-    pub cwd: bool,
-    pub user: bool,
-    pub host: bool,
+    pub cwd: Option<cel::IdedExpr>,
+    pub user: Option<cel::IdedExpr>,
+    pub host: Option<cel::IdedExpr>,
 }
 
 /// A grammar's top level or one of its subcommand levels.
@@ -141,7 +143,8 @@ impl Grammars {
 
     /// Parses a command's words with the grammar of its name, else of the
     /// last component of its path. A command without a grammar has no parts.
-    pub(crate) fn parse(&self, name: &str, words: &[Word]) -> Parse {
+    /// A default is read as a word, its `~` expanded with `home`.
+    pub(crate) fn parse(&self, name: &str, words: &[Word], home: &TriVal) -> Parse {
         let Some(level) = self.lookup(name) else {
             return Parse {
                 subcommands: list(Vec::new(), true),
@@ -156,7 +159,7 @@ impl Grammars {
         };
         let mut run = Run::default();
         level.parse(&[], words, &mut run);
-        run.finish()
+        run.finish(home)
     }
 
     /// The names that the levels along `command` declare, for a rule's

@@ -1167,7 +1167,7 @@ async fn read_pane_context(
         foreground: tp.pid.and_then(|pid| {
             proc::proc_info(pid).and_then(|info| info.foreground.map(|f| f.comm.clone()))
         }),
-        user: term_state.user.clone(),
+        user: term_state.user.clone().filter(|_| reported),
     })
 }
 

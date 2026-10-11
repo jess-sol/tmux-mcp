@@ -27,8 +27,9 @@ pub use config::PolicyEngine;
 /// Pane context used for policy evaluation. Derives PartialEq so adding
 /// a field automatically includes it in approval drift detection.
 ///
-/// `cwd` is None unless OSC 7 reported it since the pane's last command
-/// started; then the host is not known either.
+/// `cwd`, `hostname` and `user` are None unless OSC 7 reported them since
+/// the pane's last command started; a report with no host name is this
+/// machine.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PaneContext {
     pub hostname: Option<String>,
@@ -67,12 +68,14 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
         return PolicyResult { decision: Decision::Deny, rule: format!("policy:load_error ({err})") };
     }
 
-    let env = env(ctx, &compiled);
-    let grammars = match env.host {
-        rules::Host::There(_) => &compiled.remote_grammars,
+    let start = start(ctx);
+    let here = start.host == value::TriVal::String(this_host());
+    let grammars = match start.host {
+        value::TriVal::String(_) if !here => &compiled.remote_grammars,
         _ => &compiled.grammars,
     };
-    let commands = match parse::parse_command(command, grammars) {
+    let env = env(ctx, &compiled, here);
+    let commands = match parse::parse_command(command, grammars, &start) {
         Ok(cmds) if cmds.is_empty() => {
             return PolicyResult { decision: Decision::Ask, rule: "default".into() };
         }
@@ -95,36 +98,37 @@ pub fn evaluate(command: &str, ctx: &PaneContext, engine: &PolicyEngine) -> Poli
 
 // --- Internal ---
 
-/// Where the line runs. The host is this machine when the pane reports no
-/// other; it cannot be known while the pane's directory cannot.
-fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy) -> rules::Env {
-    let this_host = this_host();
+/// The context the line starts from: what OSC 7 reported since the pane's
+/// last command started, each field Unknown without a report. The home is
+/// this machine's `$HOME` when the line runs here.
+fn start(ctx: &PaneContext) -> parse::Context {
+    let known = |v: &Option<String>| v.clone().map_or(value::TriVal::Unknown, value::TriVal::String);
     let host = match (&ctx.cwd, &ctx.hostname) {
-        (None, _) => rules::Host::Unknown,
-        (Some(_), None) => rules::Host::Here,
-        (Some(_), Some(h)) if *h == this_host => rules::Host::Here,
-        (Some(_), Some(h)) => rules::Host::There(h.clone()),
+        (None, _) => value::TriVal::Unknown,
+        (Some(_), None) => value::TriVal::String(this_host()),
+        (Some(_), Some(h)) => value::TriVal::String(h.clone()),
     };
-    let here = matches!(host, rules::Host::Here);
-    let pane_cwd = ctx.cwd.as_ref().map(PathBuf::from);
-    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|_| here);
-    let anchor = if here { compiled.project_root.clone().or_else(|| pane_cwd.clone()) } else { None };
+    let home = match std::env::var("HOME") {
+        Ok(home) if host == value::TriVal::String(this_host()) => value::TriVal::String(home),
+        _ => value::TriVal::Unknown,
+    };
+    parse::Context { cwd: known(&ctx.cwd), host, user: known(&ctx.user), home, own_user: true }
+}
+
+/// This machine and its project, for the rules. The project lies on this
+/// machine, so a line that runs elsewhere has no anchor.
+fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool) -> rules::Env {
+    let cwd = ctx.cwd.as_ref().map(PathBuf::from);
+    let anchor = if here { compiled.project_root.clone().or(cwd) } else { None };
     let project_dirs = compiled
         .project_dirs
         .iter()
-        .filter_map(|d| match rules::resolve(d, anchor.as_deref(), home.as_deref()) {
+        .filter_map(|d| match rules::resolve(d, anchor.as_deref()) {
             value::TriVal::String(p) => Some(PathBuf::from(p)),
             _ => None,
         })
         .collect();
-    rules::Env {
-        host,
-        this_host,
-        pane_cwd,
-        home,
-        anchor,
-        project_dirs,
-    }
+    rules::Env { this_host: this_host(), anchor, project_dirs }
 }
 
 /// The hostname of the tmux-mcp process: "this machine".

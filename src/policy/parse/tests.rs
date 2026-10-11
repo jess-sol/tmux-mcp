@@ -127,13 +127,16 @@ fn brush_finds_brace_expressions_outside_quotes_only() {
 #[test]
 fn a_word_loses_its_quotes_and_an_expansion_is_unknown() {
     let known = |w: &str| Word::Known(w.to_string());
+    let home = s("/home/u");
     let rows = [
         ("plain", known("plain")),
         ("'eval'", known("eval")),
         ("\"/etc/shadow\"", known("/etc/shadow")),
         ("a\\ b", known("a b")),
         ("src/*.rs", known("src/*.rs")),
-        ("~/x", known("~/x")),
+        ("~", known("/home/u")),
+        ("~/x", known("/home/u/x")),
+        ("'~/x'", known("~/x")),
         ("~bob/x", known("~bob/x")),
         ("{}", known("{}")),
         ("@{u}..", known("@{u}..")),
@@ -144,15 +147,35 @@ fn a_word_loses_its_quotes_and_an_expansion_is_unknown() {
         ("{notes,/etc/shadow}", Word::Unknown { splits: true }),
     ];
     for (raw, want) in rows {
-        assert_eq!(word(raw), want, "{raw}");
+        assert_eq!(word(raw, &home), want, "{raw}");
     }
+    assert_eq!(word("~/x", &TriVal::Unknown), Word::Unknown { splits: false });
 }
 
 // --- Commands of a line ---
 
+fn s(v: &str) -> TriVal {
+    TriVal::String(v.into())
+}
+
+/// A shell in `/p/q` on this machine, as the user `u`.
+fn start() -> Context {
+    Context { cwd: s("/p/q"), host: s("here"), user: s("u"), home: s("/home/u"), own_user: true }
+}
+
+fn parse(line: &str) -> Vec<CommandInfo> {
+    let grammars = crate::policy::config::builtin_grammars();
+    parse_command(line, &grammars, &start()).unwrap_or_else(|e| panic!("{line}: {}", e.message))
+}
+
+/// The last command of a line named `name`.
+fn command(cmds: &[CommandInfo], name: &str) -> CommandInfo {
+    cmds.iter().rev().find(|c| c.name == s(name)).cloned().unwrap_or_else(|| panic!("no {name} in {cmds:?}"))
+}
+
 /// Each command's name, sorted: `-` for none, `?` for Unknown.
 fn names(line: &str) -> Vec<String> {
-    let commands = parse_command(line, &Grammars::default()).unwrap_or_else(|e| panic!("{line}: {}", e.message));
+    let commands = parse_command(line, &Grammars::default(), &start()).unwrap_or_else(|e| panic!("{line}: {}", e.message));
     let mut names: Vec<String> = commands
         .into_iter()
         .map(|c| match c.name {
@@ -194,46 +217,98 @@ fn a_line_holds_every_command_it_runs() {
     for (line, want) in rows {
         assert_eq!(names(line), *want, "{line}");
     }
-    assert!(parse_command("", &Grammars::default()).unwrap().is_empty());
-    assert!(parse_command("echo 'hello", &Grammars::default()).is_err());
+    assert!(parse_command("", &Grammars::default(), &start()).unwrap().is_empty());
+    assert!(parse_command("echo 'hello", &Grammars::default(), &start()).is_err());
 }
 
 #[test]
 fn a_prefix_assignment_is_a_variable_of_its_command() {
-    let cmds = parse_command("A=1 B[0]=2 env C=3 ls", &Grammars::default()).unwrap();
-    let strings = |vals: &[&str]| TriVal::List {
-        elements: vals.iter().map(|v| TriVal::String(v.to_string())).collect(),
-        exhaustive: true,
-    };
+    let cmds = parse_command("A=1 B[0]=2 env C=3 ls", &Grammars::default(), &start()).unwrap();
+    let strings = |vals: &[&str]| TriVal::List { elements: vals.iter().map(|v| s(v)).collect(), exhaustive: true };
     assert_eq!(cmds[0].variables, strings(&["A", "B"]));
 }
 
-/// `cd` changes the directory of the commands after it in its shell;
-/// a subshell, a substitution and a pipeline stage are shells of their own.
-#[test]
-fn a_cd_leaves_the_directory_of_the_rest_of_its_shell_unknown() {
-    let rows = [
-        ("cd x && cat y", TriVal::Unknown),
-        ("pushd x; cat y", TriVal::Unknown),
-        ("{ cd x; } && cat y", TriVal::Unknown),
-        ("if true; then cd x; fi; cat y", TriVal::Unknown),
-        ("(cd x) && cat y", TriVal::Null),
-        ("cd x | cat y", TriVal::Null),
-        ("echo $(cd x) && cat y", TriVal::Null),
-        ("cat y", TriVal::Null),
-    ];
-    for (line, want) in rows {
-        let cmds = parse_command(line, &Grammars::default()).unwrap();
-        let cat = cmds.iter().find(|c| c.name == TriVal::String("cat".into())).unwrap();
-        assert_eq!(cat.cwd, want, "{line}");
-    }
-    let cmds = parse_command("cd $(pwd)", &Grammars::default()).unwrap();
-    assert!(cmds.iter().all(|c| c.cwd == TriVal::Null));
-}
+// --- Context and paths ---
 
 #[test]
-fn a_redirect_target_loses_its_quotes() {
-    let cmds = parse_command("echo hi > '/tmp/evil' 2>&1 < \"in\" >> $X", &Grammars::default()).unwrap();
-    let got: Vec<_> = cmds[0].redirects.iter().map(|r| (r.target.as_str(), r.is_write, r.has_expansion)).collect();
-    assert_eq!(got, [("/tmp/evil", true, false), ("in", false, false), ("$X", true, true)]);
+fn a_command_reads_and_writes_resolved_paths() {
+    let paths = |vals: &[TriVal]| TriVal::List { elements: vals.to_vec(), exhaustive: true };
+    let cat = command(&parse("cat a ../b /etc/./x ~/y '~/z' ~bob/w"), "cat");
+    let want = [s("/p/q/a"), s("/p/b"), s("/etc/x"), s("/home/u/y"), TriVal::Unknown, TriVal::Unknown];
+    assert_eq!((cat.cwd, cat.reads), (s("/p/q"), paths(&want)));
+    let git = command(&parse("git -C sub log --output out f"), "git");
+    assert_eq!((git.cwd, git.reads), (s("/p/q/sub"), paths(&[s("/p/q/sub/f"), s("/p/q/sub")])));
+    let echo = command(&parse("echo hi > '/tmp/evil' 2>&1 < \"in\" >> $X"), "echo");
+    let got: Vec<_> = echo.redirects.iter().map(|r| (r.target.clone(), r.is_write)).collect();
+    assert_eq!(got, [(s("/tmp/evil"), true), (s("/p/q/in"), false), (TriVal::Unknown, true)]);
+}
+
+/// A cd holds for the commands that run only if it succeeded; a subshell,
+/// a substitution and a pipeline stage are shells of their own.
+#[test]
+fn a_cd_moves_the_rest_of_its_and_chain() {
+    let rows = [
+        ("cat y", s("/p/q")),
+        ("cd x && cat y", s("/p/q/x")),
+        ("cd /a && cd ../b && cat y", s("/b")),
+        ("cd && cat y", s("/home/u")),
+        ("pushd x && cat y", s("/p/q/x")),
+        ("cd x; cat y", TriVal::Unknown),
+        ("cd x || cat y", TriVal::Unknown),
+        ("cd x && true || cat y", TriVal::Unknown),
+        ("cd - && cat y", TriVal::Unknown),
+        ("cd $X && cat y", TriVal::Unknown),
+        ("popd && cat y", TriVal::Unknown),
+        ("pushd && cat y", TriVal::Unknown),
+        ("pushd +1 && cat y", TriVal::Unknown),
+        ("pushd -1 && cat y", TriVal::Unknown),
+        ("pushd -n x && cat y", TriVal::Unknown),
+        ("{ cd x; } && cat y", TriVal::Unknown),
+        ("if true; then cd x; fi; cat y", TriVal::Unknown),
+        ("for i in a; do cat y; cd x; done", TriVal::Unknown),
+        ("f() { cd x; }; cat y", TriVal::Unknown),
+        ("(cd x) && cat y", s("/p/q")),
+        ("cd x | cat y", s("/p/q")),
+        ("echo $(cd x) && cat y", s("/p/q")),
+        ("sh -c 'cd x' && cat y", s("/p/q")),
+        ("sh -c 'cd x && cat y'", s("/p/q/x")),
+        ("cd x && sh -c 'cat y'", s("/p/q/x")),
+    ];
+    for (line, want) in rows {
+        assert_eq!(command(&parse(line), "cat").cwd, want, "{line}");
+    }
+    let first_pass = parse("for i in a; do cat y; cd x; done");
+    assert_eq!(first_pass.iter().find(|c| c.name == s("cat")).map(|c| c.cwd.clone()), Some(s("/p/q")));
+}
+
+/// The context of an *Inner command*: its outer command's, with the fields
+/// that the outer command's `with` keys set.
+#[test]
+fn a_wrapper_gives_its_inner_command_the_context_its_with_sets() {
+    let u = TriVal::Unknown;
+    // (line, the inner command's cwd, host, user, home, own_user)
+    let rows = [
+        ("env X=1 ls", s("/p/q"), s("here"), s("u"), s("/home/u"), true),
+        ("env -C sub ls", s("/p/q/sub"), s("here"), s("u"), s("/home/u"), true),
+        ("env -C /etc ls", s("/etc"), s("here"), s("u"), s("/home/u"), true),
+        ("env -C \"$X\" ls", u.clone(), s("here"), s("u"), s("/home/u"), true),
+        ("sudo ls", s("/p/q"), s("here"), s("root"), u.clone(), false),
+        ("sudo -u u ls", s("/p/q"), s("here"), s("u"), s("/home/u"), true),
+        ("sudo -D sub ls", s("/p/q/sub"), s("here"), s("root"), u.clone(), false),
+        ("sudo -i ls", u.clone(), s("here"), s("root"), u.clone(), false),
+        ("sudo -u u -i ls", s("/home/u"), s("here"), s("u"), s("/home/u"), true),
+        ("sudo -u \"$X\" ls", s("/p/q"), s("here"), u.clone(), u.clone(), false),
+        ("ssh prod ls", u.clone(), s("prod"), s("u"), u.clone(), true),
+        ("ssh bob@prod ls", u.clone(), s("prod"), s("bob"), u.clone(), false),
+        ("ssh -l bob ssh://ann@prod:22 ls", u.clone(), s("prod"), s("bob"), u.clone(), false),
+    ];
+    for (line, cwd, host, user, home, own_user) in rows {
+        let ls = command(&parse(line), "ls");
+        let want = Context { cwd: cwd.clone(), host, user, home, own_user };
+        assert_eq!((&ls.cwd, &ls.context), (&cwd, &want), "{line}");
+    }
+    let cat = command(&parse("ssh prod 'cat -- ~/x'"), "cat");
+    assert_eq!(cat.reads, TriVal::List { elements: vec![u.clone()], exhaustive: true });
+    let cat = command(&parse("sudo -u root sh -c 'cd /tmp && cat x'"), "cat");
+    assert_eq!((cat.cwd, cat.context.user), (s("/tmp"), s("root")));
 }

@@ -21,10 +21,12 @@ pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::parse::{Grammars, parse_command};
+    use crate::policy::parse::{Context, Grammars, parse_command};
 
     fn denied(line: &str) -> bool {
-        let cmds = parse_command(line, &Grammars::default()).unwrap();
+        let unknown = TriVal::Unknown;
+        let start = Context { cwd: unknown.clone(), host: unknown.clone(), user: unknown.clone(), home: unknown, own_user: true };
+        let cmds = parse_command(line, &Grammars::default(), &start).unwrap();
         check(&cmds).is_some_and(|r| r.decision == Decision::Deny)
     }
 

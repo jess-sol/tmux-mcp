@@ -9,12 +9,13 @@ fn grammars(toml: &str) -> Result<Grammars, String> {
 
 fn parse(toml: &str, line: &str) -> Parse {
     let g = grammars(toml).unwrap_or_else(|e| panic!("{e}"));
-    let mut words = line.split_whitespace().map(word);
+    let home = s("/home/u");
+    let mut words = line.split_whitespace().map(|w| word(w, &home));
     let name = match words.next() {
         Some(Word::Known(n)) => n,
         _ => panic!("no name in {line}"),
     };
-    g.parse(&name, &words.collect::<Vec<_>>())
+    g.parse(&name, &words.collect::<Vec<_>>(), &home)
 }
 
 fn s(v: &str) -> TriVal {
@@ -338,7 +339,7 @@ const WRAPPERS: &str = r#"
     argument.assigns.match = "*=*"
     marks.variables = ["assigns"]
     marks.command = ["command"]
-    with.cwd = 'path(last(args.chdir))'
+    with.cwd = 'last(args.chdir)'
 "#;
 
 #[test]
@@ -370,12 +371,17 @@ fn marks_give_the_inner_commands_that_a_command_runs() {
 }
 
 #[test]
-fn marks_name_the_variables_and_with_names_the_context_that_a_command_changes() {
+fn marks_name_the_variables_that_a_command_sets() {
     let p = parse(WRAPPERS, "env A=1 B ls");
     assert_eq!(p.variables, strings(&["A"]));
-    assert_eq!(p.with, With { cwd: true, user: false, host: false });
     assert_eq!(parse(WRAPPERS, "env --frob A=1 ls").variables, list(vec![], false));
-    assert_eq!(parse(WRAPPERS, "timeout 5 ls").with, With::default());
+}
+
+#[test]
+fn a_default_is_read_as_a_word() {
+    let toml = "[commands.cd]\nparser = \"posix\"\narguments = [\"dir\"]\nargument.dir.default = [\"~\"]\nmarks.cwd = [\"dir\"]";
+    assert_eq!(parse(toml, "cd").cwd, s("/home/u"));
+    assert_eq!(parse(toml, "cd x").cwd, s("x"));
 }
 
 #[test]
@@ -427,6 +433,9 @@ fn a_grammar_that_breaks_the_format_does_not_load() {
         ("parser = \"gnu\"\narguments = [\"x\"]\nmarks.shell = [\"y\"]", "does not declare"),
         ("parser = \"gnu\"\nwith.home = 'x'", "unknown field"),
         ("parser = \"gnu\"\nwith.cwd = '@@'", "CEL"),
+        ("parser = \"gnu\"\nwith.cwd = 'path'", "`path`"),
+        ("parser = \"gnu\"\narguments = [\"x\"]\nwith.user = 'args.y'", "`args.y`"),
+        ("parser = \"gnu\"\narguments = [\"subcommand\"]\n[commands.t.a]\narguments = [\"x\"]\n[commands.t.b]\nwith.cwd = 'args.x'", "`args.x`"),
         ("parser = \"gnu\"\narguments = [\"x\"]\nargument.x.words = [\"a\"]", "only for `subcommand`"),
         ("parser = \"gnu\"\narguments = [\"--x:\"]\nargument.x.match = \"*\"", "only for an operand"),
         ("parser = \"gnu\"\narguments = [\"--x\"]\nargument.x.default = [\"a\"]", "only for an operand or an option"),

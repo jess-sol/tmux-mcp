@@ -280,7 +280,7 @@ argument.assigns.match = "*=*"
 marks.variables = ["assigns"]
 marks.command = ["command"]
 marks.shell = ["split_string"]
-with.cwd = 'path(last(args.chdir))'
+with.cwd = 'last(args.chdir)'
 
 [commands.export]
 parser = "posix"
@@ -300,7 +300,7 @@ arguments = [
 argument.user.default = ["root"]
 marks.command = ["command"]
 with.user = 'last(args.user)'
-with.cwd = 'args.login ? home(with.user) : path(last(args.chdir))'
+with.cwd = 'args.login ? home(with.user) : last(args.chdir)'
 
 [commands.ssh]
 parser = "posix"                                      # ssh's options end at the destination
@@ -361,18 +361,22 @@ arguments = [
 marks.read = ["file"]
 marks.shell = ["command"]
 
-# cd, pushd and popd also change the directory of the commands after them in their shell.
+# cd and pushd move the rest of their && chain to `dir`. `cd -` and `pushd +N` take a directory
+# from the stack, so `dir` takes no word that starts with `-` or `+`, and the cwd is Unknown.
+# pushd's -n keeps the directory; it stays undeclared, so the cwd after it is Unknown too.
 
 [commands.cd]
 parser = "posix"
 arguments = ["dir", "logical=-L", "physical=-P", "exit_on_error=-e"]
 argument.dir.default = ["~"]
-marks.read = ["dir"]
+argument.dir.match = "[!+-]*"
+marks.cwd = ["dir"]
 
 [commands.pushd]
 parser = "posix"
-arguments = ["dir", "no_change=-n"]
-marks.read = ["dir"]
+arguments = ["dir"]
+argument.dir.match = "[!+-]*"
+marks.cwd = ["dir"]
 
 [commands.popd]
 parser = "posix"
@@ -751,34 +755,30 @@ global = [                                            # options come before or a
 ]
 
 # =============================================================================
-# Rules: code from text (deny, on every host)
+# Rules: code from text (deny)
 # =============================================================================
 
 [[rules]]
 description = "eval"
 command = "eval"
-host = 'true'
 action = "deny"
 message = "eval executes arbitrary strings"
 
 [[rules]]
 description = "source"
 command = "source"
-host = 'true'
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
 description = ". (source)"
 command = "."
-host = 'true'
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
 description = "exec"
 command = "exec"
-host = 'true'
 action = "deny"
 message = "exec replaces the shell process"
 
@@ -786,7 +786,6 @@ message = "exec replaces the shell process"
 description = "sh reads standard input"
 command = "sh"
 when = 'args.command == [] && args.file == null'
-host = 'true'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
@@ -794,7 +793,6 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 description = "bash reads standard input"
 command = "bash"
 when = 'args.command == [] && args.file == null'
-host = 'true'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
@@ -802,7 +800,6 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 description = "dash reads standard input"
 command = "dash"
 when = 'args.command == [] && args.file == null'
-host = 'true'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
@@ -810,7 +807,6 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 description = "zsh reads standard input"
 command = "zsh"
 when = 'args.command == [] && args.file == null'
-host = 'true'
 action = "deny"
 message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
@@ -818,7 +814,6 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 description = "git -c"
 command = "git"
 when = 'args.config != [] || args.config_env != [] || args.exec_path'
-host = 'true'
 action = "deny"
 message = "git -c and --exec-path can set a command to run (core.pager, core.sshCommand, …); set it in the repository's config instead"
 

@@ -14,9 +14,9 @@ use crate::policy::grammar::Grammars;
 
 /// The variables an expression reads, and the `args.<name>` it selects.
 #[derive(Default)]
-struct Refs {
-    idents: BTreeSet<String>,
-    args: BTreeSet<String>,
+pub(crate) struct Refs {
+    pub(crate) idents: BTreeSet<String>,
+    pub(crate) args: BTreeSet<String>,
 }
 
 pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -> Result<CompiledRule, String> {
@@ -33,15 +33,18 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
     let path = config.path.as_deref().map(parse_cel).transpose()?;
     let write = config.write.as_deref().map(parse_cel).transpose()?;
     let host = config.host.as_deref().map(parse_cel).transpose()?;
+    let user = config.user.as_deref().map(parse_cel).transpose()?;
 
-    for (key, expr) in [("when", &when), ("path", &path), ("write", &write), ("host", &host)] {
+    for (key, expr) in [("when", &when), ("path", &path), ("write", &write), ("host", &host), ("user", &user)] {
         let Some(expr) = expr else { continue };
         let refs = Refs::of(&expr.expr);
         if refs.idents.contains("path") && !matches!(key, "path" | "write") {
             return Err("`path` is only for the `path` and `write` keys".into());
         }
-        if refs.idents.contains("host") && key != "host" {
-            return Err("`host` is only for the `host` key".into());
+        for own in ["host", "user"] {
+            if refs.idents.contains(own) && key != own {
+                return Err(format!("`{own}` is only for the `{own}` key"));
+            }
         }
         let reads_parts = refs.idents.contains("args") || refs.idents.contains("subcommand");
         match (&declared, &command) {
@@ -67,6 +70,7 @@ pub(super) fn rule(config: &RuleConfig, is_project: bool, grammars: &Grammars) -
         path,
         write,
         host,
+        user,
         action,
         is_override: config.is_override,
         message: config.message.clone(),
@@ -101,7 +105,7 @@ fn command_path(command: &str) -> Result<Vec<String>, String> {
 }
 
 impl Refs {
-    fn of(expr: &cel::Expr) -> Refs {
+    pub(crate) fn of(expr: &cel::Expr) -> Refs {
         let mut refs = Refs::default();
         refs.walk(expr, &mut Vec::new());
         refs

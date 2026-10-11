@@ -1,9 +1,10 @@
 //! Rules: compiled from `[[rules]]`, they decide each command of a line.
 //!
-//! A rule's keys each test one subject: `host` the machine, `command` the
-//! command path, `when` its parts, `path` and `write` the paths it touches.
-//! CEL is evaluated with three-valued logic (True/False/Unknown):
-//! `Unknown == "root"` → Unknown, `Unknown != "root"` → Unknown.
+//! A rule's keys each test one subject: `host` the machine, `user` the user
+//! the command runs as, `command` the command path, `when` its parts, `path`
+//! and `write` the paths it touches. CEL is evaluated with three-valued logic
+//! (True/False/Unknown): `Unknown == "root"` → Unknown, `Unknown != "root"`
+//! → Unknown. The evaluator also serves the grammars' `with` keys.
 
 mod compile;
 mod eval;
@@ -24,7 +25,7 @@ use super::{Decision, PolicyResult};
 use eval::{Ctx, Site, eval_expr, tri_eq};
 use identity::identity;
 
-pub(crate) use compile::parse_cel;
+pub(crate) use compile::{Refs, parse_cel};
 pub(crate) use identity::resolve;
 
 // --- Types ---
@@ -37,6 +38,7 @@ pub struct CompiledRule {
     path: Option<cel::IdedExpr>,
     write: Option<cel::IdedExpr>,
     host: Option<cel::IdedExpr>,
+    user: Option<cel::IdedExpr>,
     pub action: Decision,
     /// An *Override rule*: it decides alone when it matches.
     pub is_override: bool,
@@ -50,23 +52,18 @@ pub struct RuleSet {
     pub default: Decision,
 }
 
-/// Where the commands of a line run, as the rules see it.
+/// What the rules know beyond the command: this machine and its project.
 #[derive(Clone)]
 pub(crate) struct Env {
-    pub host: Host,
-    /// The hostname of the tmux-mcp process.
+    /// The hostname of the tmux-mcp process: "this machine".
     pub this_host: String,
-    /// The shell's directory; None when it cannot be known.
-    pub pane_cwd: Option<PathBuf>,
-    /// `$HOME` on this machine; None elsewhere.
-    pub home: Option<PathBuf>,
     /// The directory that relative command identities start from.
     pub anchor: Option<PathBuf>,
     pub project_dirs: Vec<PathBuf>,
 }
 
-#[derive(Clone)]
-pub(crate) enum Host {
+/// The machine a command runs on, against this one.
+enum Host {
     Here,
     There(String),
     Unknown,
@@ -87,8 +84,11 @@ struct Facts {
     /// The directory it runs in; None when it cannot be known.
     dir: Option<PathBuf>,
     variables: TriVal,
-    /// Unknown when an outer command changed the user it runs as.
+    host: Host,
+    /// The name of the user it runs as, or Unknown.
     user: TriVal,
+    /// It runs as the shell's own user.
+    own_user: bool,
 }
 
 /// How a rule matched: on True, or on an Unknown it could not rule out.
@@ -116,66 +116,44 @@ pub fn compile(configs: &[(RuleConfig, bool)], default: Decision, grammars: &Gra
 /// are a group of their own: when any matches, the strictest override
 /// decides and the other rules do not count. No match gives the default.
 pub(crate) fn evaluate(cmd: &CommandInfo, env: &Env, rules: &RuleSet) -> PolicyResult {
-    // A host that an outer command changed cannot be known.
-    let changed;
-    let env = match cmd.host {
-        TriVal::Unknown => {
-            changed = Env { host: Host::Unknown, ..env.clone() };
-            &changed
-        }
-        _ => env,
-    };
     decide(rules, &Facts::of(cmd, env), env)
+}
+
+/// Evaluates the CEL of a grammar's `with` key over `vars`. `home(u)` gives
+/// `home` when `u` is the command's own user.
+pub(crate) fn eval_with(expr: &cel::IdedExpr, vars: HashMap<String, TriVal>, home: TriVal) -> TriVal {
+    eval_expr(&expr.expr, &Ctx { vars, site: None, home })
 }
 
 // --- Deciding ---
 
 impl Facts {
     fn of(cmd: &CommandInfo, env: &Env) -> Facts {
-        let home = env.home.as_deref();
-        // The shell's directory, where redirects and the command name resolve;
-        // a `cd` or an outer command may have changed it.
-        let shell_dir = match cmd.cwd {
-            TriVal::Unknown => None,
-            _ => env.pane_cwd.as_deref(),
-        };
-        let dir = match &cmd.cwd {
-            TriVal::Null => env.pane_cwd.clone(),
-            TriVal::String(d) => match resolve(d, env.pane_cwd.as_deref(), home) {
-                TriVal::String(p) if p.starts_with('/') => Some(PathBuf::from(p)),
-                _ => None,
-            },
+        let as_dir = |cwd: &TriVal| match cwd {
+            TriVal::String(d) => Some(PathBuf::from(d)),
             _ => None,
         };
-        let resolve_all = |words: &TriVal| -> (Vec<TriVal>, bool) {
-            match words {
-                TriVal::List { elements, exhaustive } => {
-                    let paths = elements
-                        .iter()
-                        .map(|w| match w {
-                            TriVal::String(w) => resolve(w, dir.as_deref(), home),
-                            _ => TriVal::Unknown,
-                        })
-                        .collect();
-                    (paths, *exhaustive)
-                }
-                _ => (vec![TriVal::Unknown], false),
-            }
+        let list = |paths: &TriVal| match paths {
+            TriVal::List { elements, exhaustive } => (elements.clone(), *exhaustive),
+            _ => (vec![TriVal::Unknown], false),
         };
-        let (reads, reads_exhaustive) = resolve_all(&cmd.reads);
-        let (mut writes, writes_exhaustive) = resolve_all(&cmd.writes);
-        let mut paths = reads;
+        let (mut paths, reads_exhaustive) = list(&cmd.reads);
+        let (mut writes, writes_exhaustive) = list(&cmd.writes);
         paths.extend(writes.iter().cloned());
         for r in &cmd.redirects {
-            let target = if r.has_expansion { TriVal::Unknown } else { resolve(&r.target, shell_dir, home) };
             if r.is_write {
-                writes.push(target.clone());
+                writes.push(r.target.clone());
             }
-            paths.push(target);
+            paths.push(r.target.clone());
         }
+        let host = match &cmd.context.host {
+            TriVal::String(h) if *h == env.this_host => Host::Here,
+            TriVal::String(h) => Host::There(h.clone()),
+            _ => Host::Unknown,
+        };
 
         Facts {
-            identity: identity(&cmd.name, env, shell_dir),
+            identity: identity(&cmd.name, &host, env, as_dir(&cmd.context.cwd).as_deref()),
             relative: matches!(&cmd.name, TriVal::String(n) if n.contains('/') && !n.starts_with(['/', '~'])),
             subcommands: match &cmd.subcommands {
                 TriVal::List { elements, .. } => elements.clone(),
@@ -184,9 +162,11 @@ impl Facts {
             args: TriVal::Map(cmd.args.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
             paths: TriVal::List { elements: paths, exhaustive: reads_exhaustive && writes_exhaustive },
             writes: TriVal::List { elements: writes, exhaustive: writes_exhaustive },
-            dir,
+            dir: as_dir(&cmd.cwd),
             variables: cmd.variables.clone(),
-            user: cmd.user.clone(),
+            host,
+            user: cmd.context.user.clone(),
+            own_user: cmd.context.own_user,
         }
     }
 }
@@ -228,13 +208,12 @@ fn rule_match(rule: &CompiledRule, facts: &Facts, env: &Env) -> Option<Match> {
     }
 }
 
-/// A rule matches when every key it has matches, and only a command that
-/// runs as the pane's own user.
+/// A rule matches when every key it has matches.
 fn rule_truth(rule: &CompiledRule, facts: &Facts, env: &Env) -> TriBool {
-    let site = Site { env, dir: facts.dir.as_deref() };
-    let mut truth = host_match(rule, env);
-    if facts.user == TriVal::Unknown {
-        truth = truth.and(TriBool::Unknown);
+    let site = Site { env, dir: facts.dir.as_deref(), host: &facts.host };
+    let mut truth = host_match(rule, facts, env);
+    if truth != TriBool::False {
+        truth = truth.and(user_match(rule, facts));
     }
     if truth != TriBool::False {
         truth = truth.and(command_match(rule, facts));
@@ -250,22 +229,38 @@ fn rule_truth(rule: &CompiledRule, facts: &Facts, env: &Env) -> TriBool {
     truth
 }
 
-/// A rule without `host` matches only this machine; a project rule applies
-/// only on this machine; a host that cannot be known matches Unknown.
-fn host_match(rule: &CompiledRule, env: &Env) -> TriBool {
-    let name = match &env.host {
-        Host::Unknown => return TriBool::Unknown,
-        Host::There(_) if rule.local_only => return TriBool::False,
-        Host::Here => &env.this_host,
-        Host::There(name) => name,
-    };
-    match &rule.host {
-        None => TriBool::of(matches!(env.host, Host::Here)),
-        Some(expr) => {
-            let ctx = Ctx { vars: HashMap::from([("host".into(), TriVal::String(name.clone()))]), site: None };
-            eval_expr(&expr.expr, &ctx).is_truthy()
-        }
+/// Rules are strict by default: an ask or deny rule without `host` matches
+/// every host, an allow rule without it only this machine. A project rule
+/// applies only on this machine; a host that cannot be known matches Unknown.
+fn host_match(rule: &CompiledRule, facts: &Facts, env: &Env) -> TriBool {
+    match (&facts.host, &rule.host) {
+        (Host::There(_), _) if rule.local_only => TriBool::False,
+        (Host::Unknown, _) if rule.local_only => TriBool::Unknown,
+        (_, None) if rule.action != Decision::Allow => TriBool::True,
+        (Host::Unknown, _) => TriBool::Unknown,
+        (host, None) => TriBool::of(matches!(host, Host::Here)),
+        (Host::Here, Some(expr)) => eval_on(expr, "host", TriVal::String(env.this_host.clone())),
+        (Host::There(name), Some(expr)) => eval_on(expr, "host", TriVal::String(name.clone())),
     }
+}
+
+/// Rules are strict by default: an ask or deny rule without `user` matches
+/// every user, an allow rule without it only the shell's own user, and an
+/// Unknown user Unknown.
+fn user_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
+    match (&rule.user, facts.own_user, &facts.user) {
+        (Some(expr), ..) => eval_on(expr, "user", facts.user.clone()),
+        (None, ..) if rule.action != Decision::Allow => TriBool::True,
+        (None, true, _) => TriBool::True,
+        (None, false, TriVal::Unknown) => TriBool::Unknown,
+        (None, false, _) => TriBool::False,
+    }
+}
+
+/// `expr` over the one variable `name`.
+fn eval_on(expr: &cel::IdedExpr, name: &str, value: TriVal) -> TriBool {
+    let ctx = Ctx { vars: HashMap::from([(name.to_string(), value)]), site: None, home: TriVal::Unknown };
+    eval_expr(&expr.expr, &ctx).is_truthy()
 }
 
 /// The command is the rule's path or a subcommand below it. A relative
@@ -295,7 +290,7 @@ fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
         ("command".to_string(), TriVal::Map(command)),
         ("variables".to_string(), facts.variables.clone()),
     ]);
-    Ctx { vars, site: Some(site) }
+    Ctx { vars, site: Some(site), home: TriVal::Unknown }
 }
 
 /// True when `expr` holds for any path; over a non-exhaustive list, only a
@@ -304,7 +299,7 @@ fn any_path(expr: &cel::IdedExpr, paths: &TriVal, site: Site) -> TriBool {
     let TriVal::List { elements, exhaustive } = paths else { return TriBool::Unknown };
     let mut truth = TriBool::False;
     for path in elements {
-        let ctx = Ctx { vars: HashMap::from([("path".to_string(), path.clone())]), site: Some(site) };
+        let ctx = Ctx { vars: HashMap::from([("path".to_string(), path.clone())]), site: Some(site), home: TriVal::Unknown };
         truth = truth.or(eval_expr(&expr.expr, &ctx).is_truthy());
         if truth == TriBool::True {
             return truth;

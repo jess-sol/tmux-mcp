@@ -33,6 +33,8 @@ pub struct RuleConfig {
     pub write: Option<String>,
     #[serde(default)]
     pub host: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
     pub action: String,
     /// An *Override rule*: when any matches, the strictest matching override
     /// decides and the other rules do not count.

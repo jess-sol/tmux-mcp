@@ -68,7 +68,7 @@ impl Level {
         let names = check_names(path, &slots, &options, &global, chain)?;
         let (defaults, words, appends) = settings(path, config, &mut slots, &options, &global)?;
         let marks = marks(path, config, &names, &slots, appends)?;
-        let with = with(path, &config.with)?;
+        let with = with(path, &config.with, |n| names.contains(n) || chain.names.contains(n))?;
 
         let mut child_chain = chain.clone();
         child_chain.names.extend(names);
@@ -311,12 +311,21 @@ fn marks(path: &str, config: &GrammarConfig, names: &BTreeSet<String>, slots: &[
     })
 }
 
-/// The fields that `with` sets. Their CEL is not evaluated, so it only has to parse.
-fn with(path: &str, config: &ContextConfig) -> Result<With, String> {
-    for (field, cel) in [("cwd", &config.cwd), ("user", &config.user), ("host", &config.host)] {
-        if let Some(text) = cel {
-            rules::parse_cel(text).map_err(|e| format!("{path}: `with.{field}`: {e}"))?;
+/// The CEL of the fields that `with` sets. It reads only `args` of the names
+/// along the level's chain, the command's `cwd`, `user` and `host`, and `with`.
+fn with(path: &str, config: &ContextConfig, declared: impl Fn(&str) -> bool) -> Result<With, String> {
+    let compile = |field: &str, text: &Option<String>| {
+        let Some(text) = text else { return Ok(None) };
+        let bad = |e: String| format!("{path}: `with.{field}`: {e}");
+        let expr = rules::parse_cel(text).map_err(bad)?;
+        let refs = rules::Refs::of(&expr.expr);
+        if let Some(name) = refs.idents.iter().find(|n| !matches!(n.as_str(), "args" | "cwd" | "user" | "host" | "with")) {
+            return Err(bad(format!("`{name}` is not one of args, cwd, user, host and with")));
         }
-    }
-    Ok(With { cwd: config.cwd.is_some(), user: config.user.is_some(), host: config.host.is_some() })
+        if let Some(name) = refs.args.iter().find(|n| !declared(n)) {
+            return Err(bad(format!("`args.{name}` is not declared along this level")));
+        }
+        Ok(Some(expr))
+    };
+    Ok(With { cwd: compile("cwd", &config.cwd)?, user: compile("user", &config.user)?, host: compile("host", &config.host)? })
 }

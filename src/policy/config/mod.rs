@@ -173,6 +173,13 @@ pub fn project_root(cwd: &str) -> Option<PathBuf> {
     }
 }
 
+/// The built-in grammars, for tests that walk real lines.
+#[cfg(test)]
+pub(crate) fn builtin_grammars() -> Grammars {
+    let config = parse_config(BUILTIN_TOML).expect("the built-in policy parses");
+    Grammars::compile([&config.commands]).expect("the built-in grammars compile")
+}
+
 // --- Compiling ---
 
 fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {

@@ -2,8 +2,8 @@
 //! parts into paths, a directory, *Inner command*s and variables.
 
 use super::run::Run;
-use super::{Inner, Parse, With, list};
-use crate::policy::parse::Word;
+use super::{Inner, Parse, With, list, value_of};
+use crate::policy::parse::{Word, word};
 use crate::policy::value::TriVal;
 
 /// A list being gathered from several parts.
@@ -13,10 +13,10 @@ struct Gather {
 }
 
 impl Run<'_> {
-    pub(super) fn finish(mut self) -> Parse {
+    pub(super) fn finish(mut self, home: &TriVal) -> Parse {
         for level in &self.levels {
             for (name, default) in &level.defaults {
-                apply_default(self.parts.get_mut(name), default);
+                apply_default(self.parts.get_mut(name), default, home);
             }
         }
 
@@ -57,9 +57,9 @@ impl Run<'_> {
             for name in &level.marks.shell {
                 inner.extend(line(self.parts.get(name)));
             }
-            with.cwd |= level.with.cwd;
-            with.user |= level.with.user;
-            with.host |= level.with.host;
+            with.cwd = level.with.cwd.clone().or(with.cwd);
+            with.user = level.with.user.clone().or(with.user);
+            with.host = level.with.host.clone().or(with.host);
         }
 
         Parse {
@@ -75,14 +75,15 @@ impl Run<'_> {
     }
 }
 
-/// A default stands in for an absent argument; next to a non-exhaustive
-/// empty list it may stand in, so the list stays non-exhaustive.
-fn apply_default(part: Option<&mut TriVal>, default: &[String]) {
-    let words = || default.iter().map(|w| TriVal::String(w.clone())).collect::<Vec<_>>();
+/// A default stands in for an absent argument, read as the words a user
+/// would write; next to a non-exhaustive empty list it may stand in, so the
+/// list stays non-exhaustive.
+fn apply_default(part: Option<&mut TriVal>, default: &[String], home: &TriVal) {
+    let words = || default.iter().map(|w| value_of(&word(w, home))).collect::<Vec<_>>();
     match part {
         Some(v @ TriVal::Null) => {
-            if let Some(first) = default.first() {
-                *v = TriVal::String(first.clone());
+            if let Some(first) = words().into_iter().next() {
+                *v = first;
             }
         }
         Some(TriVal::List { elements, .. }) if elements.is_empty() => elements.extend(words()),
