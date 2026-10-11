@@ -57,6 +57,16 @@ and `command_run` returns the reason as its error, so Claude reads how to
 fix the command and the person is not asked. A policy source that fails
 to load denies every command until it reloads.
 
+**Channels.** A line arrives through one *Channel*: `command_run`, judged
+by the daemon with a pane's context, or Claude Code's `Bash` tool, judged
+in the hook's own process from the payload's `cwd`, so Bash checks need
+neither tmux nor the daemon. A rule's `via` scopes it to one *Channel*.
+On Bash, a command that no rule matches gets *Passthrough*, and Claude
+Code's own permissions decide; a hook allow cannot skip the user's
+`settings.json` denies, so the policy only adds strictness there. This
+rules out lints on Bash (their fixes name `command_run` parameters) and a
+Bash line being allowed when any command in it is unknown.
+
 The policy is a guardrail for Claude, not a sandbox: it covers what
 Claude plausibly does in ordinary work, and leaves adversarial spellings
 alone. Every part below trades completeness for rules that are obviously

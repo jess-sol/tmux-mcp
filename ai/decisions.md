@@ -3,6 +3,68 @@
 Settled choices, newest first. Each title is the sentence the ledger and
 roadmap Journals cite.
 
+## The policy hook judges Bash calls in its own process
+
+2026-10-11 · active
+
+`tmux-mcp policy-check` dispatches on the payload's `tool_name`. A `Bash`
+call is judged in the hook's own process, starting from the payload's
+`cwd`, this machine and `$USER`; a `command_run` call goes to the daemon
+as before. One hook entry serves both, with the matcher
+`Bash|…__command_run`. The shared path is `policy::evaluate`, not the
+socket: the daemon supplies a pane's context, the hook a payload's.
+
+**Why:** the user: "I'd like bash hook checks to continue running when
+tmux isn't there … the hook always runs, no matter where the claude
+session is." The daemon is per tmux session and found through `$TMUX`.
+A policy load costs about 7 ms, so loading per call is cheap.
+
+**Alternatives considered:**
+- Bash checks through the daemon: no daemon to reach outside tmux.
+- Decisions in the MCP server: the hook cannot reach it (stdio only), and pane context lives in the daemon.
+- A separate `bash-check` subcommand: a second entry point to misconfigure.
+
+## A Bash line that no rule decides passes through to Claude Code
+
+2026-10-11 · active
+
+On the Bash *Channel*, a command that no rule matches gets *Passthrough*:
+the hook prints nothing, and Claude Code's own permissions decide. A
+matched rule decides explicitly; a hook `ask` prompts even in auto and
+bypass modes. A line takes the strictest of its commands, allow <
+passthrough < ask < deny, so a line is allowed only when every command is.
+`default` decides only tmux lines. *Passthrough* is never a rule's action.
+
+**Why:** the user: "no matches, pass through, matches, do whatever it
+says explicitly"; "something which isn't explicitly an allow defaults to
+passthrough instead of allow". A line-level `Option<Decision>` would let
+`cat notes && ./deploy.sh prod` run `deploy.sh` unprompted.
+
+**Alternatives considered:**
+- The policy's `default` (ask) for unmatched Bash commands: every unknown Bash call would prompt.
+- Matched asks passing through too: guards like `git-push-force` would run unprompted in auto mode.
+- `bash_default` and `tmux_default` keys: no need yet; the model admits them later.
+- A `pass` rule action: it would loosen without an *Exemption*.
+
+## A rule's `via` scopes it to one channel
+
+2026-10-11 · active
+
+`via = "bash"` or `via = "tmux"` makes a rule count only on that
+*Channel*: on the other it neither matches nor exempts. A rule without
+`via` counts on both. `via` is a plain string, and any other value is a
+load error. The lints carry `via = "tmux"`, since their fixes name
+`command_run` parameters; the built-in `prefer-tmux` carries
+`via = "bash"`.
+
+**Why:** the user: "I'd prefer just `via = 'bash'`, and if no via is set,
+assume all". So every existing allow also allows the matching Bash call,
+which a hook allow cannot use to skip the user's `settings.json` denies.
+
+**Alternatives considered:**
+- An allow without `via` matching tmux only, like `host` and `user`: rejected by the user.
+- The channel as a second action axis in the lattice: a channel is where a line runs, not a strictness.
+
 ## A lint is a deny rule whose message tells Claude how to fix the command
 
 2026-10-11 · active
