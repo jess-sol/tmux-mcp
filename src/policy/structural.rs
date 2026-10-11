@@ -18,7 +18,6 @@ pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
             return Some(PolicyResult {
                 decision: Decision::Deny,
                 rule: format!("structural:unknowable_command (name: {})", cmd.name),
-                captured_cwd: None,
             });
         }
     }

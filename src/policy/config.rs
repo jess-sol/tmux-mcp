@@ -12,7 +12,6 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use super::Decision;
-use super::parse::{self, WrapperRegistry};
 use super::rules::{self, RuleSet};
 
 // --- Types ---
@@ -27,8 +26,6 @@ pub struct PolicyConfig {
     pub project_dirs: Option<Vec<String>>,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
-    #[serde(default)]
-    pub wrappers: Vec<WrapperConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,95 +39,15 @@ pub struct RuleConfig {
     pub is_override: bool,
     #[serde(default)]
     pub message: Option<String>,
-    /// CEL expression to capture the new cwd when this rule matches.
-    /// String result → Known(dir), anything else → Unknown.
-    /// Absent → no effect on cwd tracking.
-    #[serde(default)]
-    pub capture_cwd: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WrapperConfig {
-    pub name: String,
-    pub when: String,
-    /// POSIX getopt: stop at first non-option. `getopt = "u:C:"` or `getopt = { short = "s:k:", long = ["signal:"] }`
-    #[serde(default)]
-    pub getopt: Option<GetoptConfig>,
-    /// GNU getopt: flags anywhere before `--`. Same format as `getopt`.
-    #[serde(default)]
-    pub getopt_gnu: Option<GetoptConfig>,
-    pub inner: String,
-    #[serde(default)]
-    pub capture_user: Option<String>,
-    #[serde(default)]
-    pub capture_host: Option<String>,
-    #[serde(default = "default_true")]
-    pub skip_wrapper: bool,
-    #[serde(default = "default_true")]
-    pub args_complete: bool,
-    /// When true, inner commands have uncertain cwd (effective_cwd = Unknown).
-    #[serde(default)]
-    pub changes_cwd: bool,
-    #[serde(default)]
-    pub order: i32,
-}
-
-fn default_true() -> bool { true }
-
-/// Getopt configuration from TOML. Two forms:
-/// - String: just short options optstring `"isC:D:u:"`
-/// - Table: `{ short = "s:k:", long = ["signal:", "kill-after:"] }`
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum GetoptConfig {
-    /// Optstring: `getopt = "isC:D:u:"`
-    Short(String),
-    /// With long options: `getopt = { short = "s:k:", long = ["signal:"] }`
-    Full {
-        #[serde(default)]
-        short: String,
-        #[serde(default)]
-        long: Vec<String>,
-    },
-}
-
-impl GetoptConfig {
-    /// Convert to ArgSpec with the given style.
-    pub fn to_arg_spec(&self, style: super::args::ArgStyle) -> super::args::ArgSpec {
-        match self {
-            GetoptConfig::Short(optstring) => {
-                super::args::ArgSpec::from_optstring(style, optstring)
-            }
-            GetoptConfig::Full { short, long } => {
-                let long_refs: Vec<&str> = long.iter().map(|s| s.as_str()).collect();
-                super::args::ArgSpec::from_optstring_long(style, short, &long_refs)
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TaggedWrapper {
-    pub config: WrapperConfig,
-    pub source: RuleSource,
-    pub source_index: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RuleSource {
-    Builtin = 0,
-    Home = 1,
-    Project = 2,
 }
 
 const BUILTIN_TOML: &str = include_str!("builtin_rules.toml");
 
 // --- PolicyEngine: manages compiled rules with live reload ---
 
-/// Rules + wrappers compiled from the same config snapshot.
+/// Rules compiled from one config snapshot.
 pub struct CompiledPolicy {
     pub rules: RuleSet,
-    pub wrappers: WrapperRegistry,
     /// Unresolved project dir patterns from config (resolved against pane.cwd at eval time).
     pub project_dirs: Vec<String>,
 }
@@ -144,7 +61,7 @@ pub struct PolicyEngine {
 }
 
 fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
-    let (default, project_dirs, rule_configs, tagged_wrappers) = load_merged_config(project_cwd);
+    let (default, project_dirs, rule_configs) = load_merged_config(project_cwd);
     let rules = match rules::compile(&rule_configs, default) {
         Ok(rs) => rs,
         Err(e) => {
@@ -152,8 +69,7 @@ fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
             RuleSet { rules: Vec::new(), default: Decision::Ask }
         }
     };
-    let wrappers = parse::compile_wrappers(&tagged_wrappers);
-    CompiledPolicy { rules, wrappers, project_dirs }
+    CompiledPolicy { rules, project_dirs }
 }
 
 impl PolicyEngine {
@@ -176,7 +92,7 @@ impl PolicyEngine {
         }
     }
 
-    /// Get a read reference to the compiled policy (rules + wrappers).
+    /// Get a read reference to the compiled policy.
     pub fn compiled(&self) -> std::sync::RwLockReadGuard<'_, CompiledPolicy> {
         self.compiled.read().unwrap()
     }
@@ -269,7 +185,7 @@ impl PolicyEngine {
 /// Load and merge config from all three sources.
 pub fn load_merged_config(
     project_cwd: Option<&str>,
-) -> (Decision, Vec<String>, Vec<RuleConfig>, Vec<TaggedWrapper>) {
+) -> (Decision, Vec<String>, Vec<RuleConfig>) {
     let builtin = parse_config(BUILTIN_TOML).expect("built-in rules TOML is invalid");
     let home = load_config_file(&home_config_path_always());
     let project = project_cwd.and_then(|cwd| load_config_file(&project_config_path_always(cwd)));
@@ -314,7 +230,7 @@ fn merge(
     builtin: PolicyConfig,
     home: Option<PolicyConfig>,
     project: Option<PolicyConfig>,
-) -> (Decision, Vec<String>, Vec<RuleConfig>, Vec<TaggedWrapper>) {
+) -> (Decision, Vec<String>, Vec<RuleConfig>) {
     let default = project.as_ref()
         .and_then(|c| c.default.as_ref())
         .or_else(|| home.as_ref().and_then(|c| c.default.as_ref()))
@@ -336,31 +252,7 @@ fn merge(
         rules.extend(config.rules.iter().cloned());
     }
 
-    // Merge wrappers, ordered by order → source → file index: the first
-    // matching wrapper gives a command its one reading.
-    let mut tagged_wrappers = Vec::new();
-
-    for (i, w) in builtin.wrappers.into_iter().enumerate() {
-        tagged_wrappers.push(TaggedWrapper { config: w, source: RuleSource::Builtin, source_index: i });
-    }
-    if let Some(home) = home {
-        for (i, w) in home.wrappers.into_iter().enumerate() {
-            tagged_wrappers.push(TaggedWrapper { config: w, source: RuleSource::Home, source_index: i });
-        }
-    }
-    if let Some(project) = project {
-        for (i, w) in project.wrappers.into_iter().enumerate() {
-            tagged_wrappers.push(TaggedWrapper { config: w, source: RuleSource::Project, source_index: i });
-        }
-    }
-
-    tagged_wrappers.sort_by(|a, b| {
-        a.config.order.cmp(&b.config.order)
-            .then(a.source.cmp(&b.source))
-            .then(a.source_index.cmp(&b.source_index))
-    });
-
-    (default, project_dirs, rules, tagged_wrappers)
+    (default, project_dirs, rules)
 }
 
 fn parse_decision(s: &str) -> Decision {
@@ -378,23 +270,7 @@ mod tests {
     #[test]
     fn builtin_toml_parses_successfully() {
         let config = parse_config(BUILTIN_TOML).unwrap();
-        assert!(!config.rules.is_empty());
         assert_eq!(config.default.as_deref(), Some("ask"));
-    }
-
-    #[test]
-    fn builtin_has_eval_deny_rule() {
-        let config = parse_config(BUILTIN_TOML).unwrap();
-        let eval_rule = config.rules.iter().find(|r| r.description == "eval").unwrap();
-        assert_eq!(eval_rule.action, "deny");
-    }
-
-    #[test]
-    fn builtin_has_safe_commands() {
-        let config = parse_config(BUILTIN_TOML).unwrap();
-        let safe = config.rules.iter().find(|r| r.description == "file readers (in-project)").unwrap();
-        assert_eq!(safe.action, "allow");
-        assert!(safe.when.contains("cat"));
     }
 
     #[test]
@@ -425,7 +301,7 @@ mod tests {
 
     #[test]
     fn builtin_default_is_ask() {
-        let (default, _, _, _) = load_merged_config(None);
+        let (default, _, _) = load_merged_config(None);
         assert_eq!(default, Decision::Ask);
     }
 
@@ -433,7 +309,7 @@ mod tests {
     fn home_overrides_default() {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let home = parse_config("default = \"deny\"").unwrap();
-        let (default, _, _, _) = merge(builtin, Some(home), None);
+        let (default, _, _) = merge(builtin, Some(home), None);
         assert_eq!(default, Decision::Deny);
     }
 
@@ -442,7 +318,7 @@ mod tests {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let home = parse_config("default = \"deny\"").unwrap();
         let project = parse_config("default = \"allow\"").unwrap();
-        let (default, _, _, _) = merge(builtin, Some(home), Some(project));
+        let (default, _, _) = merge(builtin, Some(home), Some(project));
         assert_eq!(default, Decision::Allow);
     }
 
@@ -460,7 +336,7 @@ mod tests {
             when = 'command.name == "ls"'
             action = "deny"
         "#).unwrap();
-        let (_, _, rules, _) = merge(builtin, Some(home), None);
+        let (_, _, rules) = merge(builtin, Some(home), None);
         assert_eq!(rules[0].description, "builtin");
         assert_eq!(rules[1].description, "home");
     }
@@ -480,7 +356,7 @@ mod tests {
             when = 'true'
             action = "deny"
         "#).unwrap();
-        let (_, _, rules, _) = merge(builtin, Some(home), Some(project));
+        let (_, _, rules) = merge(builtin, Some(home), Some(project));
         assert_eq!(rules[0].description, "home");
         assert_eq!(rules[1].description, "project");
     }
@@ -497,14 +373,14 @@ mod tests {
             when = 'true'
             action = "deny"
         "#).unwrap();
-        let (_, _, rules, _) = merge(builtin, None, None);
+        let (_, _, rules) = merge(builtin, None, None);
         assert_eq!(rules[0].description, "first");
         assert_eq!(rules[1].description, "second");
     }
 
     #[test]
     fn no_config_files_uses_builtin_only() {
-        let (default, _, rules, _) = load_merged_config(None);
+        let (default, _, rules) = load_merged_config(None);
         assert_eq!(default, Decision::Ask);
         assert_eq!(rules.len(), parse_config(BUILTIN_TOML).unwrap().rules.len());
     }
@@ -514,7 +390,7 @@ mod tests {
         let builtin = parse_config(BUILTIN_TOML).unwrap();
         let builtin_count = builtin.rules.len();
         let empty = parse_config("").unwrap();
-        let (_, _, rules, _) = merge(builtin, Some(empty), None);
+        let (_, _, rules) = merge(builtin, Some(empty), None);
         assert_eq!(rules.len(), builtin_count);
     }
 

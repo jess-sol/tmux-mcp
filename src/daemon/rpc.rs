@@ -745,11 +745,6 @@ async fn handle_command_run(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("origin_pane is required"))?;
 
-    // Lint the command for anti-patterns
-    if let Err(err) = crate::lint::lint_command_run(command) {
-        return Err(RpcError::invalid_params(err.to_string()));
-    }
-
     // Validate window access, get pane handle and shell PID
     let (pane_handle, shell_pid) = {
         let registry = state.registry.read().await;
@@ -767,14 +762,6 @@ async fn handle_command_run(
     // --- Policy check ---
     {
         let ctx = read_pane_context(state, pane_id).await?;
-
-        // Lint: reject "cd <cwd> && ..." where the cd is a no-op
-        if let Some(cwd) = &ctx.cwd {
-            if let Err(err) = crate::lint::lint_cd_to_cwd(command, cwd) {
-                return Err(RpcError::invalid_params(err.to_string()));
-            }
-        }
-
         let result = policy::evaluate(command, &ctx, &state.policy);
         match result.decision {
             policy::Decision::Allow => { /* proceed */ }
@@ -1192,12 +1179,6 @@ async fn handle_request_approval(
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
 
-    // Lint the command before policy evaluation — early rejection avoids
-    // wasting a user approval prompt on commands that would fail anyway.
-    if let Err(err) = crate::lint::lint_command_run(command) {
-        return Ok(json!({"result": "lint", "message": err.to_string()}));
-    }
-
     // Window scoping still applies
     let origin_pane = {
         let registry = state.registry.read().await;
@@ -1210,14 +1191,6 @@ async fn handle_request_approval(
     };
 
     let ctx = read_pane_context(state, pane_id).await?;
-
-    // cd-to-cwd lint needs the pane's working directory
-    if let Some(cwd) = &ctx.cwd {
-        if let Err(err) = crate::lint::lint_cd_to_cwd(command, cwd) {
-            return Ok(json!({"result": "lint", "message": err.to_string()}));
-        }
-    }
-
     let result = policy::evaluate(command, &ctx, &state.policy);
 
     let ctx_json = json!({
