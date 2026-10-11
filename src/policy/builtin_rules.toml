@@ -468,6 +468,29 @@ arguments = [["group", "--reference:"], "files...", "--recursive|-R", "--verbose
 marks.read = ["reference"]
 marks.write = ["files"]
 
+# --- Signals: the signal is a value, so a rule can tell SIGKILL from the default ---
+
+[commands.kill]
+parser = { name = "posix", leading_number = "signal" }
+arguments = ["pids...", "--signal|-s:", "signal_number=-n:", "--list|-l", "--table|-L"]
+
+# pkill's -s is the session, not the signal.
+[commands.pkill]
+parser = { name = "gnu", leading_number = "signal" }
+arguments = [
+  "pattern", "--signal:", "--full|-f", "--exact|-x", "--newest|-n", "--oldest|-o", "--echo|-e",
+  "--count|-c", "--ignore-case|-i", "--euid|-u:", "--uid|-U:", "--pgroup|-g:", "--group|-G:",
+  "--parent|-P:", "--session|-s:", "--terminal|-t:",
+]
+
+[commands.killall]
+parser = { name = "gnu", leading_number = "signal" }
+arguments = [
+  "names...", "--signal|-s:", "--exact|-e", "--ignore-case|-I", "--process-group|-g",
+  "--interactive|-i", "--list|-l", "--quiet|-q", "--regexp|-r", "--user|-u:", "--verbose|-v",
+  "--wait|-w", "--younger-than|-y:", "--older-than|-o:",
+]
+
 # --- Programs with their own language ---
 
 [commands.sed]
@@ -1069,6 +1092,7 @@ command_run to run in it, command_read to read output, press_key for keys.'''
 
 [[rules]]
 id = "outside-project"
+via = "tmux"
 path = '!in_project(path) && !is_device(path)'
 action = "ask"
 message = "a path outside the project"
@@ -1079,6 +1103,7 @@ message = "a path outside the project"
 
 [[rules]]
 id = "variable-runs-code"
+via = "tmux"
 when = '''
   variables.exists(v, v in ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV",
                             "PROMPT_COMMAND", "PS4", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
@@ -1159,6 +1184,7 @@ action = "ask"
 
 [[rules]]
 id = "awk-program"
+via = "tmux"
 command = "awk"
 when = '''
   args.file != [] || args.program != null && !awk_is_plain(args.program)
@@ -1169,6 +1195,7 @@ message = "the awk program can run a command or open a file: system(), a | pipe,
 
 [[rules]]
 id = "gawk-program"
+via = "tmux"
 command = "gawk"
 when = '''
   args.file != [] || args.program != null && !awk_is_plain(args.program)
@@ -1179,6 +1206,7 @@ message = "the awk program can run a command or open a file: system(), a | pipe,
 
 [[rules]]
 id = "mawk-program"
+via = "tmux"
 command = "mawk"
 when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
 action = "ask"
@@ -1186,6 +1214,7 @@ message = "the awk program can run a command or open a file: system(), a | pipe,
 
 [[rules]]
 id = "nawk-program"
+via = "tmux"
 command = "nawk"
 when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
 action = "ask"
@@ -1193,6 +1222,7 @@ message = "the awk program can run a command or open a file: system(), a | pipe,
 
 [[rules]]
 id = "sed-script"
+via = "tmux"
 command = "sed"
 when = '''
   args.file != [] || args.script != null && !sed_is_plain(args.script)
@@ -1213,8 +1243,34 @@ action = "ask"
 
 [[rules]]
 id = "process-signals"
+via = "tmux"
 when = 'command.name in ["kill", "pkill", "killall"]'
 action = "ask"
+
+# On Bash, auto mode judges an ordinary signal; SIGKILL leaves the process no chance to clean up.
+[[rules]]
+id = "kill-sigkill"
+via = "bash"
+command = "kill"
+when = '(args.signal + args.signal_number).exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
+action = "ask"
+message = "SIGKILL leaves the process no chance to clean up"
+
+[[rules]]
+id = "pkill-sigkill"
+via = "bash"
+command = "pkill"
+when = 'args.signal.exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
+action = "ask"
+message = "SIGKILL leaves the process no chance to clean up"
+
+[[rules]]
+id = "killall-sigkill"
+via = "bash"
+command = "killall"
+when = 'args.signal.exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
+action = "ask"
+message = "SIGKILL leaves the process no chance to clean up"
 
 [[rules]]
 id = "apt-remove"
@@ -1259,12 +1315,36 @@ action = "ask"
 
 [[rules]]
 id = "curl-wget"
+via = "tmux"
 when = 'command.name in ["curl", "wget"]'
 action = "ask"
 
 [[rules]]
 id = "permissions"
+via = "tmux"
 when = 'command.name in ["chmod", "chown", "chgrp"]'
+action = "ask"
+
+# On Bash, auto mode judges a single file's mode; a recursive change reaches a whole tree.
+[[rules]]
+id = "chmod-recursive"
+via = "bash"
+command = "chmod"
+when = 'args.recursive'
+action = "ask"
+
+[[rules]]
+id = "chown-recursive"
+via = "bash"
+command = "chown"
+when = 'args.recursive'
+action = "ask"
+
+[[rules]]
+id = "chgrp-recursive"
+via = "bash"
+command = "chgrp"
+when = 'args.recursive'
 action = "ask"
 
 [[rules]]
@@ -1279,6 +1359,7 @@ message = "cargo install downloads and compiles arbitrary code from crates.io"
 
 [[rules]]
 id = "info-commands"
+via = "tmux"
 when = '''
   command.name in [null, "echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id",
                    "which", "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type",
@@ -1291,11 +1372,13 @@ action = "allow"
 
 [[rules]]
 id = "wrappers-and-export"
+via = "tmux"
 when = 'command.name in ["timeout", "nice", "nohup", "xargs", "env", "export"]'
 action = "allow"
 
 [[rules]]
 id = "sudo-with-command"
+via = "tmux"
 command = "sudo"
 when = 'args.command != [] && !args.edit && !args.shell && !args.login'
 action = "allow"
@@ -1303,41 +1386,48 @@ action = "allow"
 # -o and -F can set a ProxyCommand, which runs on this machine.
 [[rules]]
 id = "ssh-with-command"
+via = "tmux"
 command = "ssh"
 when = 'args.command != [] && args.option == [] && args.config == []'
 action = "allow"
 
 [[rules]]
 id = "sh-c"
+via = "tmux"
 command = "sh"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
 id = "bash-c"
+via = "tmux"
 command = "bash"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
 id = "dash-c"
+via = "tmux"
 command = "dash"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
 id = "zsh-c"
+via = "tmux"
 command = "zsh"
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
 id = "cd-pushd-popd"
+via = "tmux"
 when = 'command.name in ["cd", "pushd", "popd"]'
 action = "allow"
 
 [[rules]]
 id = "file-tools"
+via = "tmux"
 when = '''
   command.name in ["cat", "less", "more", "wc", "file", "stat", "realpath", "readlink", "diff",
                    "base64", "md5sum", "sha256sum", "uniq", "head", "tail", "ls", "tree", "cut", "sort",
@@ -1348,11 +1438,13 @@ action = "allow"
 
 [[rules]]
 id = "cargo"
+via = "tmux"
 command = "cargo"
 action = "allow"
 
 [[rules]]
 id = "git-reads"
+via = "tmux"
 command = "git"
 when = '''
   subcommand in ["status", "log", "diff", "show", "shortlog", "blame", "ls-files", "ls-tree",
@@ -1362,24 +1454,28 @@ action = "allow"
 
 [[rules]]
 id = "git-remote-listings"
+via = "tmux"
 command = "git remote"
 when = 'subcommand in [null, "show", "get-url"]'
 action = "allow"
 
 [[rules]]
 id = "git-stash-listings"
+via = "tmux"
 command = "git stash"
 when = 'subcommand in ["list", "show"]'
 action = "allow"
 
 [[rules]]
 id = "git-reflog-listings"
+via = "tmux"
 command = "git reflog"
 when = 'subcommand in [null, "show"]'
 action = "allow"
 
 [[rules]]
 id = "git-branch-listings"
+via = "tmux"
 command = "git branch"
 when = '''
   (args.list || args.names == [])
@@ -1390,12 +1486,14 @@ action = "allow"
 
 [[rules]]
 id = "git-tag-listings"
+via = "tmux"
 command = "git tag"
 when = '(args.list || args.names == []) && !args.delete'
 action = "allow"
 
 [[rules]]
 id = "git-config-reads"
+via = "tmux"
 command = "git config"
 when = '''
   !(args.unset || args.unset_all || args.add || args.replace_all || args.edit

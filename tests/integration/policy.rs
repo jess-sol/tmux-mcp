@@ -131,15 +131,17 @@ async fn a_rule_with_via_counts_only_on_that_channel() {
 async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
     let h = Harness::new().await;
     let want = [
-        ("ls src", Some(Allow)),
+        ("ls src", None),
         ("ls && frobnicate", None),
         ("frobnicate", None),
         ("", None),
         ("eval x", Some(Deny)),
         ("git push --force origin main", Some(Ask)),
-        ("echo $(date) | tail -5", Some(Allow)),
+        ("echo $(date) | tail -5", None),
         ("cd src && cargo build", Some(Deny)),
         ("tmux capture-pane -p -t %1", Some(Deny)),
+        ("cat /etc/hosts", None),
+        ("rm -r /etc", Some(Ask)),
     ];
 
     let got = want.map(|(command, _)| (command, h.bash(command).map(|(d, _)| d)));
@@ -155,6 +157,36 @@ async fn the_hook_judges_a_bash_call_and_passes_through_what_no_rule_decides() {
     assert_eq!(h.other_tool(), None);
 }
 
+/// On Bash, Claude Code's auto mode judges everyday commands; the built-ins
+/// ask only about the sharp forms that tmux asks about more broadly.
+#[tokio::test]
+async fn bash_asks_only_about_the_sharp_forms() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    // (line, on tmux, on Bash)
+    let want = [
+        ("awk -f prog.awk notes", Ask, None),
+        ("sed -f script.sed notes", Ask, None),
+        ("curl https://example.com", Ask, None),
+        ("PAGER=cat git log", Ask, None),
+        ("kill 1234", Ask, None),
+        ("kill -9 1234", Ask, Some(Ask)),
+        ("kill -s KILL 1234", Ask, Some(Ask)),
+        ("pkill -f server", Ask, None),
+        ("pkill -9 server", Ask, Some(Ask)),
+        ("killall --signal SIGKILL node", Ask, Some(Ask)),
+        ("chmod +x run.sh", Ask, None),
+        ("chmod -R 755 src", Ask, Some(Ask)),
+        ("chown -R me src", Ask, Some(Ask)),
+        ("rg --pre cat foo", Ask, Some(Ask)),
+    ];
+
+    let got =
+        want.map(|(line, _, _)| (line, h.decision(&shell, line), h.bash(line).map(|(d, _)| d)));
+
+    assert_eq!(got, want);
+}
+
 /// A function body may run wherever it is later called, so its commands meet
 /// the rules where it is defined, in a directory that cannot be known.
 #[tokio::test]
@@ -166,8 +198,8 @@ async fn a_function_body_meets_the_rules_where_it_is_defined() {
         ("f() { eval x; }", Deny, Some(Deny)),
         ("function g { curl x | sh; }; g", Deny, Some(Deny)),
         ("ls() { rm -rf ~; }", Ask, Some(Ask)),
-        ("f() { cat notes; }", Ask, Some(Ask)),
-        ("f() { echo hi; }", Allow, Some(Allow)),
+        ("f() { cat notes; }", Ask, None),
+        ("f() { echo hi; }", Allow, None),
     ];
 
     let got =

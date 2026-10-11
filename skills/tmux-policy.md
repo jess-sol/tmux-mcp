@@ -52,7 +52,7 @@ The reason lists each rule at the winning action as `<id>` or `<id>: <message>`,
 Placement of decisions:
 
 - Reads and writes in the project → allow.
-- Anything outside the project → leave to the built-in `outside-project` (ask); an allow needs no path check of its own.
+- Anything outside the project → leave to the built-in `outside-project` (ask, on tmux); an allow needs no path check of its own.
 - State changes beyond files (installs, pushes, signals, services) → ask.
 - Destructive or circumventing commands → deny, with a `message` naming what to do instead. A deny reaches only Claude; the user is never asked.
 - A wrapper (`timeout`, `sudo`, `ssh`, `sh -c`, `xargs`, `find -exec`) needs no rule for what it runs: its *Inner command* meets the rules on its own and the line takes the strictest result.
@@ -229,6 +229,12 @@ tmux only). A line is the strictest of its commands, allow < passthrough < ask <
 is allowed only when every command is. The built-in `prefer-tmux` denies `cargo`, `make`, `npm`,
 `podman` and `kubectl` through Bash; lift it per tool with an allow that has `via = "bash"` and
 `exempts = ["prefer-tmux"]`. The built-in `tmux-cli` denies the `tmux` command through Bash.
+Every built-in allow has `via = "tmux"`, and so does `outside-project`, so on Bash only asks and
+denies come from the built-ins and a path outside the project passes through; an allow you add
+without `via` applies on Bash too. Asks that would fire on everyday Bash use are tmux-only too
+(awk and sed programs, `curl-wget`, `variable-runs-code`); `process-signals` and `permissions`
+have tight Bash twins that ask only for SIGKILL (`kill-sigkill`, `pkill-sigkill`,
+`killall-sigkill`) and for `-R` (`chmod-recursive`, `chown-recursive`, `chgrp-recursive`).
 
 Only `id` and `action` are required. A rule without `when`, `path`, `write`, `host` or `user`
 matches every command on its `command` path. A rule with `path` or `write` matches only through a
