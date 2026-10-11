@@ -222,6 +222,9 @@ async fn the_builtin_policy_decides_common_lines() {
         ("find . -exec eval x \\;", Deny),
         ("find /etc -exec cat {} \\;", Ask),
         ("find . -name x -exec grep -l y {} +", Ask),
+        // Follow-up: `find src -name '*.rs' -exec wc -l {} +` could get Allow once `{}` is a path under a start point.
+        ("find . -execdir cat notes \\;", Ask),
+        ("find . -exec sh -c 'cat {}' \\;", Deny),
         ("sh -c 'ls src'", Allow),
         ("bash -lc 'ls src | wc -l'", Allow),
         ("bash -c 'cat /etc/shadow'", Ask),

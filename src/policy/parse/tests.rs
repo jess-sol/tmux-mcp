@@ -311,4 +311,7 @@ fn a_wrapper_gives_its_inner_command_the_context_its_with_sets() {
     assert_eq!(cat.reads, TriVal::List { elements: vec![u.clone()], exhaustive: true });
     let cat = command(&parse("sudo -u root sh -c 'cd /tmp && cat x'"), "cat");
     assert_eq!((cat.cwd, cat.context.user), (s("/tmp"), s("root")));
+    // -execdir runs its command in each file's directory.
+    assert_eq!(command(&parse("find . -execdir cat x ;"), "cat").cwd, u);
+    assert_eq!(command(&parse("find . -exec cat x ;"), "cat").cwd, s("/p/q"));
 }

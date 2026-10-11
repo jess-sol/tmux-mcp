@@ -454,4 +454,5 @@ fn a_grammar_that_breaks_the_format_does_not_load() {
             Err(err) => assert!(err.contains(want), "{toml}\n  error: {err}\n  wanted: {want}"),
         }
     }
+    assert!(grammars("[commands.t]\nparser = \"gnu\"\nwith.cwd = 'unknown'").is_ok());
 }

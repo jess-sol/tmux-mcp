@@ -337,6 +337,10 @@ fn unknown_propagates_through_kleene_logic() {
     assert_eq!(eval_cel_with(r#"true || x == "root""#, &ctx), TriVal::Bool(true));
     assert_eq!(eval_cel_with(r#"true && x == "root""#, &ctx), TriVal::Unknown);
     assert_eq!(eval_cel_with(r#"false && x == "root""#, &ctx), TriVal::Bool(false));
+    // `unknown` is a value, as `null` is; no variable binds it.
+    let bound = vars(&[("unknown", TriVal::String("x".into()))]);
+    assert_eq!(eval_cel_with("unknown", &bound), TriVal::Unknown);
+    assert_eq!(eval_cel_with("true ? unknown : null", &bound), TriVal::Unknown);
 }
 
 #[test]

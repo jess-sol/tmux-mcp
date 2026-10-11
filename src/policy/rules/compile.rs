@@ -8,12 +8,14 @@ use std::path::{Component, Path};
 use cel_parser::ast as cel;
 
 use super::CompiledRule;
+use super::eval::UNKNOWN;
 use super::identity::normalize;
 use crate::policy::Decision;
 use crate::policy::config::RuleConfig;
 use crate::policy::grammar::Grammars;
 
 /// The variables an expression reads, and the `args.<name>` it selects.
+/// `unknown` is a value, not a variable.
 #[derive(Default)]
 pub(crate) struct Refs {
     pub(crate) idents: BTreeSet<String>,
@@ -149,7 +151,7 @@ impl Refs {
 
     fn walk(&mut self, expr: &cel::Expr, bound: &mut Vec<String>) {
         match expr {
-            cel::Expr::Ident(name) if !bound.contains(name) => _ = self.idents.insert(name.clone()),
+            cel::Expr::Ident(name) if !bound.contains(name) && name != UNKNOWN => _ = self.idents.insert(name.clone()),
             cel::Expr::Select(s) => match &s.operand.expr {
                 cel::Expr::Ident(name) if name == "args" && !bound.contains(name) => {
                     self.idents.insert(name.clone());

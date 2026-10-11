@@ -29,8 +29,13 @@ pub(super) struct Site<'a> {
     pub(super) host: &'a Host,
 }
 
+/// The identifier that CEL reads as the Unknown value.
+pub(super) const UNKNOWN: &str = "unknown";
+
 pub(super) fn eval_expr(expr: &cel::Expr, ctx: &Ctx) -> TriVal {
     match expr {
+        // `unknown` is a value, as `null` is.
+        cel::Expr::Ident(name) if name == UNKNOWN => TriVal::Unknown,
         cel::Expr::Ident(name) => ctx.vars.get(name).cloned().unwrap_or(TriVal::Unknown),
         cel::Expr::Literal(val) => literal_to_trival(val),
         cel::Expr::Select(select) => {

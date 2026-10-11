@@ -237,6 +237,8 @@ argument.files.default = ["."]
 marks.read = ["files", "newer", "anewer", "cnewer", "samefile", "files0_from"]
 marks.write = ["fprint", "fprint0", "fls", "fprintf"]
 marks.command = ["exec", "execdir", "ok", "okdir"]
+# -execdir and -okdir run their command in each file's directory, which cannot be known.
+with.cwd = 'args.execdir == [] && args.okdir == [] ? null : unknown'
 
 # =============================================================================
 # Commands that run commands
