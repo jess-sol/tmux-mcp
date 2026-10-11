@@ -30,7 +30,7 @@ Targets **tmux + bash** specifically. Other shells or terminal multiplexers prob
                    └───────────────────────┘                 └───────────────────┘
 ```
 
-The **MCP server** is stateless — it spawns on demand and connects to a **background daemon** over a unix socket. The daemon attaches to tmux in control mode, maintaining a live model of every pane. It auto-spawns on first use and exits after 5 minutes of inactivity.
+The **MCP server** is stateless — it spawns on demand and connects to a **background daemon** over a unix socket. The daemon attaches to tmux in control mode, maintaining a live model of every pane. It auto-spawns on first use and exits after 5 minutes when no clients are connected.
 
 ## Key Features
 
@@ -67,21 +67,26 @@ For active commands, `next` blocks up to a timeout waiting for new output — no
 
 This isn't a sandbox against adversarial agents — it's guardrails for good-faith ones that occasionally reach for `rm -rf` or `curl | sh` without thinking twice. Every command line is parsed into its commands (via [brush](https://github.com/reubeno/brush)); each command's grammar parses its words into named parts and marks the paths it reads and writes; CEL rules then decide. The evaluator uses **three-valued logic** (true / false / unknown) because some properties — like what a variable expands to — can't be known statically. When a rule cannot be ruled out, it asks or denies rather than allows.
 
-Grammars and rules are loaded from three tiers (built-in < user < project) and hot-reload on file change:
+Wrappers (`sudo`, `ssh`, `timeout`, `xargs`, `sh -c`, `find -exec`) are judged by the command they run, and a line takes the strictest decision of its commands. A command whose name can't be known (`$CMD args`, `bash -c "$X"`) is denied as dynamic dispatch.
+
+Built-in **lints** are deny rules for habits that waste output or hide failures (`ls | tail -5`, `make 2>&1`, `echo $?`, a trailing `&`). Their message tells Claude the fix, such as `command_run`'s `tail` parameter, so Claude corrects the command without asking you.
+
+Grammars and rules come from three files (built-in, user, project) and reload on the next command after a change. Every matching rule counts and the strictest wins; a rule loosens another only by naming its id in `exempts`:
 
 ```toml
 [commands.deploy]
 parser = "gnu"
-arguments = ["targets...", "--force|-f"]
+arguments = ["targets...", "--force|-f", "--output|-o:"]
+marks.write = ["output"]
 
 [[rules]]
-description = "staging deploys"
+id = "deploy-staging"
 command = "deploy"
 when = 'args.targets == ["staging"] && !args.force'
 action = "allow"
 ```
 
-Use `/tmux-policy` for interactive rule generation.
+Use `/tmux-policy` to write grammars, rules and exemptions.
 
 ### Context-aware approval drift detection
 
@@ -89,8 +94,8 @@ When the policy engine returns "ask" and a human approves, that approval is boun
 
 ### Dual-mode security
 
-- **With hook** (human-in-the-loop): Safe commands auto-approve silently. Everything else triggers Claude Code's native approval prompt. The policy hook runs as a Claude Code `PreToolUse` hook.
-- **Without hook** (autonomous): The daemon enforces policy directly — safe commands execute, everything else is rejected with an actionable hint. No human needed.
+- **With hook** (human-in-the-loop): Safe commands auto-approve silently, risky ones trigger Claude Code's native approval prompt, and denied ones are blocked with a reason Claude reads, without asking you. The policy hook runs as a Claude Code `PreToolUse` hook.
+- **Without hook** (autonomous): The daemon enforces policy directly — safe commands execute, everything else is rejected with the rule's reason. No human needed.
 
 ## Tools
 
@@ -169,8 +174,9 @@ Add to `~/.claude/settings.json` (merge with existing):
 
 - **Read-only tools** (`list_panes`, `command_read`, `command_history`, `debug_pane`, `inject_osc133`) are auto-allowed — they can't modify anything.
 - **`command_run`** is auto-allowed so calls reach the daemon, but the **policy hook** gates execution:
-  - Safe commands (ls, cat, grep, git status, cargo test, etc.) auto-approve silently
-  - Everything else triggers Claude Code's native approval prompt
+  - Safe commands on files in the project (ls, cat, grep, git status, cargo test, etc.) auto-approve silently
+  - Risky commands, and anything touching paths outside the project, trigger Claude Code's native approval prompt
+  - Denied commands are blocked with a reason telling Claude what to do instead
   - Approvals are context-aware — if the pane's hostname, cwd, user, or foreground process changes between approval and execution, the approval is invalidated
 - **`press_key`** is intentionally omitted. It's a potential bypass for command_run policy (type a command, press Enter). Claude Code prompts for each use.
 
@@ -183,32 +189,64 @@ mkdir -p ~/.claude/skills/tmux-policy
 cp skills/tmux-policy.md ~/.claude/skills/tmux-policy/SKILL.md
 ```
 
-This adds the `/tmux-policy` command. When a command gets blocked, type `/tmux-policy allow` to generate and save a CEL rule for it. Examples:
+This adds the `/tmux-policy` command, which writes a rule, a command grammar, or an exemption for you. It is also the reference for the policy format. Examples:
 
 ```
+/tmux-policy                         # fix whatever the last blocked command ran into
 /tmux-policy allow cargo install
-/tmux-policy allow                   # allow the last blocked command
 /tmux-policy ask rm                  # require approval for rm
 ```
 
-Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.toml` (project). Changes take effect immediately via file watcher.
+Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.toml` (project). Changes take effect on the next command.
+
+### 5. Steer Bash toward tmux (optional)
+
+Claude Code's own Bash tool runs where you can't see it. A `PreToolUse` hook on `Bash` can turn away the commands you'd rather watch in a pane. Exit status 2 blocks the call and hands stderr to Claude. Save this as `~/.claude/hooks/prefer-tmux.sh` and make it executable:
+
+```sh
+#!/usr/bin/env bash
+cmd=$(jq -r '.tool_input.command')
+if grep -qE '^(cargo|make|npm|podman|kubectl)( |$)' <<<"$cmd"; then
+  echo "Run this in tmux with mcp__tmux-mcp__command_run so the user can watch it." >&2
+  exit 2
+fi
+```
+
+Then add it beside the policy hook in `~/.claude/settings.json`:
+
+```json
+{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "~/.claude/hooks/prefer-tmux.sh" }] }
+```
+
+The match is on the line's first word only, so `cd x && cargo build` passes through.
 
 ### Without the hook (autonomous mode)
 
 If no hook is configured but `command_run` is in the allow list, the daemon enforces policy directly:
 - Safe commands execute immediately
-- Everything else is rejected with an actionable hint telling Claude which commands are available
+- Everything else is rejected with the rule's reason, so Claude can adjust the command
 
 This is useful for autonomous sessions where no human is in the loop.
 
 ## Policy Configuration
 
-Policy files hold command grammars and CEL rules. Three sources are merged (built-in < user < project); a file that does not load denies every command until it is fixed:
+Policy files hold command grammars and CEL rules. Rules from all three sources count together; a later source's grammar for a command replaces the earlier one. A file that does not load denies every command until it is fixed:
 
 | Source | Path | Purpose |
 |--------|------|---------|
-| Built-in | (compiled into binary) | Default safe/dangerous command lists |
+| Built-in | (compiled into binary) | Built-in grammars, rules and lints |
 | User | `~/.claude/tmux-mcp.toml` | Personal rules across all projects |
 | Project | `.claude/tmux-mcp.toml` | Project-specific rules |
 
-Use `/tmux-policy` to generate rules interactively, or edit the files directly.
+A reason starts with the id of the rule that decided. `(could not be ruled out)` means the rule fired on something unknown, usually an option the command's grammar doesn't declare. To loosen a built-in rule in one project, exempt its id:
+
+```toml
+[[rules]]
+id = "push-with-lease"
+command = "git push"
+when = 'args.force_with_lease && !args.force'
+action = "allow"
+exempts = ["git-push-force"]
+```
+
+Use `/tmux-policy` to write rules, or edit the files directly.

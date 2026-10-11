@@ -52,28 +52,58 @@ command, because a person editing mid-line must still read as typing.
 ## Policy
 
 The Claude Code hook (`tmux-mcp policy-check`) and `command_run` both ask
-the policy. A deny reaches Claude Code as exit status 2 with the reason on
-stderr; a lint refusal as a JSON deny.
-
-A command line parses (brush) into a flat list of commands. Wrappers
-(`sudo`, `ssh`, `find -exec`, `sh -c`, …) unwrap inner commands; the first
-matching wrapper gives a command its one reading, so wrappers keep
-`order`. Commands of a line combine strictest-wins, and so do rules
-within a command: deny, then ask, then allow, no match asking. An
-*Override rule* group decides alone when any of it matches. Order never
-decides a rule's result, and no rule names another, because projects
-hold hundreds of rules across several files.
-
-Rule conditions are CEL, three-valued inside; at the top Unknown fails
-closed — it fires deny and ask rules, never allow rules or overrides.
-Deny rules must be written tight: a command whose name is Unknown is
-denied, since it can be `eval`.
+the policy. A deny reaches Claude Code as a JSON deny with the reason,
+and `command_run` returns the reason as its error, so Claude reads how to
+fix the command and the person is not asked. A policy source that fails
+to load denies every command until it reloads.
 
 The policy is a guardrail for Claude, not a sandbox: it covers what
 Claude plausibly does in ordinary work, and leaves adversarial spellings
-alone. Today rules read raw words (with quotes kept), wrappers hold the
-only real argument grammars, and nine lints run before the rules as
-Rust code that no rule can override.
+alone. Every part below trades completeness for rules that are obviously
+correct.
+
+**Grammars parse; rules mean.** A line parses (brush) into commands, with
+quotes removed. A `[commands.<name>]` grammar parses one command's words
+into named parts (`args`) under one of three parsers; its `marks` say
+which parts are paths read or written, a cwd, an *Inner command* or
+variables. No rule reads raw words, so no rule parses by hand. A grammar
+declares only what rules need: an undeclared option makes what later
+words give Unknown, so a grammar that learns more never changes a
+certain reading. This rules out per-tool closed option lists and prefix
+matching.
+
+**Commands that run commands.** A wrapper is a grammar that marks an
+*Inner command* (`sudo`, `ssh`, `xargs`, `sh -c`, `find -exec`). Each
+inner command meets the rules itself, and the line takes the strictest
+decision; a *Dynamic dispatch* is denied. A command hidden inside an
+option value (`git -c core.pager=…`) is a rule's job, by presence.
+
+**Context.** Each command runs in a context of cwd, host, user and home.
+A line starts from what OSC 7 reported since the last command started;
+grammar `with` CEL sets an inner command's context, and `cd`/`pushd`
+move the cwd along their `&&` chain only. The parse resolves every path
+to absolute or Unknown, so rules see the command, never the pane.
+Command identity is the spelling: a bare name matches a bare `command`,
+and a relative spelling can turn a deny into an ask, never gain an allow.
+
+**Deciding.** Rule keys (`command`, `when`, `path`, `write`, `host`,
+`user`) are CEL, each over its own subject, three-valued inside; Unknown
+fails closed, firing deny and ask rules, never allows. An allow without
+`host` or `user` matches only this machine and the shell's own user; an
+ask or deny matches everywhere. Every matching rule in every source
+counts, strictest wins, and order decides nothing. A rule loosens
+another only by an *Exemption* of its id, so a guard an update adds
+always fires. The cost: exempting a lint takes a rule that restates the
+lint's condition, since the exempting rule also grants.
+
+**Lints** are built-in deny rules over each command's place in the line
+(its operators, constant words, expansions, redirects), with `{{ }}` CEL
+holes in their messages and `drop`/`sure` as general helpers. A reason
+lists every rule at the winning action.
+
+Not covered: function bodies are never walked (`f() { eval x; }; f`
+asks), and find's `{}` is an Unknown word, not a path under a start
+point.
 
 ## press_key
 
