@@ -724,7 +724,10 @@ argument.subcommand.words = ["show", "expire", "delete", "exists"]
 arguments = [
   "repository", "refspecs...",
   "--force|-f", "--force-with-lease", "--force-if-includes", "--delete|-d", "--mirror", "--prune",
-  "--push-option|-o:", "--repo:", "--receive-pack:", "--exec:",
+  "--push-option|-o:", "--repo:", "--receive-pack:", "--exec:", "--recurse-submodules:",
+  "--quiet|-q", "--verbose|-v", "--set-upstream|-u", "--dry-run|-n", "--tags", "--all",
+  "--follow-tags", "--atomic", "--porcelain", "--progress", "--no-verify", "--signed",
+  "--ipv4|-4", "--ipv6|-6",
 ]
 
 [commands.git.reset]
