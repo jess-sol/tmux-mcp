@@ -106,7 +106,7 @@ When the policy engine returns "ask" and a human approves, that approval is boun
 | `command_read` | Read or stream output from a running/completed command |
 | `command_history` | List recent commands and their exit codes |
 | `press_key` | Send control keys (C-c, C-d, Enter, etc.) |
-| `debug_pane` | Low-level screen capture for debugging |
+| `debug_pane` | The pane's visible screen, for a pane in an unusual state |
 | `inject_osc133` | Inject shell integration into bash panes (needed for SSH sessions) |
 
 ## Setup

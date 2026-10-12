@@ -536,7 +536,7 @@ impl TmuxMcp {
         Ok(call_result)
     }
 
-    #[tool(description = "Capture visible terminal screen for debugging pane state")]
+    #[tool(description = "The pane's visible screen, for a pane in an unusual state")]
     async fn debug_pane(
         &self,
         Parameters(params): Parameters<DebugPaneParams>,
@@ -709,9 +709,10 @@ impl ServerHandler for TmuxMcp {
                  command_history: Lists recent commands with their command_id, exit code, \
                  and output line count. Essential for finding command IDs to revisit \
                  output from earlier commands via command_read(command_id=N).\n\n\
-                 debug_pane: Shows only visible terminal text — no scrollback, no structure. \
-                 NOT for reading command output (use command_read instead). Use only to \
-                 debug pane state or inspect TUI apps.\n\n\
+                 debug_pane: The pane's visible screen as the daemon renders it, with no \
+                 scrollback or structure. For the rare pane in an unusual state: a refusal \
+                 to understand (typing, busy), a garbled prompt, a TUI. Command output \
+                 comes from command_read.\n\n\
                  press_key: For control sequences only (C-c, C-d, Enter, Escape). \
                  NOT for running commands — use command_run instead."
                     .into(),
