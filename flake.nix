@@ -44,6 +44,9 @@
               pkgs.pkg-config
               # The integration suite runs each subject inside its own tmux server.
               pkgs.tmux
+              # Its subject shells are `bash -i` from PATH, which mkShell's
+              # stdenv would supply without readline.
+              pkgs.bashInteractive
               # Runs .pre-commit-config.yaml. `prek install` once per clone.
               pkgs.prek
               # The licence gate in .pre-commit-config.yaml.
