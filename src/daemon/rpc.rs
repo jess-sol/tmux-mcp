@@ -647,8 +647,8 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
             .last_data
             .map(|t: std::time::Instant| t.elapsed().as_secs_f64());
 
-        let leaf_pid = ps.pid.map(get_leaf_pid).unwrap_or(0);
-        let osc133_status = match term_state.osc133_lookup(leaf_pid) {
+        let leaf_pid = ps.pid.map(get_leaf_pid);
+        let osc133_status = match leaf_pid.and_then(|pid| term_state.osc133_lookup(pid)) {
             Some(true) => "confirmed",
             Some(false) => "failed",
             None => "unknown",
@@ -798,12 +798,11 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
             }
             // *Passthrough* comes only from the Bash *Channel*.
             policy::Decision::Ask | policy::Decision::Passthrough => {
-                let live_ctx = read_pane_context(state, pane_id).await?;
                 let verify = state.approvals.lock().await.verify_and_consume(
                     origin_pane,
                     pane_id,
                     command,
-                    &live_ctx,
+                    &ctx,
                 );
                 if let Err(msg) = verify {
                     return Err(RpcError {
