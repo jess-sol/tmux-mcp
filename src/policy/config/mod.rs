@@ -17,8 +17,8 @@ use super::Decision;
 use super::grammar::Grammars;
 use super::rules::{self, RuleSet};
 pub use format::{
-    ArgumentConfig, ContextConfig, GrammarConfig, ParserConfig, ParserName, PolicyConfig,
-    RuleConfig, parse_config,
+    ArgumentConfig, CommandConfig, ContextConfig, GrammarConfig, ParserConfig, ParserName,
+    PolicyConfig, RuleConfig, parse_config,
 };
 
 // --- Types ---

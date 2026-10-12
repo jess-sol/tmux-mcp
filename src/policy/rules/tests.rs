@@ -512,6 +512,21 @@ fn a_path_rule_holds_for_any_path_and_is_unsure_over_an_open_list() {
 
 // --- Command identity ---
 
+/// A rule whose `command` is a list matches each command it names.
+#[test]
+fn a_command_list_matches_each_command_it_names() {
+    let rules =
+        ruleset("[[rules]]\nid = \"t-or-u\"\ncommand = [\"t\", \"u\"]\naction = \"deny\"\n");
+    let named = |name: &str| Facts {
+        identity: TriVal::String(name.into()),
+        ..facts_with_xs(strings(&[], true))
+    };
+
+    let got = ["t", "u", "v"].map(|name| decide(&rules, &named(name), &env()).decision);
+
+    assert_eq!(got, [Decision::Deny, Decision::Deny, Decision::Ask]);
+}
+
 #[test]
 fn a_command_is_named_by_its_path_from_the_anchor() {
     let sub = Some(Path::new("/src/proj/sub"));

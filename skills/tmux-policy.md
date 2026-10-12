@@ -233,8 +233,8 @@ Every built-in allow has `via = "tmux"`, and so does `outside-project`, so on Ba
 denies come from the built-ins and a path outside the project passes through; an allow you add
 without `via` applies on Bash too. Asks that would fire on everyday Bash use are tmux-only too
 (awk and sed programs, `curl-wget`, `variable-runs-code`); `process-signals` and `permissions`
-have tight Bash twins that ask only for SIGKILL (`kill-sigkill`, `pkill-sigkill`,
-`killall-sigkill`) and for `-R` (`chmod-recursive`, `chown-recursive`, `chgrp-recursive`).
+have tight Bash twins that ask only for SIGKILL (`sigkill`) and for `-R`
+(`permissions-recursive`).
 
 Only `id` and `action` are required. A rule without `when`, `path`, `write`, `host` or `user`
 matches every command on its `command` path. A rule with `path` or `write` matches only through a
@@ -243,8 +243,9 @@ path that satisfies the key: `write = 'true'` never matches `cat a`, only `cat a
 **`command`:** a bare name, or a `./path` from the project root, then subcommand words along the
 grammar's levels, optionally ending in one `words` word (`"git stash"`, `"git remote show"`). Only a
 rule with `command` may read `args` and `subcommand`, and only names declared along that path.
-Use `when = 'command.name in [...]'` without `command` for a group of unrelated commands; it
-cannot read `args`.
+A list, `command = ["chmod", "chown", "chgrp"]`, matches any of its paths; they share one depth,
+and the rule reads only names that every listed grammar declares. Use
+`when = 'command.name in [...]'` without `command` for a group whose `args` the rule never reads.
 
 **Command identity** (what `command` and `command.name` compare against):
 

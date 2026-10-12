@@ -33,8 +33,9 @@ pub(crate) use identity::resolve;
 
 pub struct CompiledRule {
     pub id: String,
-    /// The command path: an identity, then subcommand words.
-    command: Option<Vec<String>>,
+    /// The command paths, each an identity then subcommand words, all of
+    /// one depth.
+    command: Option<Vec<Vec<String>>>,
     when: Option<cel::IdedExpr>,
     path: Option<cel::IdedExpr>,
     write: Option<cel::IdedExpr>,
@@ -170,12 +171,9 @@ pub fn compile(
     Ok(RuleSet { rules, default })
 }
 
-/// The decision of `rules` for one command of `line`, and the reasons of
-/// every rule at that action. Every rule that matches and is not exempted
-/// counts, and the strictest action wins: deny, then ask, then allow. No
-/// match gives the default.
 /// The decision of the rules that match `cmd`, with their reasons; None when
-/// no rule matches.
+/// no rule matches. Every rule that matches and is not exempted counts, and
+/// the strictest action wins.
 pub(crate) fn evaluate(
     cmd: &CommandInfo,
     line: &str,
@@ -574,14 +572,20 @@ fn eval_on(expr: &cel::IdedExpr, name: &str, value: TriVal) -> TriBool {
     eval_expr(&expr.expr, &ctx).is_truthy()
 }
 
-/// The command is the rule's path or a subcommand below it. A relative
-/// name is a path identity wherever it resolves, so it never equals a bare
-/// name: spelling a tool as a path can turn its deny into an ask, never
-/// gain an allow.
+/// The command is one of the rule's paths or a subcommand below it.
 fn command_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
-    let Some(path) = &rule.command else {
+    let Some(paths) = &rule.command else {
         return TriBool::True;
     };
+    paths.iter().fold(TriBool::False, |truth, path| {
+        truth.or(path_match(path, facts))
+    })
+}
+
+/// A relative name is a path identity wherever it resolves, so it never
+/// equals a bare name: spelling a tool as a path can turn its deny into an
+/// ask, never gain an allow.
+fn path_match(path: &[String], facts: &Facts) -> TriBool {
     if facts.relative && !path[0].starts_with("./") {
         return TriBool::False;
     }
@@ -594,7 +598,7 @@ fn command_match(rule: &CompiledRule, facts: &Facts) -> TriBool {
 }
 
 fn when_ctx<'a>(rule: &CompiledRule, facts: &Facts, site: Site<'a>) -> Ctx<'a> {
-    let depth = rule.command.as_ref().map_or(0, |c| c.len() - 1);
+    let depth = rule.command.as_ref().map_or(0, |paths| paths[0].len() - 1);
     let subcommand = facts
         .subcommands
         .get(depth)

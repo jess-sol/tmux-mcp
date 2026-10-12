@@ -11,7 +11,7 @@ use super::eval::UNKNOWN;
 use super::identity::normalize;
 use super::{CompiledRule, Part};
 use crate::policy::Decision;
-use crate::policy::config::RuleConfig;
+use crate::policy::config::{CommandConfig, RuleConfig};
 use crate::policy::grammar::Grammars;
 
 /// The variables an expression reads, and the `args.<name>` it selects.
@@ -36,8 +36,16 @@ pub(super) fn rule(
         "ask" => Decision::Ask,
         other => return Err(format!("the action `{other}` is not allow, ask or deny")),
     };
-    let command = config.command.as_deref().map(command_path).transpose()?;
-    let declared = command.as_ref().map(|c| grammars.declared(c)).transpose()?;
+    let command = config.command.as_ref().map(command_paths).transpose()?;
+    let declared = command
+        .as_ref()
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| Ok((path, grammars.declared(path)?)))
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?;
 
     let when = config.when.as_deref().map(parse_cel).transpose()?;
     let path = config.path.as_deref().map(parse_cel).transpose()?;
@@ -72,21 +80,22 @@ pub(super) fn rule(
             }
         }
         let reads_parts = refs.idents.contains("args") || refs.idents.contains("subcommand");
-        match (&declared, &command) {
-            (None, _) if reads_parts => {
+        let Some(declared) = &declared else {
+            if reads_parts {
                 return Err("`args` and `subcommand` need a `command`".into());
             }
-            (Some(names), Some(command)) => {
-                if let Some(name) = refs.args.iter().find(|n| !names.contains(*n)) {
-                    let names: Vec<_> = names.iter().map(String::as_str).collect();
-                    return Err(format!(
-                        "`args.{name}` is not declared by `{}`; it declares: {}",
-                        command.join(" "),
-                        names.join(", ")
-                    ));
-                }
+            continue;
+        };
+        // Each command of a list declares every name the rule reads.
+        for (path, names) in declared {
+            if let Some(name) = refs.args.iter().find(|n| !names.contains(*n)) {
+                let names: Vec<_> = names.iter().map(String::as_str).collect();
+                return Err(format!(
+                    "`args.{name}` is not declared by `{}`; it declares: {}",
+                    path.join(" "),
+                    names.join(", ")
+                ));
             }
-            _ => {}
         }
     }
 
@@ -180,7 +189,26 @@ pub(crate) fn parse_cel(text: &str) -> Result<cel::IdedExpr, String> {
     }
 }
 
-/// A rule's `command`: a bare name or a `./` path from the anchor, then
+/// A rule's `command`: one command path, or a list of paths of one depth, so
+/// that `subcommand` names the same level for each.
+fn command_paths(command: &CommandConfig) -> Result<Vec<Vec<String>>, String> {
+    let paths = match command {
+        CommandConfig::One(path) => vec![command_path(path)?],
+        CommandConfig::Many(paths) => paths
+            .iter()
+            .map(|p| command_path(p))
+            .collect::<Result<_, _>>()?,
+    };
+    match paths.first() {
+        None => Err("`command` is empty".into()),
+        Some(first) if paths.iter().any(|p| p.len() != first.len()) => {
+            Err("the paths of a `command` list have one depth".into())
+        }
+        Some(_) => Ok(paths),
+    }
+}
+
+/// A command path: a bare name or a `./` path from the anchor, then
 /// subcommand words.
 fn command_path(command: &str) -> Result<Vec<String>, String> {
     let mut words: Vec<String> = command.split_whitespace().map(String::from).collect();

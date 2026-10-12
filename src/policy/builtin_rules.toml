@@ -518,14 +518,16 @@ arguments = [
 ]
 marks.read = ["files", "file"]
 
+# mawk and nawk reject --source; declaring it reads no line they accept differently, and lets
+# one rule cover every awk.
 [commands.mawk]
 parser = "gnu"
-arguments = [["program", "--file|-f:"], "files...", "--field-separator|-F:", "--assign|-v:"]
+arguments = [["program", "--source:", "--file|-f:"], "files...", "--field-separator|-F:", "--assign|-v:"]
 marks.read = ["files", "file"]
 
 [commands.nawk]
 parser = "posix"
-arguments = [["program", "file=-f:"], "files...", "field_separator=-F:", "assign=-v:"]
+arguments = [["program", "--source:", "file=-f:"], "files...", "field_separator=-F:", "assign=-v:"]
 marks.read = ["files", "file"]
 
 # =============================================================================
@@ -1179,44 +1181,16 @@ when = 'args.force'
 action = "ask"
 
 # awk_is_plain / sed_is_plain: true only for a program that neither runs a command nor opens a
-# file of its own; anything they cannot vouch for is false. One rule per command, since each
-# reads only the names that its grammar declares.
+# file of its own; anything they cannot vouch for is false.
 
 [[rules]]
 id = "awk-program"
 via = "tmux"
-command = "awk"
+command = ["awk", "gawk", "mawk", "nawk"]
 when = '''
   args.file != [] || args.program != null && !awk_is_plain(args.program)
   || args.source.exists(p, !awk_is_plain(p))
 '''
-action = "ask"
-message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
-
-[[rules]]
-id = "gawk-program"
-via = "tmux"
-command = "gawk"
-when = '''
-  args.file != [] || args.program != null && !awk_is_plain(args.program)
-  || args.source.exists(p, !awk_is_plain(p))
-'''
-action = "ask"
-message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
-
-[[rules]]
-id = "mawk-program"
-via = "tmux"
-command = "mawk"
-when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
-action = "ask"
-message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
-
-[[rules]]
-id = "nawk-program"
-via = "tmux"
-command = "nawk"
-when = 'args.file != [] || args.program != null && !awk_is_plain(args.program)'
 action = "ask"
 message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
 
@@ -1248,26 +1222,11 @@ when = 'command.name in ["kill", "pkill", "killall"]'
 action = "ask"
 
 # On Bash, auto mode judges an ordinary signal; SIGKILL leaves the process no chance to clean up.
+# kill's rare `-n 9` spelling is left to auto mode.
 [[rules]]
-id = "kill-sigkill"
+id = "sigkill"
 via = "bash"
-command = "kill"
-when = '(args.signal + args.signal_number).exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
-action = "ask"
-message = "SIGKILL leaves the process no chance to clean up"
-
-[[rules]]
-id = "pkill-sigkill"
-via = "bash"
-command = "pkill"
-when = 'args.signal.exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
-action = "ask"
-message = "SIGKILL leaves the process no chance to clean up"
-
-[[rules]]
-id = "killall-sigkill"
-via = "bash"
-command = "killall"
+command = ["kill", "pkill", "killall"]
 when = 'args.signal.exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
 action = "ask"
 message = "SIGKILL leaves the process no chance to clean up"
@@ -1327,23 +1286,9 @@ action = "ask"
 
 # On Bash, auto mode judges a single file's mode; a recursive change reaches a whole tree.
 [[rules]]
-id = "chmod-recursive"
+id = "permissions-recursive"
 via = "bash"
-command = "chmod"
-when = 'args.recursive'
-action = "ask"
-
-[[rules]]
-id = "chown-recursive"
-via = "bash"
-command = "chown"
-when = 'args.recursive'
-action = "ask"
-
-[[rules]]
-id = "chgrp-recursive"
-via = "bash"
-command = "chgrp"
+command = ["chmod", "chown", "chgrp"]
 when = 'args.recursive'
 action = "ask"
 
@@ -1392,30 +1337,9 @@ when = 'args.command != [] && args.option == [] && args.config == []'
 action = "allow"
 
 [[rules]]
-id = "sh-c"
+id = "shell-c"
 via = "tmux"
-command = "sh"
-when = 'args.command != []'
-action = "allow"
-
-[[rules]]
-id = "bash-c"
-via = "tmux"
-command = "bash"
-when = 'args.command != []'
-action = "allow"
-
-[[rules]]
-id = "dash-c"
-via = "tmux"
-command = "dash"
-when = 'args.command != []'
-action = "allow"
-
-[[rules]]
-id = "zsh-c"
-via = "tmux"
-command = "zsh"
+command = ["sh", "bash", "dash", "zsh"]
 when = 'args.command != []'
 action = "allow"
 

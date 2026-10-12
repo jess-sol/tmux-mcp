@@ -27,7 +27,7 @@ pub struct RuleConfig {
     /// Lowercase words joined by `-`, unique across all sources.
     pub id: String,
     #[serde(default)]
-    pub command: Option<String>,
+    pub command: Option<CommandConfig>,
     #[serde(default)]
     pub when: Option<String>,
     #[serde(default)]
@@ -47,6 +47,14 @@ pub struct RuleConfig {
     /// The one *Channel* it counts on; without it, both.
     #[serde(default)]
     pub via: Option<Via>,
+}
+
+/// A rule's `command`: one command path, or a list of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum CommandConfig {
+    One(String),
+    Many(Vec<String>),
 }
 
 /// One level of a grammar: `[commands.<name>]` or `[commands.<name>.<word>]`.

@@ -166,7 +166,10 @@ async fn bash_asks_only_about_the_sharp_forms() {
     // (line, on tmux, on Bash)
     let want = [
         ("awk -f prog.awk notes", Ask, None),
+        ("gawk -f prog.awk notes", Ask, None),
+        ("nawk -f prog.awk notes", Ask, None),
         ("sed -f script.sed notes", Ask, None),
+        ("zsh -c 'ls src'", Allow, None),
         ("curl https://example.com", Ask, None),
         ("PAGER=cat git log", Ask, None),
         ("kill 1234", Ask, None),
@@ -178,6 +181,7 @@ async fn bash_asks_only_about_the_sharp_forms() {
         ("chmod +x run.sh", Ask, None),
         ("chmod -R 755 src", Ask, Some(Ask)),
         ("chown -R me src", Ask, Some(Ask)),
+        ("chgrp -R staff src", Ask, Some(Ask)),
         ("rg --pre cat foo", Ask, Some(Ask)),
     ];
 

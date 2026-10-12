@@ -133,6 +133,18 @@ fn a_source_that_breaks_the_format_does_not_load() {
             "[[rules]]\nid = \"x\"\naction = \"allow\"\nvia = \"zsh\"",
             "expected `bash` or `tmux`",
         ),
+        (
+            "[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = []",
+            "`command` is empty",
+        ),
+        (
+            "[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = [\"git stash\", \"git\"]",
+            "one depth",
+        ),
+        (
+            "[[rules]]\nid = \"x\"\naction = \"ask\"\ncommand = [\"kill\", \"pkill\"]\nwhen = 'args.signal_number != []'",
+            "`args.signal_number` is not declared by `pkill`",
+        ),
     ];
     for (toml, want) in rows {
         match compile(toml) {
