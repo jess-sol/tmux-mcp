@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::pane::osc133::Osc133Phase;
 use crate::pane::registry::{PaneHandle, PaneRegistry};
-use crate::pane::state::Activity;
+use crate::pane::state::{Activity, CommandRecord};
 use crate::policy;
 use crate::policy::approval::ApprovalStore;
 use crate::proc;
@@ -164,6 +164,7 @@ impl ReadParams {
 }
 
 /// Result of applying read params to command output.
+#[derive(Default)]
 struct ReadResult {
     lines: Vec<String>,
     total_lines: usize,
@@ -420,126 +421,64 @@ async fn wait_and_read(
         {
             let mut tp = pane_handle.lock().await;
             let pane_state = tp.processor.state_mut();
-            let cmd = if let Some(id) = command_id {
-                pane_state.command_by_id_mut(id)
-            } else {
-                pane_state.commands.front_mut()
+            let cmd = match command_id {
+                Some(id) => pane_state.command_by_id_mut(id),
+                None => pane_state.commands.front_mut(),
+            };
+            let Some(cmd) = cmd else {
+                return Err(match command_id {
+                    Some(id) => RpcError::invalid_params(format!("Command {id} not found")),
+                    None => RpcError::invalid_params("No commands in history"),
+                });
             };
 
-            if let Some(cmd) = cmd {
-                // D ends the output and carries the exit code; B follows only
-                // once the next prompt is drawn.
-                if cmd.completed || cmd.output_done {
-                    let result =
-                        apply_read_params(&cmd.output, true, &mut cmd.read_cursor, read_params);
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "completed",
-                        "exit_code": cmd.exit_code,
-                        "output": result.lines.join("\n"),
-                        "total_lines": result.total_lines,
-                        "lines_skipped": result.skipped,
-                        "search_matches": result.matched,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
-
-                // Running command: peek without mutating cursor
-                let mut peek_cursor = cmd.read_cursor;
-                let peeked = apply_read_params(&cmd.output, false, &mut peek_cursor, read_params);
-
-                let has_enough = if let Some(n) = required_lines {
-                    // When search is active, count matches (not output lines
-                    // which may be inflated by before/after context).
-                    peeked.matched.unwrap_or(peeked.lines.len()) >= n && !peeked.context_pending
-                } else if is_tail || peeked.matched.is_some() {
-                    false // tail / bare+search: wait for completion or timeout
-                } else {
-                    // Bare read (no next/head/tail/search): policy decides.
-                    matches!(bare_policy, BareReadPolicy::ReturnNow)
-                };
-
-                // A filled next/head window first waits out the settle; a bare
-                // read returns at once.
-                let now = tokio::time::Instant::now();
-                if has_enough
-                    && (required_lines.is_none()
-                        || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
-                {
-                    // Commit cursor and return
-                    cmd.read_cursor = peek_cursor;
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "running",
-                        "output": peeked.lines.join("\n"),
-                        "total_lines": peeked.total_lines,
-                        "lines_skipped": peeked.skipped,
-                        "search_matches": peeked.matched,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
-            } else if let Some(id) = command_id {
-                return Err(RpcError::invalid_params(format!(
-                    "Command {} not found",
-                    id
-                )));
-            } else {
-                return Err(RpcError::invalid_params("No commands in history"));
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            // Timeout: tail returns empty, others return partial results
-            if is_tail {
-                // Re-read command metadata for the response
-                let tp = pane_handle.lock().await;
-                let pane_state = tp.processor.state();
-                let cmd = if let Some(id) = command_id {
-                    pane_state.command_by_id(id)
-                } else {
-                    pane_state.commands.front()
-                };
-                if let Some(cmd) = cmd {
-                    return Ok(json!({
-                        "command_id": cmd.id,
-                        "command": cmd.command,
-                        "status": "running",
-                        "output": "",
-                        "total_lines": 0,
-                        "read_cursor": cmd.read_cursor,
-                    }));
-                }
-                return Err(RpcError::internal("No command found"));
+            // D ends the output and carries the exit code; B follows only
+            // once the next prompt is drawn.
+            if cmd.completed || cmd.output_done {
+                let result =
+                    apply_read_params(&cmd.output, true, &mut cmd.read_cursor, read_params);
+                return Ok(read_reply(cmd, "completed", &result));
             }
 
-            let mut tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state_mut();
-            let cmd = if let Some(id) = command_id {
-                pane_state.command_by_id_mut(id)
+            // Running command: peek without mutating cursor
+            let mut peek_cursor = cmd.read_cursor;
+            let peeked = apply_read_params(&cmd.output, false, &mut peek_cursor, read_params);
+
+            let has_enough = if let Some(n) = required_lines {
+                // When search is active, count matches (not output lines
+                // which may be inflated by before/after context).
+                peeked.matched.unwrap_or(peeked.lines.len()) >= n && !peeked.context_pending
+            } else if is_tail || peeked.matched.is_some() {
+                false // tail / bare+search: wait for completion or timeout
             } else {
-                pane_state.commands.front_mut()
+                // Bare read (no next/head/tail/search): policy decides.
+                matches!(bare_policy, BareReadPolicy::ReturnNow)
             };
-            if let Some(cmd) = cmd {
+
+            // A filled next/head window first waits out the settle; a bare
+            // read returns at once.
+            let now = tokio::time::Instant::now();
+            if has_enough
+                && (required_lines.is_none()
+                    || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
+            {
+                cmd.read_cursor = peek_cursor;
+                return Ok(read_reply(cmd, "running", &peeked));
+            }
+
+            // Timeout: tail returns nothing, the others what there is.
+            if now >= deadline {
+                if is_tail {
+                    return Ok(read_reply(cmd, "running", &ReadResult::default()));
+                }
                 let result = apply_read_params(
                     &cmd.output,
                     cmd.output_done,
                     &mut cmd.read_cursor,
                     read_params,
                 );
-                return Ok(json!({
-                    "command_id": cmd.id,
-                    "command": cmd.command,
-                    "status": "running",
-                    "output": result.lines.join("\n"),
-                    "total_lines": result.total_lines,
-                    "lines_skipped": result.skipped,
-                    "search_matches": result.matched,
-                    "read_cursor": cmd.read_cursor,
-                }));
+                return Ok(read_reply(cmd, "running", &result));
             }
-            return Err(RpcError::internal("No command found"));
         }
 
         let wake = settle_until.map_or(deadline, |settle| settle.min(deadline));
@@ -548,6 +487,22 @@ async fn wait_and_read(
             _ = tokio::time::sleep_until(wake) => {}
         }
     }
+}
+
+/// The reply to a read of `cmd`: its window of output, and where its cursor
+/// now stands.
+fn read_reply(cmd: &CommandRecord, status: &str, result: &ReadResult) -> Value {
+    json!({
+        "command_id": cmd.id,
+        "command": cmd.command,
+        "status": status,
+        "exit_code": cmd.exit_code,
+        "output": result.lines.join("\n"),
+        "total_lines": result.total_lines,
+        "lines_skipped": result.skipped,
+        "search_matches": result.matched,
+        "read_cursor": cmd.read_cursor,
+    })
 }
 
 /// How long a filled `next`/`head` window waits for the command's D marker, so a
