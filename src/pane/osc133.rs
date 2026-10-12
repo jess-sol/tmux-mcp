@@ -288,30 +288,15 @@ impl Default for Osc133Parser {
 
 // --- Helpers ---
 
-/// Parse `cmdline_url=<percent-encoded>` from a C marker parameter string.
+/// Parse `cmdline_url=<percent-encoded>` from a C marker parameter string:
+/// a URL's encoding, where `+` is a plus.
 fn parse_cmdline_url(param: &str) -> Option<String> {
     let value = param.strip_prefix("cmdline_url=")?;
-    Some(percent_decode(value))
-}
-
-/// Percent-decode a URL-encoded string.
-fn percent_decode(input: &str) -> String {
-    let mut result = Vec::with_capacity(input.len());
-    let mut bytes = input.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let hi = bytes.next().and_then(|c| char::from(c).to_digit(16));
-            let lo = bytes.next().and_then(|c| char::from(c).to_digit(16));
-            if let (Some(h), Some(l)) = (hi, lo) {
-                result.push((h * 16 + l) as u8);
-            }
-        } else if b == b'+' {
-            result.push(b' ');
-        } else {
-            result.push(b);
-        }
-    }
-    String::from_utf8_lossy(&result).into_owned()
+    Some(
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8_lossy()
+            .into_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -1021,9 +1006,14 @@ mod tests {
         assert_eq!(parse_cmdline_url("something_else=foo"), None);
     }
 
+    /// A URL's percent-encoding: `+` is a plus, and an escape that is not
+    /// two hex digits stays as written.
     #[test]
-    fn percent_decode_plus_as_space() {
-        assert_eq!(percent_decode("hello+world"), "hello world");
+    fn cmdline_url_keeps_a_plus_and_a_bad_escape() {
+        assert_eq!(
+            parse_cmdline_url("cmdline_url=tail%20+5%20a%zzb"),
+            Some("tail +5 a%zzb".into())
+        );
     }
 
     // --- Osc133Phase ---

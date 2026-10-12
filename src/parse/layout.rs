@@ -30,7 +30,7 @@ pub fn parse_layout(layout: &str) -> Vec<LayoutPane> {
     let bytes = layout.as_bytes();
 
     // Skip checksum: everything up to and including the first ','
-    let Some(comma) = memchr(b',', bytes) else {
+    let Some(comma) = memchr::memchr(b',', bytes) else {
         return vec![];
     };
     let mut pos = comma + 1;
@@ -125,10 +125,6 @@ fn expect(bytes: &[u8], pos: &mut usize, ch: u8) -> bool {
     } else {
         false
     }
-}
-
-fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
-    haystack.iter().position(|&b| b == needle)
 }
 
 #[cfg(test)]
