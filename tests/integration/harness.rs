@@ -81,15 +81,29 @@ pub struct Judged {
 /// `D` both channels decide `D`; `(D, "rule")` both decide `D` by `rule`;
 /// `(Dtmux, Dbash)`; `(Dtmux, Dbash, "rule")` one rule for both;
 /// `(Dtmux, "rule", Dbash, "rule")`.
+///
+/// `decides!(h, shell, { "command" => D, … })` checks the decision the hook
+/// gives each command in `shell`, for what only a pane shows: its directory,
+/// its host, a program running in it.
 macro_rules! decides {
-    ($h:expr, { $($line:literal => $want:tt),* $(,)? }) => {{
-        let judged = $h.judge(&[$($line),*]);
+    ($h:expr, { $($line:expr => $want:tt),* $(,)? }) => {{
+        let judged = $h.judge(&[$(AsRef::<str>::as_ref(&$line)),*]);
         let mut judged = judged.iter();
         let mut misses: Vec<String> = Vec::new();
         $(
             let j = judged.next().expect("one judgement per command");
             let got = (j.tmux, j.tmux_rule.as_str(), j.bash, j.bash_rule.as_str());
             if !matches!(got, $crate::harness::decides!(@pattern $want)) {
+                misses.push(format!("{:?} => {:?}", $line, got));
+            }
+        )*
+        assert!(misses.is_empty(), "these commands missed:\n{}", misses.join("\n"));
+    }};
+    ($h:expr, $shell:expr, { $($line:expr => $want:pat),* $(,)? }) => {{
+        let mut misses: Vec<String> = Vec::new();
+        $(
+            let got = $h.decision(&$shell, AsRef::<str>::as_ref(&$line));
+            if !matches!(got, $want) {
                 misses.push(format!("{:?} => {:?}", $line, got));
             }
         )*
@@ -314,8 +328,9 @@ impl Harness {
     }
 
     /// Asks the hook about a Claude Code `Bash` call in the project, from
-    /// outside tmux. None: the hook leaves it to Claude Code's permissions.
-    pub fn bash(&self, command: &str) -> Option<(Decision, String)> {
+    /// outside tmux: its decision and reason, `Pass` when the hook leaves it
+    /// to Claude Code's permissions.
+    pub fn bash(&self, command: &str) -> (Decision, String) {
         let env = self.outside_tmux();
         let input = json!({
             "tool_name": "Bash",
@@ -323,6 +338,7 @@ impl Harness {
             "tool_input": {"command": command},
         });
         self.ask_hook(&env, input)
+            .unwrap_or((Decision::Pass, String::new()))
     }
 
     /// What the policy decides for each of `lines`, on both channels, in a
