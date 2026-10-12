@@ -50,10 +50,14 @@ async fn finished_commands_reply_with_their_output_and_exit_code() {
         ),
         // stderr reaches the terminal like stdout does.
         ("echo err >&2", "$ echo err >&2\nerr\n\nExit code: 0"),
-        // Escape sequences pass through as the command wrote them.
+        // Output is the text a person sees: colours and terminal controls go.
         (
             "printf '\\033[31m%s\\033[0m\\n' \"${HOME##*/}\"",
-            "$ printf '\\033[31m%s\\033[0m\\n' \"${HOME##*/}\"\n\u{1b}[31mhome\u{1b}[0m\n\nExit code: 0",
+            "$ printf '\\033[31m%s\\033[0m\\n' \"${HOME##*/}\"\nhome\n\nExit code: 0",
+        ),
+        (
+            "printf '\\033]0;title\\007%s\\033[K\\n' \"${HOME##*/}\"",
+            "$ printf '\\033]0;title\\007%s\\033[K\\n' \"${HOME##*/}\"\nhome\n\nExit code: 0",
         ),
         // A signal's exit code is 128 plus the signal number.
         (

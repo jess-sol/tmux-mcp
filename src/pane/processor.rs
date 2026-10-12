@@ -33,6 +33,25 @@ impl Dimensions for PaneDimensions {
     }
 }
 
+// --- Output text ---
+
+/// The text a person sees in output: printed characters and line breaks,
+/// without escape sequences.
+#[derive(Default)]
+struct Text(String);
+
+impl vte::Perform for Text {
+    fn print(&mut self, c: char) {
+        self.0.push(c);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        if matches!(byte, b'\n' | b'\r' | b'\t') {
+            self.0.push(char::from(byte));
+        }
+    }
+}
+
 // --- Pane Processor ---
 
 pub struct PaneProcessor {
@@ -40,8 +59,8 @@ pub struct PaneProcessor {
     processor: Processor,
     osc133: Osc133Parser,
     state: TerminalState,
-    /// The start of a character a chunk boundary split, waiting for the rest.
-    utf8_tail: Vec<u8>,
+    /// Reads a command's output as `Text`, across chunks.
+    text_parser: vte::Parser,
 }
 
 impl PaneProcessor {
@@ -62,7 +81,7 @@ impl PaneProcessor {
             processor,
             osc133: Osc133Parser::new(),
             state: TerminalState::new(),
-            utf8_tail: Vec::new(),
+            text_parser: vte::Parser::new(),
         }
     }
 
@@ -261,30 +280,14 @@ impl PaneProcessor {
 
     // --- Internal ---
 
-    /// Adds `segment` to the running command's output. A character the chunk
-    /// boundary split waits in `utf8_tail` until the next chunk completes it.
+    /// Adds the text of `segment` to the running command's output. The text
+    /// parser keeps its state between chunks, so a character or an escape
+    /// sequence that a chunk boundary splits still reads whole.
     fn capture_text(&mut self, segment: &[u8]) {
-        let mut bytes = std::mem::take(&mut self.utf8_tail);
-        bytes.extend_from_slice(segment);
-        let mut text = String::new();
-        let mut rest = bytes.as_slice();
-        while let Err(error) = std::str::from_utf8(rest) {
-            let (valid, after) = rest.split_at(error.valid_up_to());
-            text.push_str(&String::from_utf8_lossy(valid));
-            match error.error_len() {
-                None => {
-                    self.utf8_tail = after.to_vec();
-                    rest = &[];
-                }
-                Some(invalid) => {
-                    text.push(char::REPLACEMENT_CHARACTER);
-                    rest = &after[invalid..];
-                }
-            }
-        }
-        text.push_str(&String::from_utf8_lossy(rest));
-        if !text.is_empty() {
-            self.osc133.append_output(&text, &mut self.state);
+        let mut text = Text::default();
+        self.text_parser.advance(&mut text, segment);
+        if !text.0.is_empty() {
+            self.osc133.append_output(&text.0, &mut self.state);
         }
     }
 
