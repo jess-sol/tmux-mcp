@@ -258,6 +258,6 @@ cargo build
   bash  deny         prefer-tmux: …
 ```
 
-## Versions
+## Releases
 
-The version in `Cargo.toml` decides which daemon serves a tmux session, so every merge to `main` bumps it, in its own commit before the merge: the minor version for a branch that adds features, the patch version for one that only fixes.
+Cut a release from `main` with `cargo release <patch|minor|major> --execute`, which bumps the version (the one that decides which daemon serves), commits, tags `v<version>` and pushes.

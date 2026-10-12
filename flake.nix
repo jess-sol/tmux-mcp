@@ -51,6 +51,8 @@
               pkgs.prek
               # The licence gate in .pre-commit-config.yaml.
               pkgs.cargo-deny
+              # Cuts a release as release.toml sets it up.
+              pkgs.cargo-release
             ];
           };
         });
