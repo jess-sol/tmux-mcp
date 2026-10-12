@@ -158,7 +158,6 @@ impl PaneState {
             policy: self.policy,
             mode: self.mode.clone(),
             phase: self.processor.osc133_phase().clone(),
-            activity: terminal.activity,
             input: self.processor.read_input(),
             input_garbled: self.processor.input_looks_garbled(),
             cwd: terminal.cwd.clone().filter(|_| reported),

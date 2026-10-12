@@ -121,7 +121,6 @@ fn local_context(cwd: Option<String>) -> policy::PaneContext {
     policy::PaneContext {
         hostname: None,
         cwd,
-        foreground: None,
         user: std::env::var("USER").ok(),
     }
 }

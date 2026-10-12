@@ -2,7 +2,7 @@
 
 use crate::pane::osc133::Osc133Phase;
 use crate::pane::registry::PaneMode;
-use crate::pane::state::{Activity, CommandRecord};
+use crate::pane::state::CommandRecord;
 
 /// A fact the stream can announce before its value: Unknown until the value
 /// arrives. A decision that needs an Unknown fact waits for it.
@@ -20,8 +20,9 @@ pub struct PaneSnapshot {
     /// The count of policy reloads: every decision reads the policy.
     pub policy: u64,
     pub mode: Fact<PaneMode>,
+    /// Where the shell's OSC 133 markers have taken the pane. A shell that
+    /// sends markers brings it to a prompt, which is its shell integration.
     pub phase: Osc133Phase,
-    pub activity: Activity,
     /// The text after the prompt.
     pub input: String,
     pub input_garbled: bool,

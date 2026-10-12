@@ -10,12 +10,13 @@ async fn read_parameters_shape_a_finished_commands_output() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     let corpus = [
-        // The first command in a Shell is id 2; the integration probe is id 1.
+        // A Shell starts at a prompt its markers brought, so no probe runs and
+        // the first command is id 1.
         (
             "seq 10",
             Read::default().tail(3),
             "$ seq 10\n<7 lines not shown>\n8\n9\n10\n\nExit code: 0\n\
-             [Output filtered (10 lines total). Use command_read(command_id=2) with head, tail, \
+             [Output filtered (10 lines total). Use command_read(command_id=1) with head, tail, \
              or search for different views of the same command output.]",
         ),
         // Search filters first, so the window counts matches: the last ten
@@ -24,7 +25,7 @@ async fn read_parameters_shape_a_finished_commands_output() {
             "seq 20",
             Read::default().tail(10).search("1"),
             "$ seq 20\n<1 lines not shown>\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n\nExit code: 0\n\
-             [11 matches in 20 lines.]\n[Output filtered (20 lines total). Use command_read(command_id=3) \
+             [11 matches in 20 lines.]\n[Output filtered (20 lines total). Use command_read(command_id=2) \
              with head, tail, or search for different views of the same command output.]",
         ),
         (

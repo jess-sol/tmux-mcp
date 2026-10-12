@@ -16,7 +16,7 @@
 /// (delimiter between command echo and output). D consumes it. B clears
 /// it (new cycle). This captures output even when C is absent (subshells,
 /// shells without preexec support).
-use crate::pane::state::{Activity, TerminalState};
+use crate::pane::state::TerminalState;
 
 // --- State Machine ---
 
@@ -87,7 +87,6 @@ impl Osc133Parser {
         state: &mut TerminalState,
         screen_input: Option<&str>,
     ) {
-        state.last_osc133_marker = Some(std::time::Instant::now());
         match marker {
             b'A' => self.handle_a(state),
             b'B' => self.handle_b(state),
@@ -111,7 +110,6 @@ impl Osc133Parser {
         self.phase = Osc133Phase::Idle;
         self.pending_command_text = None;
         self.capture.clear();
-        state.activity = Activity::Unknown;
     }
 
     // --- Marker Handlers ---
@@ -132,7 +130,6 @@ impl Osc133Parser {
         // D→A→B is the normal completion flow — B marks completed.
         self.phase = Osc133Phase::Prompt;
         self.pending_command_text = None;
-        state.activity = Activity::Idle;
     }
 
     /// B (Input Ready / THE LATCH): shell is ready for input.
@@ -151,7 +148,6 @@ impl Osc133Parser {
 
         self.phase = Osc133Phase::Input;
         self.capture.clear();
-        state.activity = Activity::Idle;
     }
 
     /// C (Command Executing): a command has started.
@@ -191,10 +187,8 @@ impl Osc133Parser {
 
     /// D (Command Done): command finished with optional exit code.
     /// Sets exit_code on the active record. Completion is finalized by B.
-    /// Always increments completion_seq so command_run can detect completion.
     fn handle_d(&mut self, param: Option<&str>, state: &mut TerminalState) {
         let exit_code = param.and_then(|p| p.parse::<i32>().ok());
-        state.completion_seq += 1;
 
         match &self.phase {
             Osc133Phase::Executing { .. } => {
@@ -205,7 +199,6 @@ impl Osc133Parser {
                     cmd.output_done = true;
                 }
                 self.phase = Osc133Phase::Idle;
-                state.activity = Activity::Idle;
             }
             Osc133Phase::Input => {
                 // B→D pattern: no C marker (subshell, cd, export, etc.)
@@ -221,7 +214,6 @@ impl Osc133Parser {
                     }
                 }
                 self.phase = Osc133Phase::Idle;
-                state.activity = Activity::Idle;
             }
             _ => {
                 // D from unexpected state (race condition, mid-join, etc.)
@@ -239,7 +231,6 @@ impl Osc133Parser {
                     }
                 }
                 self.phase = Osc133Phase::Idle;
-                state.activity = Activity::Idle;
             }
         }
     }
@@ -558,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn d_without_c_bumps_completion_seq() {
+    fn d_without_c_records_no_command() {
         let mut p = Osc133Parser::new();
         let mut s = TerminalState::new();
 
@@ -566,7 +557,6 @@ mod tests {
         marker(&mut p, b'B', None, &mut s);
         // D without C — syntax error, history expansion failure, etc.
         marker(&mut p, b'D', Some("1"), &mut s);
-        assert_eq!(s.completion_seq, 1);
 
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
@@ -649,7 +639,6 @@ mod tests {
         p.append_output("some output", &mut s);
         marker(&mut p, b'D', Some("0"), &mut s);
         assert_eq!(p.phase, Osc133Phase::Idle);
-        assert_eq!(s.completion_seq, 1);
     }
 
     #[test]
@@ -679,30 +668,7 @@ mod tests {
         p.reset(&mut s);
 
         assert_eq!(p.phase, Osc133Phase::Idle);
-        assert_eq!(s.activity, Activity::Unknown);
         assert!(p.capture.is_empty());
-    }
-
-    // --- Activity tracking ---
-
-    #[test]
-    fn activity_transitions() {
-        let mut p = Osc133Parser::new();
-        let mut s = TerminalState::new();
-
-        assert_eq!(s.activity, Activity::Unknown);
-
-        marker(&mut p, b'A', None, &mut s);
-        assert_eq!(s.activity, Activity::Idle);
-
-        marker(&mut p, b'B', None, &mut s);
-        assert_eq!(s.activity, Activity::Idle);
-
-        marker(&mut p, b'C', None, &mut s);
-        // C doesn't set activity — processor sets Busy
-
-        marker(&mut p, b'D', Some("0"), &mut s);
-        assert_eq!(s.activity, Activity::Idle);
     }
 
     // --- Rapid commands ---
@@ -902,25 +868,6 @@ mod tests {
     }
 
     #[test]
-    fn command_without_c_marker_bumps_completion_seq() {
-        let mut p = Osc133Parser::new();
-        let mut s = TerminalState::new();
-
-        marker(&mut p, b'A', None, &mut s);
-        marker(&mut p, b'B', None, &mut s);
-        assert_eq!(s.completion_seq, 0);
-
-        marker(&mut p, b'D', Some("0"), &mut s);
-        assert_eq!(s.completion_seq, 1, "D must bump completion_seq");
-
-        marker(&mut p, b'A', None, &mut s);
-        marker(&mut p, b'B', None, &mut s);
-
-        assert!(s.commands.is_empty());
-        assert_eq!(p.phase, Osc133Phase::Input);
-    }
-
-    #[test]
     fn d_a_b_flow_pending_survives_through_a() {
         let mut p = Osc133Parser::new();
         let mut s = TerminalState::new();
@@ -945,25 +892,6 @@ mod tests {
         assert!(s.commands[0].completed, "B should complete the command");
         assert_eq!(s.commands[0].command, "ls");
         assert_eq!(s.commands[0].exit_code, Some(0));
-    }
-
-    #[test]
-    fn multiple_commands_without_c_bump_completion_seq() {
-        let mut p = Osc133Parser::new();
-        let mut s = TerminalState::new();
-
-        marker(&mut p, b'A', None, &mut s);
-        marker(&mut p, b'B', None, &mut s);
-
-        for (i, exit_code) in ["0", "1", "0"].iter().enumerate() {
-            marker(&mut p, b'D', Some(exit_code), &mut s);
-            assert_eq!(s.completion_seq, (i + 1) as u64);
-            marker(&mut p, b'A', None, &mut s);
-            marker(&mut p, b'B', None, &mut s);
-        }
-
-        assert_eq!(p.phase, Osc133Phase::Input);
-        assert_eq!(s.completion_seq, 3);
     }
 
     #[test]

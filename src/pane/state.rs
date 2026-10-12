@@ -23,25 +23,11 @@ pub struct CommandRecord {
     pub completed: bool,
 }
 
-/// Activity state of a pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Activity {
-    /// Shell is at a prompt, ready for input.
-    Idle,
-    /// A command is executing.
-    Busy,
-    /// State unknown (no markers seen yet, or after recovery).
-    #[default]
-    Unknown,
-}
-
 /// Structured state for a pane, maintained by the mode parser.
 #[derive(Debug)]
 pub struct TerminalState {
     /// Completed commands, most recent first.
     pub commands: VecDeque<CommandRecord>,
-    /// Current activity.
-    pub activity: Activity,
     /// Current working directory (from OSC 7).
     pub cwd: Option<String>,
     /// Username (from OSC 7 userinfo, e.g. file://user@host/path).
@@ -54,68 +40,25 @@ pub struct TerminalState {
     pub osc7_since_command: bool,
     /// Next sequence number.
     seq_counter: u64,
-    /// Incremented on every D marker (command completion signal).
-    /// Used by command_run to detect completion even when the command
-    /// isn't recorded in history (e.g., no C marker, empty command).
-    pub completion_seq: u64,
-    /// When the most recent OSC 133 marker was received.
-    /// Used to determine if shell integration is active.
-    pub last_osc133_marker: Option<Instant>,
     /// When the most recent terminal data (%output) was received.
     pub last_data: Option<Instant>,
-    /// LRU cache of leaf PIDs → OSC 133 confirmed (true) or failed (false).
-    /// Bounded to 5 entries. Used by command_run to gate on marker availability.
-    pub osc133_cache: VecDeque<(u32, bool)>,
     /// Cursor position (line, col) at B marker time — the start of user input,
     /// right after the prompt. Used by PaneProcessor to read typed input from
     /// the terminal grid.
     pub input_start: Option<(usize, usize)>,
 }
 
-const MAX_OSC133_CACHE: usize = 5;
-
 impl TerminalState {
     pub fn new() -> Self {
         Self {
             commands: VecDeque::new(),
-            activity: Activity::Unknown,
             cwd: None,
             user: None,
             hostname: None,
             osc7_since_command: false,
             seq_counter: 0,
-            completion_seq: 0,
-            last_osc133_marker: None,
             last_data: None,
-            osc133_cache: VecDeque::new(),
             input_start: None,
-        }
-    }
-
-    /// Look up a leaf PID in the OSC 133 cache.
-    /// Returns Some(true) if confirmed, Some(false) if failed, None if unknown.
-    pub fn osc133_lookup(&self, pid: u32) -> Option<bool> {
-        self.osc133_cache
-            .iter()
-            .find(|(p, _)| *p == pid)
-            .map(|(_, v)| *v)
-    }
-
-    /// Mark a leaf PID as having working OSC 133.
-    pub fn osc133_confirm(&mut self, pid: u32) {
-        self.osc133_upsert(pid, true);
-    }
-
-    /// Mark a leaf PID as not having working OSC 133.
-    pub fn osc133_fail(&mut self, pid: u32) {
-        self.osc133_upsert(pid, false);
-    }
-
-    fn osc133_upsert(&mut self, pid: u32, confirmed: bool) {
-        self.osc133_cache.retain(|(p, _)| *p != pid);
-        self.osc133_cache.push_front((pid, confirmed));
-        while self.osc133_cache.len() > MAX_OSC133_CACHE {
-            self.osc133_cache.pop_back();
         }
     }
 
@@ -227,7 +170,6 @@ mod tests {
     fn new_state_is_empty() {
         let s = TerminalState::new();
         assert!(s.commands.is_empty());
-        assert_eq!(s.activity, Activity::Unknown);
         assert!(s.cwd.is_none());
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -421,69 +363,5 @@ mod tests {
         // Next OSC 7 without user should clear it
         s.update_cwd_from_osc7("file://myhost/tmp");
         assert!(s.user.is_none());
-    }
-
-    // --- OSC 133 cache ---
-
-    #[test]
-    fn osc133_cache_lookup_empty() {
-        let s = TerminalState::new();
-        assert_eq!(s.osc133_lookup(100), None);
-    }
-
-    #[test]
-    fn osc133_cache_confirm_and_lookup() {
-        let mut s = TerminalState::new();
-        s.osc133_confirm(100);
-        assert_eq!(s.osc133_lookup(100), Some(true));
-        assert_eq!(s.osc133_lookup(200), None);
-    }
-
-    #[test]
-    fn osc133_cache_fail_and_lookup() {
-        let mut s = TerminalState::new();
-        s.osc133_fail(100);
-        assert_eq!(s.osc133_lookup(100), Some(false));
-    }
-
-    #[test]
-    fn osc133_cache_confirm_overrides_fail() {
-        let mut s = TerminalState::new();
-        s.osc133_fail(100);
-        assert_eq!(s.osc133_lookup(100), Some(false));
-        s.osc133_confirm(100);
-        assert_eq!(s.osc133_lookup(100), Some(true));
-    }
-
-    #[test]
-    fn osc133_cache_fail_overrides_confirm() {
-        let mut s = TerminalState::new();
-        s.osc133_confirm(100);
-        s.osc133_fail(100);
-        assert_eq!(s.osc133_lookup(100), Some(false));
-    }
-
-    #[test]
-    fn osc133_cache_separate_pids() {
-        let mut s = TerminalState::new();
-        s.osc133_confirm(100);
-        s.osc133_fail(200);
-        assert_eq!(s.osc133_lookup(100), Some(true));
-        assert_eq!(s.osc133_lookup(200), Some(false));
-        assert_eq!(s.osc133_lookup(300), None);
-    }
-
-    #[test]
-    fn osc133_cache_bounded_at_5() {
-        let mut s = TerminalState::new();
-        for pid in 1..=6 {
-            s.osc133_confirm(pid);
-        }
-        // PID 1 should have been evicted
-        assert_eq!(s.osc133_lookup(1), None);
-        // PIDs 2-6 should be present
-        for pid in 2..=6 {
-            assert_eq!(s.osc133_lookup(pid), Some(true));
-        }
     }
 }

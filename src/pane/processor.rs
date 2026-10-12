@@ -134,11 +134,6 @@ impl PaneProcessor {
         &self.state
     }
 
-    /// Mutable access to pane state (for OSC 133 cache updates).
-    pub fn state_mut(&mut self) -> &mut TerminalState {
-        &mut self.state
-    }
-
     /// Access the OSC 133 parser state.
     pub fn osc133_phase(&self) -> &Osc133Phase {
         self.osc133.phase()
@@ -323,10 +318,6 @@ impl PaneProcessor {
                 }
                 if *marker == b'C' {
                     self.state.osc7_since_command = false;
-                }
-
-                if matches!(self.osc133.phase(), Osc133Phase::Executing { .. }) {
-                    self.state.activity = crate::pane::state::Activity::Busy;
                 }
             }
             OscEvent::Osc7 { uri } => {

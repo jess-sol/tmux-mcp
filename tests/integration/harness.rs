@@ -211,6 +211,17 @@ impl Harness {
     /// prompt shows and `list_panes` lists it. Each call halves the harness's
     /// pane, so a test makes one.
     pub async fn shell(&self) -> Shell {
+        self.open_shell("exec bash --noprofile -i").await
+    }
+
+    /// A `shell` whose bash skips the `.bashrc`, so it sends no OSC 133
+    /// markers until `inject_osc133`.
+    pub async fn shell_without_integration(&self) -> Shell {
+        self.open_shell("PS1='$ ' exec bash --noprofile --norc -i")
+            .await
+    }
+
+    async fn open_shell(&self, program: &str) -> Shell {
         let cwd = self.dir().to_str().expect("a UTF-8 temp dir");
         let split = [
             "split-window",
@@ -220,7 +231,7 @@ impl Harness {
             "#{pane_id}",
             "-c",
             cwd,
-            "exec bash --noprofile -i",
+            program,
         ];
         let pane = run(tmux(&self.socket).args(split)).trim().to_string();
         let shell = Shell {

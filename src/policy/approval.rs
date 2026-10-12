@@ -84,7 +84,6 @@ mod tests {
         PaneContext {
             hostname: None,
             cwd: Some("/home/user/project".into()),
-            foreground: Some("bash".into()),
             user: Some("user".into()),
         }
     }
@@ -172,21 +171,6 @@ mod tests {
         store.store("%0", "%1", "rm foo", &c);
         let mut drifted = c.clone();
         drifted.cwd = Some("/etc".into());
-        assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &drifted)
-                .unwrap_err(),
-            "Pane context changed since approval"
-        );
-    }
-
-    #[test]
-    fn context_drift_foreground() {
-        let mut store = ApprovalStore::new();
-        let c = ctx();
-        store.store("%0", "%1", "rm foo", &c);
-        let mut drifted = c.clone();
-        drifted.foreground = Some("sudo".into());
         assert_eq!(
             store
                 .verify_and_consume("%0", "%1", "rm foo", &drifted)
