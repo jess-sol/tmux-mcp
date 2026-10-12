@@ -570,10 +570,14 @@ arguments = [
   "--literal-pathspecs", "--no-optional-locks", "subcommand",
 ]
 argument.dir.default = ["."]                          # git reads the repository of its directory
+# git won't let an alias shadow a built-in, so a listed name is never an
+# alias for `push`; an unlisted one could be, and stays Unknown.
 argument.subcommand.words = [
   "add", "rm", "mv", "checkout", "switch", "restore", "merge", "rebase", "pull", "fetch",
   "clone", "init", "worktree", "cherry-pick", "revert", "am", "apply", "bisect", "submodule",
-  "gc", "prune",
+  "gc", "prune", "merge-base", "rev-list", "for-each-ref", "show-ref", "symbolic-ref",
+  "ls-remote", "name-rev", "cherry", "range-diff", "check-ignore", "format-patch", "notes",
+  "sparse-checkout", "fsck", "archive", "bundle", "version", "help",
 ]
 marks.cwd = ["dir"]
 marks.read = ["git_dir", "work_tree"]
