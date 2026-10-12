@@ -214,11 +214,11 @@ exempts = ["cargo-install"]        # stricter rule ids that stop counting while 
 # host = 'host == "prod"'          # CEL over the host the command runs on
 # user = 'user == "root"'          # CEL over the user it runs as
 # message = "use {{ drop(command) }}"  # shown in the reason; {{ }} holes are CEL read like `when`
-# via = "tmux"                     # "tmux" (command_run) or "bash" (Claude Code's Bash tool); omit for both
+# via = "bash"                     # "tmux" (command_run, the default), "bash" (Claude Code's Bash tool), or ["tmux", "bash"]
 ```
 
-A rule with `via` counts only on that channel, where it neither matches nor exempts on the other;
-`via` is a plain string, not CEL.
+A rule counts only on the channels its `via` names, and on tmux alone without one; on another
+channel it neither matches nor exempts. `via` is a plain value, not CEL.
 
 **The Bash channel:** with `Bash` in the hook's matcher, Claude Code's Bash calls meet the same
 rules, judged in the hook from the payload's `cwd` on this machine. A command no rule matches gets
@@ -227,12 +227,12 @@ tmux only). A line is the strictest of its commands, allow < passthrough < ask <
 is allowed only when every command is. The built-in `prefer-tmux` denies `cargo`, `make`, `npm`,
 `podman` and `kubectl` through Bash; lift it per tool with an allow that has `via = "bash"` and
 `exempts = ["prefer-tmux"]`. The built-in `tmux-cli` denies the `tmux` command through Bash.
-Every built-in allow has `via = "tmux"`, and so does `outside-project`, so on Bash only asks and
-denies come from the built-ins and a path outside the project passes through; an allow you add
-without `via` applies on Bash too. Asks that would fire on everyday Bash use are tmux-only too
-(awk and sed programs, `curl-wget`, `variable-runs-code`); `process-signals` and `permissions`
-have tight Bash twins that ask only for SIGKILL (`sigkill`) and for `-R`
-(`permissions-recursive`).
+On Bash only rules that name it count: the built-in guards (`eval`, `rm-r`, `git-push-*`,
+`package-remove`, …) carry `via = ["tmux", "bash"]`, and the allows, `outside-project`, the lints
+and the asks that would fire on everyday use (awk and sed programs, `curl-wget`,
+`variable-runs-code`) stay on tmux. `process-signals` and `permissions` have tight Bash twins that
+ask only for SIGKILL (`sigkill`) and for `-R` (`permissions-recursive`). A rule you write reaches
+Bash only with `via`, an exemption included.
 
 Only `id` and `action` are required. A rule without `when`, `path`, `write`, `host` or `user`
 matches every command on its `command` path. A rule with `path` or `write` matches only through a
@@ -332,7 +332,7 @@ certainly true. It is the only way one rule loosens another.
 
 ## Lints
 
-A lint is a built-in deny with `via = "tmux"` whose message says how to fix the command; most render the fixed line
+A lint is a built-in deny, on tmux only, whose message says how to fix the command; most render the fixed line
 with `drop`. Ids: `pipe-to-tail`, `pipe-to-head`, `pipe-to-grep`, `pipe-to-egrep`, `pipe-to-fgrep`, `pipe-to-rg`,
 `pipe-to-tee`, `echo-status`, `echo-status-alone`, `constant-echo`, `constant-success-echo`,
 `stderr-to-stdout`, `background`, `redundant-cd`. Usually the right answer is the fix the message

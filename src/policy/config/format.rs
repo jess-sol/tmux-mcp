@@ -44,9 +44,9 @@ pub struct RuleConfig {
     /// The ids of the stricter rules it exempts: its *Exemption*s.
     #[serde(default)]
     pub exempts: Vec<String>,
-    /// The one *Channel* it counts on; without it, both.
-    #[serde(default)]
-    pub via: Option<Via>,
+    /// The *Channel*s it counts on: one, or a list; without it, tmux.
+    #[serde(default, deserialize_with = "channels")]
+    pub via: Option<Vec<Via>>,
 }
 
 /// A rule's `command`: one command path, or a list of them.
@@ -154,4 +154,28 @@ pub struct MarksConfig {
 
 pub fn parse_config(toml_str: &str) -> Result<PolicyConfig, String> {
     toml::from_str(toml_str).map_err(|e| format!("TOML parse error: {}", e))
+}
+
+/// `via`: one channel, or a list of them. Each is read as a `Via`, so a
+/// misspelling names the channels there are.
+fn channels<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<Via>>, D::Error> {
+    use serde::de::{self, IntoDeserializer};
+
+    struct Channels;
+    impl<'de> de::Visitor<'de> for Channels {
+        type Value = Vec<Via>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("`bash`, `tmux`, or a list of them")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<Via>, E> {
+            Ok(vec![Via::deserialize(v.into_deserializer())?])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, seq: A) -> Result<Vec<Via>, A::Error> {
+            Vec::deserialize(de::value::SeqAccessDeserializer::new(seq))
+        }
+    }
+    d.deserialize_any(Channels).map(Some)
 }

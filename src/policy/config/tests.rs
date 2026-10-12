@@ -134,6 +134,14 @@ fn a_source_that_breaks_the_format_does_not_load() {
             "expected `bash` or `tmux`",
         ),
         (
+            "[[rules]]\nid = \"x\"\naction = \"allow\"\nvia = [\"tmux\", \"zsh\"]",
+            "expected `bash` or `tmux`",
+        ),
+        (
+            "[[rules]]\nid = \"x\"\naction = \"allow\"\nvia = []",
+            "`via` names no channel",
+        ),
+        (
             "[[rules]]\nid = \"x\"\naction = \"allow\"\ncommand = []",
             "`command` is empty",
         ),

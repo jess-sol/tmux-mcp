@@ -815,30 +815,35 @@ global = [                                            # options come before or a
 
 [[rules]]
 id = "eval"
+via = ["tmux", "bash"]
 command = "eval"
 action = "deny"
 message = "eval executes arbitrary strings"
 
 [[rules]]
 id = "source"
+via = ["tmux", "bash"]
 command = "source"
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
 id = "dot-source"
+via = ["tmux", "bash"]
 command = "."
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
 id = "exec"
+via = ["tmux", "bash"]
 command = "exec"
 action = "deny"
 message = "exec replaces the shell process"
 
 [[rules]]
 id = "sh-reads-stdin"
+via = ["tmux", "bash"]
 command = "sh"
 when = 'args.command == [] && args.file == null'
 action = "deny"
@@ -846,6 +851,7 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 
 [[rules]]
 id = "bash-reads-stdin"
+via = ["tmux", "bash"]
 command = "bash"
 when = 'args.command == [] && args.file == null'
 action = "deny"
@@ -853,6 +859,7 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 
 [[rules]]
 id = "dash-reads-stdin"
+via = ["tmux", "bash"]
 command = "dash"
 when = 'args.command == [] && args.file == null'
 action = "deny"
@@ -860,6 +867,7 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 
 [[rules]]
 id = "zsh-reads-stdin"
+via = ["tmux", "bash"]
 command = "zsh"
 when = 'args.command == [] && args.file == null'
 action = "deny"
@@ -867,6 +875,7 @@ message = "dynamic command dispatch isn't allowed: with neither -c nor a script 
 
 [[rules]]
 id = "git-config-command"
+via = ["tmux", "bash"]
 command = "git"
 when = 'args.config != [] || args.config_env != [] || args.exec_path'
 action = "deny"
@@ -880,7 +889,6 @@ message = "git -c and --exec-path can set a command to run (core.pager, core.ssh
 
 [[rules]]
 id = "pipe-to-tail"
-via = "tmux"
 command = "tail"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -894,7 +902,6 @@ This preserves full output in history. Use command_read(search=...) to search it
 
 [[rules]]
 id = "pipe-to-head"
-via = "tmux"
 command = "head"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -908,7 +915,6 @@ This preserves full output in history. Use command_read(search=...) to search it
 
 [[rules]]
 id = "pipe-to-grep"
-via = "tmux"
 command = "grep"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -922,7 +928,6 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-egrep"
-via = "tmux"
 command = "egrep"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -936,7 +941,6 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-fgrep"
-via = "tmux"
 command = "fgrep"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -950,7 +954,6 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-rg"
-via = "tmux"
 command = "rg"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -964,7 +967,6 @@ search supports full regex. This preserves full output for multiple different se
 
 [[rules]]
 id = "pipe-to-tee"
-via = "tmux"
 command = "tee"
 when = 'command.top && command.op_before == "|" && command.op_after != "|"'
 action = "deny"
@@ -981,7 +983,6 @@ Use command_read to access full output as many times as needed.'''
 
 [[rules]]
 id = "echo-status"
-via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
   && command.op_after == null && command.op_before != null && command.op_before != "|"
@@ -997,7 +998,6 @@ The exit status of the last command is captured and shown automatically; reading
 
 [[rules]]
 id = "echo-status-alone"
-via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
   && command.op_before == null && command.op_after == null
@@ -1015,7 +1015,6 @@ command_history lists recent commands with their exit codes, captured directly w
 
 [[rules]]
 id = "constant-echo"
-via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
   && !(command.op_before in ["|", "&&", "||"]) && command.op_after != "|"
@@ -1031,7 +1030,6 @@ A top-level echo of a fixed string is almost always a leftover progress marker (
 
 [[rules]]
 id = "constant-success-echo"
-via = "tmux"
 when = '''
   command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
   && command.op_before == "&&" && command.op_after == null
@@ -1047,7 +1045,6 @@ A trailing `&& echo …` runs only when the preceding command succeeds, so it ju
 
 [[rules]]
 id = "stderr-to-stdout"
-via = "tmux"
 when = 'command.top && command.op_after == null && "2>&1" in command.redirects'
 action = "deny"
 message = '''
@@ -1060,7 +1057,6 @@ Both stdout and stderr are visible in the terminal and captured automatically.''
 
 [[rules]]
 id = "background"
-via = "tmux"
 when = 'command.top && command.op_after == "&"'
 action = "deny"
 message = '''
@@ -1074,7 +1070,6 @@ Background jobs bypass output capture and can't be monitored reliably. Use list_
 
 [[rules]]
 id = "redundant-cd"
-via = "tmux"
 command = "cd"
 when = '''
   command.top && command.op_before == null && command.op_after in ["&&", ";"]
@@ -1122,7 +1117,6 @@ command_run to run in it, command_read to read output, press_key for keys.'''
 
 [[rules]]
 id = "outside-project"
-via = "tmux"
 path = '!in_project(path) && !is_device(path)'
 action = "ask"
 message = "a path outside the project"
@@ -1133,7 +1127,6 @@ message = "a path outside the project"
 
 [[rules]]
 id = "variable-runs-code"
-via = "tmux"
 when = '''
   variables.exists(v, v in ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV",
                             "PROMPT_COMMAND", "PS4", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
@@ -1148,23 +1141,27 @@ message = "the variable can make a later command run another program"
 
 [[rules]]
 id = "privilege-escalation"
+via = ["tmux", "bash"]
 when = 'command.name in ["su", "doas"]'
 action = "ask"
 
 [[rules]]
 id = "rm-r"
+via = ["tmux", "bash"]
 command = "rm"
 when = 'args.recursive'
 action = "ask"
 
 [[rules]]
 id = "find-delete"
+via = ["tmux", "bash"]
 command = "find"
 when = 'args.delete'
 action = "ask"
 
 [[rules]]
 id = "rg-runs-program"
+via = ["tmux", "bash"]
 command = "rg"
 when = 'args.pre != [] || args.hostname_bin != []'
 action = "ask"
@@ -1174,36 +1171,42 @@ message = "--pre and --hostname-bin run the program they name"
 
 [[rules]]
 id = "git-push-force"
+via = ["tmux", "bash"]
 command = "git push"
 when = 'args.force || args.force_with_lease || args.force_if_includes || args.refspecs.exists(r, startsWith(r, "+"))'
 action = "ask"
 
 [[rules]]
 id = "git-push-delete"
+via = ["tmux", "bash"]
 command = "git push"
 when = 'args.delete || args.refspecs.exists(r, startsWith(r, ":"))'
 action = "ask"
 
 [[rules]]
 id = "git-push-mirror"
+via = ["tmux", "bash"]
 command = "git push"
 when = 'args.mirror'
 action = "ask"
 
 [[rules]]
 id = "git-push-prune"
+via = ["tmux", "bash"]
 command = "git push"
 when = 'args.prune'
 action = "ask"
 
 [[rules]]
 id = "git-reset-hard"
+via = ["tmux", "bash"]
 command = "git reset"
 when = 'args.hard'
 action = "ask"
 
 [[rules]]
 id = "git-clean-force"
+via = ["tmux", "bash"]
 command = "git clean"
 when = 'args.force'
 action = "ask"
@@ -1213,7 +1216,6 @@ action = "ask"
 
 [[rules]]
 id = "awk-program"
-via = "tmux"
 command = ["awk", "gawk", "mawk", "nawk"]
 when = '''
   args.file != [] || args.program != null && !awk_is_plain(args.program)
@@ -1224,7 +1226,6 @@ message = "the awk program can run a command or open a file: system(), a | pipe,
 
 [[rules]]
 id = "sed-script"
-via = "tmux"
 command = "sed"
 when = '''
   args.file != [] || args.script != null && !sed_is_plain(args.script)
@@ -1235,17 +1236,18 @@ message = "the sed script can run a command or open a file: e, s///e, w, r, or a
 
 [[rules]]
 id = "disk-and-filesystem"
+via = ["tmux", "bash"]
 when = 'command.name in ["dd", "mkfs", "fdisk", "mount", "umount"]'
 action = "ask"
 
 [[rules]]
 id = "system-power"
+via = ["tmux", "bash"]
 when = 'command.name in ["reboot", "shutdown", "poweroff", "halt"]'
 action = "ask"
 
 [[rules]]
 id = "process-signals"
-via = "tmux"
 when = 'command.name in ["kill", "pkill", "killall"]'
 action = "ask"
 
@@ -1261,36 +1263,38 @@ message = "SIGKILL leaves the process no chance to clean up"
 
 [[rules]]
 id = "package-remove"
+via = ["tmux", "bash"]
 command = ["apt", "apt-get", "dnf", "yum"]
 when = 'subcommand in ["remove", "purge", "erase", "autoremove"]'
 action = "ask"
 
 [[rules]]
 id = "pacman-remove"
+via = ["tmux", "bash"]
 command = "pacman"
 when = 'args.remove'
 action = "ask"
 
 [[rules]]
 id = "firewall"
+via = ["tmux", "bash"]
 when = 'command.name in ["iptables", "ufw", "firewall-cmd"]'
 action = "ask"
 
 [[rules]]
 id = "service-disruption"
+via = ["tmux", "bash"]
 command = "systemctl"
 when = 'subcommand in ["stop", "disable", "mask", "restart"]'
 action = "ask"
 
 [[rules]]
 id = "curl-wget"
-via = "tmux"
 when = 'command.name in ["curl", "wget"]'
 action = "ask"
 
 [[rules]]
 id = "permissions"
-via = "tmux"
 when = 'command.name in ["chmod", "chown", "chgrp"]'
 action = "ask"
 
@@ -1304,6 +1308,7 @@ action = "ask"
 
 [[rules]]
 id = "cargo-install"
+via = ["tmux", "bash"]
 command = "cargo install"
 action = "ask"
 message = "cargo install downloads and compiles arbitrary code from crates.io"
@@ -1314,7 +1319,6 @@ message = "cargo install downloads and compiles arbitrary code from crates.io"
 
 [[rules]]
 id = "info-commands"
-via = "tmux"
 when = '''
   command.name in [null, "echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id",
                    "which", "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type",
@@ -1327,13 +1331,11 @@ action = "allow"
 
 [[rules]]
 id = "wrappers-and-export"
-via = "tmux"
 when = 'command.name in ["timeout", "nice", "nohup", "xargs", "env", "export"]'
 action = "allow"
 
 [[rules]]
 id = "sudo-with-command"
-via = "tmux"
 command = "sudo"
 when = 'args.command != [] && !args.edit && !args.shell && !args.login'
 action = "allow"
@@ -1341,27 +1343,23 @@ action = "allow"
 # -o and -F can set a ProxyCommand, which runs on this machine.
 [[rules]]
 id = "ssh-with-command"
-via = "tmux"
 command = "ssh"
 when = 'args.command != [] && args.option == [] && args.config == []'
 action = "allow"
 
 [[rules]]
 id = "shell-c"
-via = "tmux"
 command = ["sh", "bash", "dash", "zsh"]
 when = 'args.command != []'
 action = "allow"
 
 [[rules]]
 id = "cd-pushd-popd"
-via = "tmux"
 when = 'command.name in ["cd", "pushd", "popd"]'
 action = "allow"
 
 [[rules]]
 id = "file-tools"
-via = "tmux"
 when = '''
   command.name in ["cat", "less", "more", "wc", "file", "stat", "realpath", "readlink", "diff",
                    "base64", "md5sum", "sha256sum", "uniq", "head", "tail", "ls", "tree", "cut", "sort",
@@ -1372,13 +1370,11 @@ action = "allow"
 
 [[rules]]
 id = "cargo"
-via = "tmux"
 command = "cargo"
 action = "allow"
 
 [[rules]]
 id = "git-reads"
-via = "tmux"
 command = "git"
 when = '''
   subcommand in ["status", "log", "diff", "show", "shortlog", "blame", "ls-files", "ls-tree",
@@ -1388,28 +1384,24 @@ action = "allow"
 
 [[rules]]
 id = "git-remote-listings"
-via = "tmux"
 command = "git remote"
 when = 'subcommand in [null, "show", "get-url"]'
 action = "allow"
 
 [[rules]]
 id = "git-stash-listings"
-via = "tmux"
 command = "git stash"
 when = 'subcommand in ["list", "show"]'
 action = "allow"
 
 [[rules]]
 id = "git-reflog-listings"
-via = "tmux"
 command = "git reflog"
 when = 'subcommand in [null, "show"]'
 action = "allow"
 
 [[rules]]
 id = "git-branch-listings"
-via = "tmux"
 command = "git branch"
 when = '''
   (args.list || args.names == [])
@@ -1420,14 +1412,12 @@ action = "allow"
 
 [[rules]]
 id = "git-tag-listings"
-via = "tmux"
 command = "git tag"
 when = '(args.list || args.names == []) && !args.delete'
 action = "allow"
 
 [[rules]]
 id = "git-config-reads"
-via = "tmux"
 command = "git config"
 when = '''
   !(args.unset || args.unset_all || args.add || args.replace_all || args.edit

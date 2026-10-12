@@ -46,23 +46,25 @@ passthrough instead of allow". A line-level `Option<Decision>` would let
 - `bash_default` and `tmux_default` keys: no need yet; the model admits them later.
 - A `pass` rule action: it would loosen without an *Exemption*.
 
-## A rule's `via` scopes it to one channel
+## A rule counts on tmux unless its `via` names Bash
 
 2026-10-11 · active
 
-`via = "bash"` or `via = "tmux"` makes a rule count only on that
-*Channel*: on the other it neither matches nor exempts. A rule without
-`via` counts on both. `via` is a plain string, and any other value is a
-load error. The lints carry `via = "tmux"`, since their fixes name
-`command_run` parameters; the built-in `prefer-tmux` carries
+A rule's `via` names the *Channel*s it counts on: `"bash"`, `"tmux"`, or
+a list of both. On any other *Channel* it neither matches nor exempts.
+A rule without `via` counts on tmux alone. An empty list or an unknown
+name is a load error. The built-in guards carry `via = ["tmux", "bash"]`;
+`prefer-tmux`, `tmux-cli` and the tight Bash twins of tmux asks carry
 `via = "bash"`.
 
-**Why:** the user: "I'd prefer just `via = 'bash'`, and if no via is set,
-assume all". So every existing allow also allows the matching Bash call,
-which a hook allow cannot use to skip the user's `settings.json` denies.
+**Why:** the user: "default via is actually tmux; which kinda makes sense
+because bash is kinda a narrow subset thingy we just wanted to add on;
+it's not like bash's main permission model". A rule written for tmux,
+such as an allow or a project exemption, stays off Bash until it says so.
 
 **Alternatives considered:**
-- An allow without `via` matching tmux only, like `host` and `user`: rejected by the user.
+- No `via` counts on both channels: allows and exemptions leaked onto Bash; reversed by the user.
+- `via` required, with an `all` value: every rule would carry it.
 - The channel as a second action axis in the lattice: a channel is where a line runs, not a strictness.
 
 ## A lint is a deny rule whose message tells Claude how to fix the command

@@ -430,6 +430,7 @@ fn a_rule_with_via_counts_only_on_its_channel() {
 [[rules]]
 id = "t-asks"
 command = "t"
+via = ["tmux", "bash"]
 action = "ask"
 
 [[rules]]
@@ -445,14 +446,22 @@ command = "t"
 when = 'args.xs == ["x"]'
 via = "bash"
 action = "deny"
+
+[[rules]]
+id = "t-y"
+command = "t"
+when = 'args.xs == ["y"]'
+action = "ask"
 "#,
     );
-    // (via, xs, decision, reason)
+    // (via, xs, decision, reason): a rule without `via` counts on tmux only.
     let rows = [
         (Via::Tmux, &[][..], Decision::Allow, "t-in-tmux"),
         (Via::Tmux, &["x"][..], Decision::Allow, "t-in-tmux"),
         (Via::Bash, &[][..], Decision::Ask, "t-asks"),
         (Via::Bash, &["x"][..], Decision::Deny, "t-x-in-bash"),
+        (Via::Tmux, &["y"][..], Decision::Ask, "t-y"),
+        (Via::Bash, &["y"][..], Decision::Ask, "t-asks"),
     ];
     for (via, xs, want, reason) in rows {
         let got = decide(

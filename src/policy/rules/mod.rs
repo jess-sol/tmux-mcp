@@ -45,8 +45,8 @@ pub struct CompiledRule {
     message: Option<Vec<Part>>,
     /// A project rule, which applies only on this machine.
     local_only: bool,
-    /// The one *Channel* it counts on; None for both.
-    via: Option<Via>,
+    /// The *Channel*s it counts on.
+    via: Vec<Via>,
     /// The indices of the stricter rules it exempts.
     exempts: Vec<usize>,
 }
@@ -404,7 +404,7 @@ fn meet(rule: &CompiledRule, facts: &Facts, env: &Env) -> Meeting {
         host: &facts.host,
     };
     // On another *Channel* the rule is False, so it neither matches nor exempts.
-    let mut command = if rule.via.is_some_and(|via| via != env.via) {
+    let mut command = if !rule.via.contains(&env.via) {
         TriBool::False
     } else {
         host_match(rule, facts, env)

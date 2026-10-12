@@ -73,14 +73,15 @@ async fn an_exemption_loosens_only_the_rule_it_names() {
     );
     decides!(h, {
         "git push --force origin main" => (Allow, _),
-        "git push --force --delete origin main" => (Ask, "git-push-delete"),
-        "eval true" => (Ask, "eval-asks-here"),
+        "git push --force --delete origin main" => (Ask, "git-push-delete", _, _),
+        // An exemption without `via` loosens only on tmux.
+        "eval true" => (Ask, "eval-asks-here", Deny, "eval"),
         "cargo publish" => (Ask, _),
         "cargo build" => (Allow, _),
         "rm -r build/x" => (Allow, _),
         "rm -r build/x /etc/y" => (Ask, _),
         "cat /etc/hosts" => (Allow, _),
-        "cat /etc/hosts /etc/shadow" => (Ask, "outside-project", _, _),
+        "cat /etc/hosts /etc/shadow" => (Ask, "outside-project", Pass, _),
     });
 }
 
@@ -100,12 +101,25 @@ async fn a_rule_with_via_counts_only_on_that_channel() {
         command = "pwd"
         via = "tmux"
         action = "deny"
+
+        [[rules]]
+        id = "no-wc"
+        command = "wc"
+        action = "deny"
+
+        [[rules]]
+        id = "no-cat-anywhere"
+        command = "cat"
+        via = ["tmux", "bash"]
+        action = "deny"
         "#,
     );
 
     decides!(h, {
         "ls" => (Allow, _, Deny, "no-ls-in-bash"),
         "pwd" => (Deny, "no-pwd-in-tmux", Pass, _),
+        "wc notes" => (Deny, "no-wc", Pass, _),
+        "cat notes" => (Deny, "no-cat-anywhere"),
     });
 }
 

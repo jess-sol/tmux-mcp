@@ -10,9 +10,9 @@ use cel_parser::ast as cel;
 use super::eval::UNKNOWN;
 use super::identity::normalize;
 use super::{CompiledRule, Part};
-use crate::policy::Decision;
 use crate::policy::config::{CommandConfig, RuleConfig};
 use crate::policy::grammar::Grammars;
+use crate::policy::{Decision, Via};
 
 /// The variables an expression reads, and the `args.<name>` it selects.
 /// `unknown` is a value, not a variable.
@@ -36,6 +36,11 @@ pub(super) fn rule(
         "ask" => Decision::Ask,
         other => return Err(format!("the action `{other}` is not allow, ask or deny")),
     };
+    // Without `via`, a rule is for tmux: Bash carries only rules that say so.
+    let via = config.via.clone().unwrap_or_else(|| vec![Via::Tmux]);
+    if via.is_empty() {
+        return Err("`via` names no channel".into());
+    }
     let command = config.command.as_ref().map(command_paths).transpose()?;
     let declared = command
         .as_ref()
@@ -110,7 +115,7 @@ pub(super) fn rule(
         action,
         message,
         local_only: is_project,
-        via: config.via,
+        via,
         exempts: Vec::new(),
     })
 }
