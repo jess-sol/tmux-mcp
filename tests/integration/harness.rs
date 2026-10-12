@@ -277,6 +277,21 @@ impl Harness {
         self.call("debug_pane", shell.target()).await
     }
 
+    /// The screen `debug_pane` shows and the screen tmux shows, once they
+    /// agree or `SETTLE` passes: the daemon follows tmux's changes a moment
+    /// late.
+    pub async fn screens(&self, shell: &Shell) -> (String, String) {
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            let daemon = self.debug_pane(shell).await;
+            let tmux = shell.screen().trim_end().to_string();
+            if daemon == tmux || Instant::now() >= deadline {
+                return (daemon, tmux);
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
     pub async fn inject_osc133(&self, shell: &Shell) -> String {
         self.call("inject_osc133", shell.target()).await
     }
@@ -464,6 +479,12 @@ impl Shell {
     pub fn say(&self, text: &str) {
         self.type_text(text);
         run(tmux(&self.socket).args(["send-keys", "-t", &self.pane, "Enter"]));
+    }
+
+    /// Resizes the pane to `rows`; the harness's own pane takes up the rest.
+    pub fn resize(&self, rows: u16) {
+        let rows = rows.to_string();
+        run(tmux(&self.socket).args(["resize-pane", "-t", &self.pane, "-y", &rows]));
     }
 
     /// Polls the screen, as tmux renders it, until `pred` holds.

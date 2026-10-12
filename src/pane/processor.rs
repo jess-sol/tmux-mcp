@@ -48,7 +48,13 @@ impl PaneProcessor {
     /// Create a new pane processor with the given dimensions.
     pub fn new(lines: usize, columns: usize) -> Self {
         let dims = PaneDimensions { lines, columns };
-        let config = Config::default();
+        // A pane that grows pulls lines back from history, as tmux does, so
+        // the history covers one resize; tmux's own `history-limit` must not
+        // be smaller.
+        let config = Config {
+            scrolling_history: 1000,
+            ..Config::default()
+        };
         let term = Term::new(config, &dims, VoidListener);
         let processor = Processor::new();
         Self {

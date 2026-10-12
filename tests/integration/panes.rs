@@ -41,6 +41,19 @@ async fn debug_pane_shows_the_screen_of_an_idle_pane() {
 }
 
 #[tokio::test]
+async fn a_pane_that_shrinks_and_grows_back_shows_what_tmux_shows() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    h.run(&shell, "seq 40").await;
+
+    shell.resize(10);
+    shell.resize(25);
+
+    let (daemon, tmux) = h.screens(&shell).await;
+    assert_eq!(daemon, tmux);
+}
+
+#[tokio::test]
 async fn debug_pane_points_at_command_read_while_a_command_runs() {
     let h = Harness::new().await;
     let shell = h.shell().await;
