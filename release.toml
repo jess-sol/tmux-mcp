@@ -1,0 +1,4 @@
+# `cargo release <patch|minor|major> --execute` on main: bump, commit, tag, push.
+allow-branch = ["main"]
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: Release {{version}}"

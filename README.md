@@ -258,6 +258,10 @@ cargo build
   bash  deny         prefer-tmux: …
 ```
 
-## Versions
+## Workflow
 
-The version in `Cargo.toml` decides which daemon serves a tmux session, so every merge to `main` bumps it, in its own commit before the merge: the minor version for a branch that adds features, the patch version for one that only fixes.
+`main` is always stable, though not always released. Run `prek install` once per clone: it gates every commit on fmt, clippy, the unit tests and the licence check.
+
+1. **Start** work on a branch off `main`.
+2. **Finish** it by rebasing onto the tip of `main` (`git fetch && git rebase origin/main`), then `git switch main && git merge --no-ff <branch> && git push`. The branch's commits sit in a line on `main`, joined by a merge commit; never squash-merge or rebase-merge.
+3. **Release** from `main` when it is worth installing: `cargo release <patch|minor|major> --execute` bumps the version (the one that decides which daemon serves), commits, tags `v<version>` and pushes. While the version is `0.x`, a release with features is minor and one with only fixes is patch.
