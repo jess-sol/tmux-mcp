@@ -15,8 +15,22 @@ struct Cli {
 enum Commands {
     /// Run as background daemon for the tmux session in $TMUX (internal, spawned automatically)
     Daemon,
-    /// Policy hook for Claude Code (PreToolUse hook for command_run)
+    /// Policy hook for Claude Code (PreToolUse hook for Bash and command_run)
     PolicyCheck,
+    /// Show the decision and reasons the policy gives each line, as from a pane
+    /// and from Claude Code's Bash tool in `--cwd`. Needs no daemon, and stores
+    /// no approval
+    PolicyEval {
+        /// Judge only this channel
+        #[arg(long, value_parser = ["tmux", "bash"])]
+        via: Option<String>,
+        /// The directory the lines run in (default: the current one)
+        #[arg(long)]
+        cwd: Option<String>,
+        /// The command lines to judge
+        #[arg(required = true)]
+        lines: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -28,6 +42,12 @@ async fn main() {
             if let Err(e) = run_policy_check().await {
                 eprintln!("{}", e);
                 std::process::exit(2);
+            }
+        }
+        Some(Commands::PolicyEval { via, cwd, lines }) => {
+            if let Err(e) = run_policy_eval(&lines, via.as_deref(), cwd) {
+                eprintln!("{}", e);
+                std::process::exit(1);
             }
         }
         Some(Commands::Daemon) => {
@@ -73,25 +93,66 @@ async fn run_policy_check() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// A Bash call starts from the payload's `cwd`, on this machine, as the
-/// shell's own user.
+/// A Bash call starts from the payload's `cwd`.
 fn check_bash(input: &serde_json::Value) {
     let command = input["tool_input"]["command"].as_str().unwrap_or("");
     let cwd = input["cwd"].as_str().map(str::to_string);
     let engine = policy::PolicyEngine::new(cwd.as_deref());
-    let ctx = policy::PaneContext {
-        hostname: None,
-        cwd,
-        foreground: None,
-        user: std::env::var("USER").ok(),
-    };
-    let result = policy::evaluate(command, &ctx, policy::Via::Bash, &engine);
+    let result = policy::evaluate(command, &local_context(cwd), policy::Via::Bash, &engine);
     match result.decision {
         policy::Decision::Passthrough => {}
         policy::Decision::Allow => print_hook_response("allow", None),
         policy::Decision::Ask => print_hook_response("ask", Some(&result.rule)),
         policy::Decision::Deny => print_hook_response("deny", Some(&result.rule)),
     }
+}
+
+/// A shell on this machine, in `cwd`, as the shell's own user.
+fn local_context(cwd: Option<String>) -> policy::PaneContext {
+    policy::PaneContext {
+        hostname: None,
+        cwd,
+        foreground: None,
+        user: std::env::var("USER").ok(),
+    }
+}
+
+/// Prints each line, then one row per channel: the decision, then its
+/// reasons, one per line.
+fn run_policy_eval(
+    lines: &[String],
+    via: Option<&str>,
+    cwd: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => std::env::current_dir()?.to_string_lossy().into_owned(),
+    };
+    let engine = policy::PolicyEngine::new(Some(&cwd));
+    let ctx = local_context(Some(cwd));
+    let channels = [("tmux", policy::Via::Tmux), ("bash", policy::Via::Bash)];
+    for line in lines {
+        println!("{line}");
+        for (name, channel) in channels.iter().filter(|(n, _)| via.is_none_or(|v| v == *n)) {
+            let result = policy::evaluate(line, &ctx, *channel, &engine);
+            let decision = match result.decision {
+                policy::Decision::Allow => "allow",
+                policy::Decision::Passthrough => "passthrough",
+                policy::Decision::Ask => "ask",
+                policy::Decision::Deny => "deny",
+            };
+            let mut reasons = result.rule.lines();
+            let row = format!(
+                "  {name:<5} {decision:<12} {}",
+                reasons.next().unwrap_or("")
+            );
+            println!("{}", row.trim_end());
+            for reason in reasons {
+                println!("{}", format!("{:21}{reason}", "").trim_end());
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn check_command_run(

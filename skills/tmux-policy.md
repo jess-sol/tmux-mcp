@@ -32,7 +32,7 @@ Copy this checklist and tick it off:
 - [ ] 3. Read the built-in grammar and rules the line meets (**Where to look**).
 - [ ] 4. Pick the file: project for a project's tools and scripts, user for personal or remote-host rules. Ask when unclear.
 - [ ] 5. Read that file, then append with Write/Edit. Never drop what is there.
-- [ ] 6. Verify with the dry run (**Where to look**): the line must give `allow`, and one variant must still ask. Run `pwd` through `command_run` in a pane inside the project: a deny with `policy:load_error` means fix the file; an ask with `default` means OSC 7 is missing (**Context**). Retry the real line only when the user wants it run now. Fix and repeat until all behave.
+- [ ] 6. Verify with the dry run (**Where to look**), `--cwd` inside the project: the line must give the decision you meant, and one variant must still ask; `policy:load_error` means fix the file. If the dry run agrees but the pane does not, OSC 7 is missing there (**Context**). Retry the real line only when the user wants it run now. Fix and repeat until all behave.
 - [ ] 7. Report the rule id, the file, and what still asks.
 
 ## Choosing the fix
@@ -65,7 +65,7 @@ Placement of decisions:
 | User policy | `~/.claude/tmux-mcp.toml`; may be missing or empty |
 | Project policy | `<root>/.claude/tmux-mcp.toml`; the root is the nearest directory upward from the pane's cwd holding that file, stopping below `$HOME`. An empty file is enough to anchor the root. With no project file, "the project" is the pane's cwd itself |
 | Built-in grammars and rules | `src/policy/builtin_rules.toml` in the tmux-mcp repo. Without the repo, the text is in the binary: `strings "$(command -v tmux-mcp)" \| grep -A8 'id = "rm-r"'` or `… \| grep -A20 '^\[commands.git.push\]'` |
-| Dry run | `printf '%s' '{"tool_input":{"pane_id":"<the pane's id from list_panes>","command":"cargo build"}}' \| tmux-mcp policy-check` inside tmux prints the hook's JSON. An ask prints the pane's `host` and `cwd`; `cwd: ?` means OSC 7 is missing. An ask result also stores a one-use approval for that command in that pane for 30 minutes |
+| Dry run | `tmux-mcp policy-eval 'cargo build' 'kill -9 1'` prints each line's decision and reasons on both channels, as a pane in the current directory on this machine would get them; `--via tmux\|bash` picks one, `--cwd DIR` another directory. It needs no daemon and stores no approval. Write the lines as a shell sees them, quoted for the command line |
 | Repo test corpus | `tests/integration/policy.rs`; run `cargo test --test integration policy` |
 
 **Load order:** built-in, then user, then project. All three share one format with top-level keys
@@ -110,7 +110,7 @@ ask or deny; deny rules must be tight because an Unknown fires them too. Wrap un
 
 1. Reason `default`: your allow read False or Unknown. Check the list comparison (`== ["x"]`), identifier spelling (**CEL**), the host and user defaults, and bare versus `./` identity.
 2. `outside-project (could not be ruled out)` on a command your grammar gives no paths: the parse is open, from an undeclared option before the last word, a leftover operand with no slot, an option given after a `words` word but missing from `global`, or an unlisted subcommand. The reason names the guard, never the word. Drop words from the end of the line in the dry run until the doubt goes; the last word dropped is the one to declare.
-3. Every line asks, `pwd` included, and the ask shows `cwd: ?`: OSC 7 is missing (**Context**).
+3. Every line asks in the pane, `pwd` included, and the ask shows `cwd: ?`, while the dry run allows it: OSC 7 is missing (**Context**).
 
 ## Grammars
 

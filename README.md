@@ -244,4 +244,16 @@ action = "allow"
 exempts = ["git-push-force"]
 ```
 
-Use `/tmux-policy` to write rules, or edit the files directly.
+Use `/tmux-policy` to write rules, or edit the files directly. To see what the policy decides, and why, without running anything:
+
+```sh
+tmux-mcp policy-eval 'kill -9 1234' 'cargo build'
+```
+```
+kill -9 1234
+  tmux  ask          process-signals
+  bash  ask          sigkill: SIGKILL leaves the process no chance to clean up
+cargo build
+  tmux  allow        cargo
+  bash  deny         prefer-tmux: …
+```

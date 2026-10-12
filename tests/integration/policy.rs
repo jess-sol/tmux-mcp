@@ -215,6 +215,30 @@ async fn a_function_body_meets_the_rules_where_it_is_defined() {
     assert_eq!(got, want);
 }
 
+/// `policy-eval` prints each line's decision and reasons on both channels,
+/// with no daemon and no approval left behind.
+#[tokio::test]
+async fn policy_eval_shows_each_lines_decision_on_both_channels() {
+    let h = Harness::new().await;
+
+    let both = h.eval(&["kill -9 1234", "frobnicate"]);
+    let bash = h.eval(&["--via", "bash", "kill -9 1234"]);
+
+    let sigkill = "  bash  ask          sigkill: SIGKILL leaves the process no chance to clean up";
+    assert_eq!(
+        both.lines().collect::<Vec<_>>(),
+        [
+            "kill -9 1234",
+            "  tmux  ask          process-signals",
+            sigkill,
+            "frobnicate",
+            "  tmux  ask          default",
+            "  bash  passthrough",
+        ]
+    );
+    assert_eq!(bash.lines().collect::<Vec<_>>(), ["kill -9 1234", sigkill]);
+}
+
 #[tokio::test]
 async fn a_project_exempts_prefer_tmux_for_bash() {
     let h = Harness::new().await;

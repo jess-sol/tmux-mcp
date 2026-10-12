@@ -275,18 +275,30 @@ impl Harness {
     /// Asks the hook about a Claude Code `Bash` call in the project, from
     /// outside tmux. None: the hook leaves it to Claude Code's permissions.
     pub fn bash(&self, command: &str) -> Option<(Decision, String)> {
-        let env: Vec<_> = self
-            .env
-            .iter()
-            .filter(|(name, _)| !name.starts_with("TMUX"))
-            .cloned()
-            .collect();
+        let env = self.outside_tmux();
         let input = json!({
             "tool_name": "Bash",
             "cwd": self.dir().to_str().expect("a UTF-8 project dir"),
             "tool_input": {"command": command},
         });
         self.ask_hook(&env, input)
+    }
+
+    /// What `tmux-mcp policy-eval` prints for `args`, run in the project
+    /// from outside tmux.
+    pub fn eval(&self, args: &[&str]) -> String {
+        let output = tmux_mcp(&self.outside_tmux())
+            .arg("policy-eval")
+            .args(args)
+            .current_dir(self.dir())
+            .output()
+            .expect("the tmux-mcp policy-eval command");
+        assert!(
+            output.status.success(),
+            "policy-eval failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("UTF-8 output")
     }
 
     /// The hook's answer to a payload for any other tool: None.
@@ -299,6 +311,16 @@ impl Harness {
 }
 
 impl Harness {
+    /// The harness's environment without its tmux server: a process run
+    /// with it is outside tmux.
+    fn outside_tmux(&self) -> Vec<(&'static str, String)> {
+        self.env
+            .iter()
+            .filter(|(name, _)| !name.starts_with("TMUX"))
+            .cloned()
+            .collect()
+    }
+
     /// Runs `policy-check` on `input` under `env`. No output means no
     /// decision.
     fn ask_hook(&self, env: &[(&'static str, String)], input: Value) -> Option<(Decision, String)> {
