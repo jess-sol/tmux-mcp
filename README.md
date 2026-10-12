@@ -204,7 +204,7 @@ Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.to
 
 With `Bash` in the hook's matcher, the policy also judges Claude Code's own Bash tool. A line is allowed only when every command in it is; a line that no rule asks about or denies passes through to Claude Code's own permissions. Lints, the built-in allows and the outside-the-project ask apply only to `command_run`: on Bash, the built-ins only ask and deny, and allowing is left to Claude Code. Bash asks only about sharp forms, such as `git push --force`, `rm -r`, `kill -9` and `chmod -R`.
 
-The built-in `prefer-tmux` rule denies `cargo`, `make`, `npm`, `podman` and `kubectl` through Bash and tells Claude to run them in a pane you can watch, and `tmux-cli` denies driving tmux itself from Bash. A rule counts on tmux only, unless its `via` says `"bash"` or `["tmux", "bash"]`; to let one project run `cargo` through Bash:
+Built-in rules deny build tools (`prefer-tmux`), SSH, file transfers, database clients, cluster and cloud CLIs, and system rebuilds through Bash, and tell Claude to run them in a pane you can watch, with a hint for each, such as how to open and verify an SSH session. Forms that only touch local files, such as `helm template` and `terraform fmt`, stay on Bash. `tmux-cli` denies driving tmux itself from Bash. A rule counts on tmux only, unless its `via` says `"bash"` or `["tmux", "bash"]`; to let one project run `cargo` through Bash:
 
 ```toml
 [[rules]]

@@ -194,6 +194,36 @@ async fn bash_asks_only_about_the_sharp_forms() {
     });
 }
 
+/// On Bash, what acts on remote hosts, clusters, clouds and databases runs in
+/// a pane the user can watch, except the forms that only read local files.
+#[tokio::test]
+async fn bash_sends_infrastructure_to_a_pane() {
+    let h = Harness::new().await;
+    decides!(h, {
+        "podman ps" => (_, _, Pass, _),
+        "ssh prod" => (_, _, Deny, "ssh-in-a-pane"),
+        "ssh prod uptime" => (_, _, Deny, "ssh-in-a-pane"),
+        "rsync -a src/ prod:/srv/" => (_, _, Deny, "transfer-in-a-pane"),
+        "psql -c 'select 1'" => (_, _, Deny, "database-in-a-pane"),
+        "aws s3 ls" => (_, _, Deny, "infra-in-a-pane"),
+        "sudo nixos-rebuild switch" => (_, _, Deny, "system-switch-in-a-pane"),
+        "kubectl get pods" => (_, _, Deny, "infra-in-a-pane"),
+        "kubectl -n web get pods" => (_, _, Deny, "infra-in-a-pane"),
+        "kubectl kustomize overlays/prod" => (_, _, Allow, "kubectl-kustomize"),
+        "kubectl create deployment web --image=nginx --dry-run=client -o yaml" => (_, _, Allow, "kubectl-client-dry-run"),
+        "kubectl create deployment web --image=nginx" => (_, _, Deny, "infra-in-a-pane"),
+        "kubectl create -f web.yaml --dry-run=none" => (_, _, Deny, "infra-in-a-pane"),
+        "kubectl create -f web.yaml --dry-run=server" => (_, _, Deny, "infra-in-a-pane"),
+        "helm template web ./chart" => (_, _, Allow, "helm-local"),
+        "helm lint ./chart" => (_, _, Allow, "helm-local"),
+        "helm install web ./chart" => (_, _, Deny, "infra-in-a-pane"),
+        "helm -n web upgrade web ./chart" => (_, _, Deny, "infra-in-a-pane"),
+        "terraform fmt -recursive" => (_, _, Allow, "terraform-local"),
+        "tofu validate" => (_, _, Allow, "terraform-local"),
+        "terraform apply" => (_, _, Deny, "infra-in-a-pane"),
+    });
+}
+
 /// A function body may run wherever it is later called, so its commands meet
 /// the rules where it is defined, in a directory that cannot be known.
 #[tokio::test]

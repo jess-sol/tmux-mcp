@@ -224,9 +224,12 @@ channel it neither matches nor exempts. `via` is a plain value, not CEL.
 rules, judged in the hook from the payload's `cwd` on this machine. A command no rule matches gets
 passthrough: the hook prints nothing and Claude Code's own permissions decide (`default` applies to
 tmux only). A line is the strictest of its commands, allow < passthrough < ask < deny, so a Bash line
-is allowed only when every command is. The built-in `prefer-tmux` denies `cargo`, `make`, `npm`,
-`podman` and `kubectl` through Bash; lift it per tool with an allow that has `via = "bash"` and
-`exempts = ["prefer-tmux"]`. The built-in `tmux-cli` denies the `tmux` command through Bash.
+is allowed only when every command is. Built-in denies send tools to a pane through Bash, each with a hint:
+`prefer-tmux` (`cargo`, `make`, `npm`), `ssh-in-a-pane`, `transfer-in-a-pane`,
+`database-in-a-pane`, `infra-in-a-pane` (`kubectl`, `helm`, `terraform`, cloud CLIs) and
+`system-switch-in-a-pane`. Bash allows such as `helm-local` and `kubectl-client-dry-run` exempt
+`infra-in-a-pane` for forms that touch only local files. Lift a deny per tool with an allow that has
+`via = "bash"` and exempts its id. The built-in `tmux-cli` denies the `tmux` command through Bash.
 On Bash only rules that name it count: the built-in guards (`eval`, `rm-r`, `git-push-*`,
 `package-remove`, …) carry `via = ["tmux", "bash"]`, and the allows, `outside-project`, the lints
 and the asks that would fire on everyday use (awk and sed programs, `curl-wget`,

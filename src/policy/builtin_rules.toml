@@ -813,6 +813,35 @@ global = [                                            # options come before or a
   "--output|-o:", "--state:",
 ]
 
+# --- Infrastructure: each grammar names only the local forms a rule lets through ---
+
+[commands.kubectl]
+parser = { name = "gnu", short_equals = true }
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["kustomize"]
+global = ["--namespace|-n:", "--context:", "--kubeconfig:", "--cluster:", "--user:"]
+
+[commands.kubectl.create]
+# A bare `--dry-run` is kubectl's client dry run and leaves the next word an
+# operand; this reads `--dry-run client` as the value, which is also client.
+arguments = ["operands...", "--dry-run:", "--output|-o:", "--filename|-f:", "--image:"]
+
+[commands.helm]
+parser = { name = "gnu", short_equals = true }
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["template", "lint", "show", "create", "package", "version"]
+global = ["--namespace|-n:", "--kube-context:", "--kubeconfig:", "--debug"]
+
+[commands.terraform]
+parser = "gnu"                                        # `-chdir=` reads as Unknown flags
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["fmt", "validate", "version"]
+
+[commands.tofu]
+parser = "gnu"
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["fmt", "validate", "version"]
+
 # =============================================================================
 # Rules: code from text (deny)
 # =============================================================================
@@ -1088,13 +1117,14 @@ Try:         command_run(command="{{ drop(command) }}")
 
 The pane's working directory is already {{ command.shell_cwd }}.'''
 
-# Long-running tools belong in a pane the user can watch. A project lifts it
-# with an allow that exempts `prefer-tmux`.
+# Through Bash, these run unseen and out of the user's shell history; in a pane
+# the user watches them, answers their prompts, and finds them again. A project
+# lifts one with an allow that has `via = "bash"` and exempts the rule's id.
 
 [[rules]]
 id = "prefer-tmux"
 via = "bash"
-when = 'command.name in ["cargo", "make", "npm", "podman", "kubectl"]'
+when = 'command.name in ["cargo", "make", "npm"]'
 action = "deny"
 message = '''
 Run this in a tmux pane, where the user can watch it:
@@ -1102,6 +1132,117 @@ Run this in a tmux pane, where the user can watch it:
   command_run(command="{{ line }}")
 
 Use list_panes to pick the pane.'''
+
+[[rules]]
+id = "ssh-in-a-pane"
+via = "bash"
+when = 'command.name in ["ssh", "mosh"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, where the user can watch it and answer its prompts.
+A one-off remote command needs only:
+
+  command_run(command="{{ line }}")
+
+To open a session:
+
+1. command_run(command="{{ line }}", timeout_secs=0) sends it and returns.
+2. debug_pane until the remote shell's prompt shows. A password, passphrase or
+   host-key prompt is the user's to answer.
+3. inject_osc133 on the pane, so command_run can track the remote commands.
+4. list_panes: the pane's Cwd names the remote host and Integration is confirmed.
+
+Then run commands in that pane with command_run.'''
+
+[[rules]]
+id = "transfer-in-a-pane"
+via = "bash"
+when = 'command.name in ["scp", "sftp", "rsync"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, where the user can watch the transfer:
+
+  command_run(command="{{ line }}")
+
+Keep timeout_secs low and follow a long transfer with command_read. sftp's
+interactive session can't be driven by command_run; use scp or rsync.'''
+
+[[rules]]
+id = "database-in-a-pane"
+via = "bash"
+when = 'command.name in ["psql", "mysql", "mariadb", "mongosh", "redis-cli"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, with the query on the command line (psql -c or -f,
+mysql -e, mongosh --eval, redis-cli's arguments):
+
+  command_run(command="{{ line }}")
+
+command_run can't drive an interactive client session.'''
+
+[[rules]]
+id = "infra-in-a-pane"
+via = "bash"
+when = '''command.name in [
+  "kubectl", "helm", "k9s", "kubectx", "kubens", "argocd", "eksctl", "terraform", "tofu",
+  "pulumi", "ansible", "ansible-playbook", "packer", "vault", "aws", "gcloud", "gsutil", "bq",
+  "az", "doctl", "flyctl",
+]'''
+action = "deny"
+message = '''
+Run this in a tmux pane: it acts with the user's credentials and context, and
+the user can watch it and find it in their history.
+
+  command_run(command="{{ line }}")
+
+A command that asks for confirmation (terraform apply) waits for the user's
+answer in the pane. Use list_panes to pick the pane.'''
+
+[[rules]]
+id = "system-switch-in-a-pane"
+via = "bash"
+when = 'command.name in ["nixos-rebuild", "home-manager", "darwin-rebuild"]'
+action = "deny"
+message = '''
+Run this in a tmux pane: it runs long and may ask for the user's sudo password
+there.
+
+  command_run(command="{{ line }}")
+
+Keep timeout_secs low and follow it with command_read.'''
+
+# What renders, formats or checks local files runs fine through Bash.
+
+[[rules]]
+id = "helm-local"
+via = "bash"
+command = "helm"
+when = 'subcommand in ["template", "lint", "show", "create", "package", "version"]'
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+[[rules]]
+id = "terraform-local"
+via = "bash"
+command = ["terraform", "tofu"]
+when = 'subcommand in ["fmt", "validate", "version"]'
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+[[rules]]
+id = "kubectl-kustomize"
+via = "bash"
+command = "kubectl kustomize"
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+[[rules]]
+id = "kubectl-client-dry-run"
+via = "bash"
+command = "kubectl create"
+when = 'args.dry_run == ["client"]'
+action = "allow"
+exempts = ["infra-in-a-pane"]
 
 # The tmux CLI reaches the panes around tmux-mcp: no command tracking, no
 # policy, and keystrokes into a shell the person may be typing in.
