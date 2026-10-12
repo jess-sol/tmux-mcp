@@ -21,8 +21,6 @@ pub struct CommandRecord {
     pub output_done: bool,
     /// Whether the command has completed (B marker finalized).
     pub completed: bool,
-    /// When this record was created.
-    pub timestamp: Instant,
 }
 
 /// Activity state of a pane.
@@ -132,7 +130,6 @@ impl TerminalState {
             exit_code: None,
             output_done: false,
             completed: false,
-            timestamp: Instant::now(),
         });
         while self.commands.len() > MAX_COMMAND_HISTORY {
             self.commands.pop_back();

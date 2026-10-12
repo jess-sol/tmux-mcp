@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, MutexGuard, watch};
 
 use crate::pane::processor::PaneProcessor;
+use crate::pane::snapshot::{CommandSummary, Fact, PaneSnapshot};
 use crate::parse::layout::LayoutPane;
 
 /// Mutable pane state — behind a per-pane Mutex.
@@ -20,17 +21,14 @@ pub struct PaneState {
     pub x: usize,
     pub y: usize,
     pub processor: PaneProcessor,
-    pub mode: PaneMode,
+    mode: Fact<PaneMode>,
+    policy: u64,
 }
 
 /// The tmux mode a pane is in, such as copy mode. While one is on, tmux hands
 /// typed keys to the mode instead of the program.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneMode {
-    /// tmux announced a change and has not yet said to what, or was never
-    /// asked.
-    #[default]
-    Unknown,
     Off,
     /// The mode's name, as tmux's `pane_mode` gives it (`copy-mode`).
     On(String),
@@ -51,13 +49,42 @@ pub struct TrackedPane {
     pub pane_id: String,
     pub window_id: String,
     state: Mutex<PaneState>,
-    /// Bumped after every `process_chunk()` — handlers `subscribe_state()`
-    /// and `select!` on `changed()` instead of polling with sleep.
+    /// Bumped after every change, output included — handlers
+    /// `subscribe_state()` and `select!` on `changed()` instead of polling.
     state_tx: watch::Sender<u64>,
+    /// The latest *Pane snapshot*.
+    snapshot_tx: watch::Sender<Arc<PaneSnapshot>>,
     run: Mutex<()>,
 }
 
 impl TrackedPane {
+    pub fn new(
+        pane_id: &str,
+        window_id: &str,
+        lines: usize,
+        columns: usize,
+        x: usize,
+        y: usize,
+    ) -> TrackedPane {
+        let state = PaneState {
+            pid: None,
+            x,
+            y,
+            processor: PaneProcessor::new(lines, columns),
+            mode: Fact::Unknown,
+            policy: 0,
+        };
+        let snapshot = state.snapshot(0);
+        TrackedPane {
+            pane_id: pane_id.to_string(),
+            window_id: window_id.to_string(),
+            state: Mutex::new(state),
+            state_tx: watch::channel(0u64).0,
+            snapshot_tx: watch::channel(Arc::new(snapshot)).0,
+            run: Mutex::new(()),
+        }
+    }
+
     /// Lock the mutable pane state.
     pub async fn lock(&self) -> MutexGuard<'_, PaneState> {
         self.state.lock().await
@@ -70,22 +97,75 @@ impl TrackedPane {
         self.run.lock().await
     }
 
-    /// Records the pane's `mode` and wakes whatever waits on the pane.
-    pub async fn set_mode(&self, mode: PaneMode) {
-        self.lock().await.mode = mode;
+    /// The latest *Pane snapshot*.
+    pub fn snapshot(&self) -> Arc<PaneSnapshot> {
+        self.snapshot_tx.borrow().clone()
+    }
+
+    /// Feeds the pane's output to its emulator.
+    pub async fn apply_output(&self, bytes: &[u8]) {
+        let mut state = self.lock().await;
+        state.processor.process_chunk(bytes);
+        self.publish(&state);
+    }
+
+    /// The pane's mode: Unknown when tmux announces a change without saying
+    /// which, known once tmux says.
+    pub async fn set_mode(&self, mode: Fact<PaneMode>) {
+        let mut state = self.lock().await;
+        state.mode = mode;
+        self.publish(&state);
+    }
+
+    /// The count of policy reloads.
+    pub async fn set_policy(&self, reloads: u64) {
+        let mut state = self.lock().await;
+        state.policy = reloads;
+        self.publish(&state);
+    }
+
+    /// Subscribe to state changes. Use `receiver.changed().await` to wake
+    /// when the pane changes.
+    pub fn subscribe_state(&self) -> watch::Receiver<u64> {
+        self.state_tx.subscribe()
+    }
+
+    /// Publishes the *Pane snapshot* of `state` at the next *Pane version*
+    /// when it differs from the last one, and wakes whatever waits on the pane.
+    fn publish(&self, state: &PaneState) {
+        let last = self.snapshot();
+        let mut next = state.snapshot(last.version);
+        if next != *last {
+            next.version += 1;
+            self.snapshot_tx.send_replace(Arc::new(next));
+        }
         self.notify_state_changed();
     }
 
     /// Signal that pane state has changed (new output, completion, etc.).
-    /// Call AFTER releasing the pane Mutex so waiters can acquire it immediately.
-    pub fn notify_state_changed(&self) {
+    fn notify_state_changed(&self) {
         self.state_tx.send_modify(|v| *v += 1);
     }
+}
 
-    /// Subscribe to state changes. Use `receiver.changed().await` to wake
-    /// when `notify_state_changed()` is called.
-    pub fn subscribe_state(&self) -> watch::Receiver<u64> {
-        self.state_tx.subscribe()
+impl PaneState {
+    /// The facts a decision reads, labelled `version`.
+    fn snapshot(&self, version: u64) -> PaneSnapshot {
+        let terminal = self.processor.state();
+        let reported = terminal.osc7_since_command;
+        PaneSnapshot {
+            version,
+            policy: self.policy,
+            mode: self.mode.clone(),
+            phase: self.processor.osc133_phase().clone(),
+            activity: terminal.activity,
+            input: self.processor.read_input(),
+            input_garbled: self.processor.input_looks_garbled(),
+            cwd: terminal.cwd.clone().filter(|_| reported),
+            host: terminal.hostname.clone().filter(|_| reported),
+            user: terminal.user.clone().filter(|_| reported),
+            commands: terminal.commands.iter().map(CommandSummary::from).collect(),
+        }
     }
 }
 
@@ -196,21 +276,7 @@ impl PaneRegistry {
                     });
                 }
             } else {
-                let processor = PaneProcessor::new(lp.height, lp.width);
-                let (state_tx, _) = watch::channel(0u64);
-                let tracked = TrackedPane {
-                    pane_id: pane_id.clone(),
-                    window_id: window_id.to_string(),
-                    state: Mutex::new(PaneState {
-                        pid: None,
-                        x: lp.x,
-                        y: lp.y,
-                        processor,
-                        mode: PaneMode::Unknown,
-                    }),
-                    state_tx,
-                    run: Mutex::new(()),
-                };
+                let tracked = TrackedPane::new(pane_id, window_id, lp.height, lp.width, lp.x, lp.y);
                 self.panes.insert(pane_id.clone(), Arc::new(tracked));
                 actions.push(SyncAction::PaneAdded {
                     pane_id: pane_id.clone(),
@@ -425,6 +491,61 @@ mod tests {
                 .screen_line_text(0),
             "hello world"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pane_version_rises_only_with_a_decision_fact() {
+        let copy_mode = || Fact::Known(PaneMode::On("copy-mode".into()));
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        pane.set_mode(Fact::Known(PaneMode::Off)).await; // as a new pane's query does
+        let start = pane.snapshot().version;
+
+        pane.apply_output(b"\r\n\r\n\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
+            .await;
+        let prompt = pane.snapshot();
+        // A redraw on the top line, two lines above the prompt.
+        pane.apply_output(b"\x1b7\x1b[1;1Hclock 12:01\x1b8").await;
+        let unchanged = pane.snapshot();
+        pane.set_mode(Fact::Unknown).await;
+        let changing = pane.snapshot();
+        pane.set_mode(copy_mode()).await;
+        let copy = pane.snapshot();
+        pane.set_mode(copy_mode()).await;
+        let same = pane.snapshot();
+        pane.set_policy(1).await;
+        let reloaded = pane.snapshot();
+
+        assert!(prompt.version > start, "{prompt:?}");
+        assert_eq!(unchanged.version, prompt.version);
+        assert!(changing.version > prompt.version);
+        assert_eq!(changing.mode, Fact::Unknown);
+        assert!(copy.version > changing.version, "an Unknown became known");
+        assert_eq!(copy.mode, copy_mode());
+        assert_eq!(same.version, copy.version, "nothing changed");
+        assert!(reloaded.version > same.version);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_lists_commands_newest_first() {
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        let cycle = |command: &str| {
+            format!(
+                "\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\{command}\r\n\x1b]133;C\x1b\\\x1b]133;D;0\x1b\\"
+            )
+        };
+
+        pane.apply_output(cycle("ls").as_bytes()).await;
+        pane.apply_output(cycle("pwd").as_bytes()).await;
+        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
+            .await;
+
+        let snapshot = pane.snapshot();
+        let commands: Vec<&str> = snapshot
+            .commands
+            .iter()
+            .map(|c| c.command.as_str())
+            .collect();
+        assert_eq!(commands, ["pwd", "ls"]);
     }
 
     #[test]

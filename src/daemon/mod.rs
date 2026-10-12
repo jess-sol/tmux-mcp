@@ -12,7 +12,8 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::TmuxSession;
-use crate::pane::registry::{PaneMode, PaneRegistry, SyncAction};
+use crate::pane::registry::{PaneRegistry, SyncAction};
+use crate::pane::snapshot::Fact;
 use crate::parse::escape::unescape_tmux_output;
 use crate::parse::layout::parse_layout;
 use crate::tmux::connection::{self, TmuxCommands, TmuxNotifications};
@@ -93,9 +94,18 @@ async fn event_loop(
     state: Arc<DaemonState>,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reloads = state.policy.reloads();
     loop {
         let notification = tokio::select! {
             notif = notifications.recv() => notif,
+            Ok(()) = reloads.changed() => {
+                let count = *reloads.borrow_and_update();
+                let handles = state.registry.read().await.snapshot_handles();
+                for handle in handles {
+                    handle.set_policy(count).await;
+                }
+                continue;
+            }
             _ = cancel.cancelled() => {
                 tracing::info!("Daemon cancelled");
                 break;
@@ -132,12 +142,7 @@ async fn event_loop(
                 let Some(handle) = handle else {
                     continue;
                 };
-                {
-                    let mut tp = handle.lock().await;
-                    let bytes = unescape_tmux_output(&data);
-                    tp.processor.process_chunk(&bytes);
-                } // lock released before notify
-                handle.notify_state_changed();
+                handle.apply_output(&unescape_tmux_output(&data)).await;
             }
 
             // The notification names no mode: Unknown until tmux says which.
@@ -149,10 +154,10 @@ async fn event_loop(
                 let Some(handle) = handle else {
                     continue;
                 };
-                handle.set_mode(PaneMode::Unknown).await;
+                handle.set_mode(Fact::Unknown).await;
                 let mode = state.conn.lock().await.query_pane_mode(&pane_id).await;
                 match mode {
-                    Ok(mode) => handle.set_mode(mode).await,
+                    Ok(mode) => handle.set_mode(Fact::Known(mode)).await,
                     Err(e) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
                 }
             }
@@ -197,7 +202,7 @@ async fn execute_actions(
                     conn.query_pane_mode(pane_id).await,
                     registry.get_handle(pane_id),
                 ) {
-                    (Ok(mode), Some(handle)) => handle.set_mode(mode).await,
+                    (Ok(mode), Some(handle)) => handle.set_mode(Fact::Known(mode)).await,
                     (Ok(_), None) => {}
                     (Err(e), _) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
                 }
