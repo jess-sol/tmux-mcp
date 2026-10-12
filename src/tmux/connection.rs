@@ -105,10 +105,6 @@ impl TmuxCommands {
         &self.session
     }
 
-    pub fn child_pid(&self) -> Option<u32> {
-        self._child.id()
-    }
-
     /// Execute a tmux control mode command and wait for the response.
     pub async fn execute(&mut self, command: &str) -> Result<String> {
         let (response_tx, response_rx) = oneshot::channel();

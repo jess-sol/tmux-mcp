@@ -203,12 +203,6 @@ impl PaneProcessor {
         text.trim_end().to_string()
     }
 
-    /// Read text from the line where the cursor currently sits.
-    pub fn cursor_line_text(&self) -> String {
-        let cursor_line = self.term.grid().cursor.point.line.0 as usize;
-        self.screen_line_text(cursor_line)
-    }
-
     /// Get the cursor position as (line, column).
     pub fn cursor_position(&self) -> (usize, usize) {
         let point = self.term.grid().cursor.point;
