@@ -239,6 +239,27 @@ async fn policy_eval_shows_each_lines_decision_on_both_channels() {
     assert_eq!(bash.lines().collect::<Vec<_>>(), ["kill -9 1234", sigkill]);
 }
 
+/// `policy-eval --json` gives one object per line and channel, its reasons a
+/// list.
+#[tokio::test]
+async fn policy_eval_json_gives_one_object_per_line_and_channel() {
+    let h = Harness::new().await;
+
+    let rows: Vec<serde_json::Value> = h
+        .eval(&["--json", "frobnicate"])
+        .lines()
+        .map(|row| serde_json::from_str(row).expect("a JSON object"))
+        .collect();
+
+    assert_eq!(
+        rows,
+        [
+            serde_json::json!({"line": "frobnicate", "via": "tmux", "decision": "ask", "reasons": ["default"]}),
+            serde_json::json!({"line": "frobnicate", "via": "bash", "decision": "passthrough", "reasons": []}),
+        ]
+    );
+}
+
 /// One rule asks about removing packages with any of the subcommand tools.
 #[tokio::test]
 async fn package_remove_covers_each_package_tool() {

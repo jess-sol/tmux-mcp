@@ -793,7 +793,7 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
             policy::Decision::Deny => {
                 return Err(RpcError {
                     code: -32001,
-                    message: result.rule,
+                    message: result.reason(),
                 });
             }
             // *Passthrough* comes only from the Bash *Channel*.
@@ -811,7 +811,8 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
                         message: format!(
                             "Policy: {} (rule: {}). Install the tmux-mcp policy hook \
                              for interactive approval, or update the policy.",
-                            msg, result.rule
+                            msg,
+                            result.reason()
                         ),
                     });
                 }
@@ -1241,9 +1242,9 @@ async fn handle_request_approval(
     });
 
     match result.decision {
-        policy::Decision::Allow => Ok(json!({"result": "allow", "rule": result.rule})),
+        policy::Decision::Allow => Ok(json!({"result": "allow", "rule": result.reason()})),
         policy::Decision::Deny => {
-            let mut resp = json!({"result": "deny", "rule": result.rule});
+            let mut resp = json!({"result": "deny", "rule": result.reason()});
             resp.as_object_mut()
                 .unwrap()
                 .extend(ctx_json.as_object().unwrap().clone());
@@ -1256,7 +1257,7 @@ async fn handle_request_approval(
                 .lock()
                 .await
                 .store(&origin_pane, pane_id, command, &ctx);
-            let mut resp = json!({"result": "ask", "rule": result.rule});
+            let mut resp = json!({"result": "ask", "rule": result.reason()});
             resp.as_object_mut()
                 .unwrap()
                 .extend(ctx_json.as_object().unwrap().clone());

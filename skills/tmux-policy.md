@@ -65,7 +65,7 @@ Placement of decisions:
 | User policy | `~/.claude/tmux-mcp.toml`; may be missing or empty |
 | Project policy | `<root>/.claude/tmux-mcp.toml`; the root is the nearest directory upward from the pane's cwd holding that file, stopping below `$HOME`. An empty file is enough to anchor the root. With no project file, "the project" is the pane's cwd itself |
 | Built-in grammars and rules | `src/policy/builtin_rules.toml` in the tmux-mcp repo. Without the repo, the text is in the binary: `strings "$(command -v tmux-mcp)" \| grep -A8 'id = "rm-r"'` or `… \| grep -A20 '^\[commands.git.push\]'` |
-| Dry run | `tmux-mcp policy-eval 'cargo build' 'kill -9 1'` prints each line's decision and reasons on both channels, as a pane in the current directory on this machine would get them; `--via tmux\|bash` picks one, `--cwd DIR` another directory. It needs no daemon and stores no approval. Write the lines as a shell sees them, quoted for the command line |
+| Dry run | `tmux-mcp policy-eval 'cargo build' 'kill -9 1'` prints each line's decision and reasons on both channels, as a pane in the current directory on this machine would get them; `--via tmux\|bash` picks one, `--cwd DIR` another directory, `--json` one object per line and channel. It needs no daemon and stores no approval. Write the lines as a shell sees them, quoted for the command line |
 | Repo test corpus | `tests/integration/policy.rs`; run `cargo test --test integration policy` |
 
 **Load order:** built-in, then user, then project. All three share one format with top-level keys

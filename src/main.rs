@@ -27,6 +27,10 @@ enum Commands {
         /// The directory the lines run in (default: the current one)
         #[arg(long)]
         cwd: Option<String>,
+        /// Print one JSON object per line and channel: line, via, decision,
+        /// and reasons, each starting with its rule's id
+        #[arg(long)]
+        json: bool,
         /// The command lines to judge
         #[arg(required = true)]
         lines: Vec<String>,
@@ -44,8 +48,13 @@ async fn main() {
                 std::process::exit(2);
             }
         }
-        Some(Commands::PolicyEval { via, cwd, lines }) => {
-            if let Err(e) = run_policy_eval(&lines, via.as_deref(), cwd) {
+        Some(Commands::PolicyEval {
+            via,
+            cwd,
+            json,
+            lines,
+        }) => {
+            if let Err(e) = run_policy_eval(&lines, via.as_deref(), cwd, json) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -102,8 +111,8 @@ fn check_bash(input: &serde_json::Value) {
     match result.decision {
         policy::Decision::Passthrough => {}
         policy::Decision::Allow => print_hook_response("allow", None),
-        policy::Decision::Ask => print_hook_response("ask", Some(&result.rule)),
-        policy::Decision::Deny => print_hook_response("deny", Some(&result.rule)),
+        policy::Decision::Ask => print_hook_response("ask", Some(&result.reason())),
+        policy::Decision::Deny => print_hook_response("deny", Some(&result.reason())),
     }
 }
 
@@ -118,11 +127,12 @@ fn local_context(cwd: Option<String>) -> policy::PaneContext {
 }
 
 /// Prints each line, then one row per channel: the decision, then its
-/// reasons, one per line.
+/// reasons, one per line. With `json`, one object per line and channel.
 fn run_policy_eval(
     lines: &[String],
     via: Option<&str>,
     cwd: Option<String>,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = match cwd {
         Some(cwd) => cwd,
@@ -132,7 +142,9 @@ fn run_policy_eval(
     let ctx = local_context(Some(cwd));
     let channels = [("tmux", policy::Via::Tmux), ("bash", policy::Via::Bash)];
     for line in lines {
-        println!("{line}");
+        if !json {
+            println!("{line}");
+        }
         for (name, channel) in channels.iter().filter(|(n, _)| via.is_none_or(|v| v == *n)) {
             let result = policy::evaluate(line, &ctx, *channel, &engine);
             let decision = match result.decision {
@@ -141,7 +153,18 @@ fn run_policy_eval(
                 policy::Decision::Ask => "ask",
                 policy::Decision::Deny => "deny",
             };
-            let mut reasons = result.rule.lines();
+            if json {
+                let row = serde_json::json!({
+                    "line": line,
+                    "via": name,
+                    "decision": decision,
+                    "reasons": result.reasons,
+                });
+                println!("{row}");
+                continue;
+            }
+            let reason = result.reason();
+            let mut reasons = reason.lines();
             let row = format!(
                 "  {name:<5} {decision:<12} {}",
                 reasons.next().unwrap_or("")

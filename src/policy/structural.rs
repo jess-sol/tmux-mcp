@@ -15,10 +15,10 @@ use super::{Decision, PolicyResult};
 /// command, `eval` included, so no rule can judge it.
 pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
     commands.iter().find(|cmd| cmd.name == TriVal::Unknown)?;
-    Some(PolicyResult {
-        decision: Decision::Deny,
-        rule: "dynamic command dispatch isn't allowed".into(),
-    })
+    Some(PolicyResult::of(
+        Decision::Deny,
+        "dynamic command dispatch isn't allowed".into(),
+    ))
 }
 
 #[cfg(test)]

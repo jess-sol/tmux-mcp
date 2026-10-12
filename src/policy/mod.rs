@@ -40,7 +40,22 @@ pub struct PaneContext {
 
 pub struct PolicyResult {
     pub decision: Decision,
-    pub rule: String,
+    /// One per rule at the decision, each starting with the rule's id.
+    pub reasons: Vec<String>,
+}
+
+impl PolicyResult {
+    pub(crate) fn of(decision: Decision, reason: String) -> PolicyResult {
+        PolicyResult {
+            decision,
+            reasons: vec![reason],
+        }
+    }
+
+    /// The reasons as one text, one per line, as Claude reads them.
+    pub fn reason(&self) -> String {
+        self.reasons.join("\n")
+    }
 }
 
 /// The *Channel* a line arrives through, which a rule's `via` names.
@@ -73,20 +88,14 @@ pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngin
         .bytes()
         .any(|b| b < 0x20 && b != b'\t' && b != b'\n')
     {
-        return PolicyResult {
-            decision: Decision::Deny,
-            rule: "structural:unprintable_chars".into(),
-        };
+        return PolicyResult::of(Decision::Deny, "structural:unprintable_chars".into());
     }
 
     // Check for config file changes before parsing/evaluating
     engine.check_reload(ctx.cwd.as_deref());
     let compiled = engine.compiled();
     if let Some(err) = &compiled.broken {
-        return PolicyResult {
-            decision: Decision::Deny,
-            rule: format!("policy:load_error ({err})"),
-        };
+        return PolicyResult::of(Decision::Deny, format!("policy:load_error ({err})"));
     }
 
     let start = start(ctx);
@@ -99,17 +108,12 @@ pub fn evaluate(command: &str, ctx: &PaneContext, via: Via, engine: &PolicyEngin
     let commands = match parse::parse_command(command, grammars, &start) {
         Ok(cmds) if cmds.is_empty() => {
             let (decision, reasons) = unmatched(via, &compiled.rules);
-            return PolicyResult {
-                decision,
-                rule: reasons.join("\n"),
-            };
+            return PolicyResult { decision, reasons };
         }
         Ok(cmds) => cmds,
         Err(err) => {
-            return PolicyResult {
-                decision: Decision::Deny,
-                rule: format!("structural:parse_failure ({})", err.message),
-            };
+            let reason = format!("structural:parse_failure ({})", err.message);
+            return PolicyResult::of(Decision::Deny, reason);
         }
     };
 
@@ -209,10 +213,7 @@ fn evaluate_all(
         .cloned()
     else {
         let (decision, reasons) = unmatched(env.via, ruleset);
-        return PolicyResult {
-            decision,
-            rule: reasons.join("\n"),
-        };
+        return PolicyResult { decision, reasons };
     };
     let mut reasons: Vec<String> = Vec::new();
     for reason in results
@@ -224,10 +225,7 @@ fn evaluate_all(
             reasons.push(reason);
         }
     }
-    PolicyResult {
-        decision,
-        rule: reasons.join("\n"),
-    }
+    PolicyResult { decision, reasons }
 }
 
 /// The decision for a command that no rule matches: `default` on tmux,
@@ -272,7 +270,7 @@ mod tests {
     #[test]
     fn a_lint_fires_on_tmux_only() {
         let got =
-            [Via::Tmux, Via::Bash].map(|via| evaluate_via("echo $(date) | tail -5", via).rule);
+            [Via::Tmux, Via::Bash].map(|via| evaluate_via("echo $(date) | tail -5", via).reason());
         assert!(got[0].starts_with("pipe-to-tail"), "{}", got[0]);
         assert!(!got[1].contains("pipe-to-tail"), "{}", got[1]);
     }
@@ -289,7 +287,8 @@ mod tests {
             let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny, "{command}");
             assert_eq!(
-                r.rule, "dynamic command dispatch isn't allowed",
+                r.reasons,
+                ["dynamic command dispatch isn't allowed"],
                 "{command}"
             );
         }
@@ -299,7 +298,7 @@ mod tests {
     fn parse_failure_denied() {
         let r = evaluate_test("echo 'unclosed");
         assert_eq!(r.decision, Decision::Deny);
-        assert!(r.rule.contains("structural:parse_failure"));
+        assert!(r.reason().contains("structural:parse_failure"));
     }
 
     #[test]
@@ -307,7 +306,7 @@ mod tests {
         for command in ["ls\x00hidden", "ls\x01hidden"] {
             let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny);
-            assert!(r.rule.contains("unprintable"));
+            assert!(r.reason().contains("unprintable"));
         }
     }
 
