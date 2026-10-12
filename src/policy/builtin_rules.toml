@@ -1260,27 +1260,9 @@ action = "ask"
 message = "SIGKILL leaves the process no chance to clean up"
 
 [[rules]]
-id = "apt-remove"
-command = "apt"
-when = 'subcommand in ["remove", "purge", "autoremove"]'
-action = "ask"
-
-[[rules]]
-id = "apt-get-remove"
-command = "apt-get"
-when = 'subcommand in ["remove", "purge", "autoremove"]'
-action = "ask"
-
-[[rules]]
-id = "dnf-remove"
-command = "dnf"
-when = 'subcommand in ["remove", "erase", "autoremove"]'
-action = "ask"
-
-[[rules]]
-id = "yum-remove"
-command = "yum"
-when = 'subcommand in ["remove", "erase", "autoremove"]'
+id = "package-remove"
+command = ["apt", "apt-get", "dnf", "yum"]
+when = 'subcommand in ["remove", "purge", "erase", "autoremove"]'
 action = "ask"
 
 [[rules]]

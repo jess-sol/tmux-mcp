@@ -239,6 +239,21 @@ async fn policy_eval_shows_each_lines_decision_on_both_channels() {
     assert_eq!(bash.lines().collect::<Vec<_>>(), ["kill -9 1234", sigkill]);
 }
 
+/// One rule asks about removing packages with any of the subcommand tools.
+#[tokio::test]
+async fn package_remove_covers_each_package_tool() {
+    let h = Harness::new().await;
+
+    for line in [
+        "apt remove x",
+        "apt-get purge x",
+        "dnf erase x",
+        "yum autoremove",
+    ] {
+        assert_eq!(h.bash(line), Some((Ask, "package-remove".into())), "{line}");
+    }
+}
+
 #[tokio::test]
 async fn a_project_exempts_prefer_tmux_for_bash() {
     let h = Harness::new().await;
