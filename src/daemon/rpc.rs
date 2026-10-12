@@ -122,6 +122,19 @@ struct ReadParams {
     search: Option<regex::Regex>,
     before: usize,
     after: usize,
+    /// The reader's place: a line of the command it names.
+    offset: Option<(u64, usize)>,
+}
+
+impl ReadParams {
+    /// The line `next` starts at in `command_id`: the offset's line when the
+    /// offset names that command, else 0.
+    fn start(&self, command_id: u64) -> usize {
+        match self.offset {
+            Some((id, line)) if id == command_id => line,
+            _ => 0,
+        }
+    }
 }
 
 impl ReadParams {
@@ -153,6 +166,11 @@ impl ReadParams {
             return Err(RpcError::invalid_params("before and after require search"));
         }
 
+        let offset = params["offset"]["command_id"]
+            .as_u64()
+            .zip(params["offset"]["line"].as_u64())
+            .map(|(id, line)| (id, line as usize));
+
         Ok(Self {
             next,
             head,
@@ -160,6 +178,7 @@ impl ReadParams {
             search,
             before,
             after,
+            offset,
         })
     }
 }
@@ -425,11 +444,11 @@ async fn wait_and_read(
 
     loop {
         {
-            let mut tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state_mut();
+            let tp = pane_handle.lock().await;
+            let pane_state = tp.processor.state();
             let cmd = match command_id {
-                Some(id) => pane_state.command_by_id_mut(id),
-                None => pane_state.commands.front_mut(),
+                Some(id) => pane_state.command_by_id(id),
+                None => pane_state.commands.front(),
             };
             let Some(cmd) = cmd else {
                 return Err(match command_id {
@@ -437,18 +456,18 @@ async fn wait_and_read(
                     None => RpcError::invalid_params("No commands in history"),
                 });
             };
+            let start = read_params.start(cmd.id);
 
             // D ends the output and carries the exit code; B follows only
             // once the next prompt is drawn.
             if cmd.completed || cmd.output_done {
-                let result =
-                    apply_read_params(&cmd.output, true, &mut cmd.read_cursor, read_params);
-                return Ok(read_reply(cmd, "completed", &result));
+                let mut offset = start;
+                let result = apply_read_params(&cmd.output, true, &mut offset, read_params);
+                return Ok(read_reply(cmd, "completed", &result, offset));
             }
 
-            // Running command: peek without mutating cursor
-            let mut peek_cursor = cmd.read_cursor;
-            let peeked = apply_read_params(&cmd.output, false, &mut peek_cursor, read_params);
+            let mut offset = start;
+            let peeked = apply_read_params(&cmd.output, false, &mut offset, read_params);
 
             let has_enough = if let Some(n) = required_lines {
                 // When search is active, count matches (not output lines
@@ -468,22 +487,15 @@ async fn wait_and_read(
                 && (required_lines.is_none()
                     || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
             {
-                cmd.read_cursor = peek_cursor;
-                return Ok(read_reply(cmd, "running", &peeked));
+                return Ok(read_reply(cmd, "running", &peeked, offset));
             }
 
             // Timeout: tail returns nothing, the others what there is.
             if now >= deadline {
                 if is_tail {
-                    return Ok(read_reply(cmd, "running", &ReadResult::default()));
+                    return Ok(read_reply(cmd, "running", &ReadResult::default(), start));
                 }
-                let result = apply_read_params(
-                    &cmd.output,
-                    cmd.output_done,
-                    &mut cmd.read_cursor,
-                    read_params,
-                );
-                return Ok(read_reply(cmd, "running", &result));
+                return Ok(read_reply(cmd, "running", &peeked, offset));
             }
         }
 
@@ -495,9 +507,10 @@ async fn wait_and_read(
     }
 }
 
-/// The reply to a read of `cmd`: its window of output, and where its cursor
-/// now stands.
-fn read_reply(cmd: &CommandRecord, status: &str, result: &ReadResult) -> Value {
+/// The reply to a read of `cmd`: its window of output, and the `offset` the
+/// reader's next read of `cmd` starts from. The reader keeps the offset; the
+/// daemon keeps nothing.
+fn read_reply(cmd: &CommandRecord, status: &str, result: &ReadResult, offset: usize) -> Value {
     json!({
         "command_id": cmd.id,
         "command": cmd.command,
@@ -507,7 +520,7 @@ fn read_reply(cmd: &CommandRecord, status: &str, result: &ReadResult) -> Value {
         "total_lines": result.total_lines,
         "lines_skipped": result.skipped,
         "search_matches": result.matched,
-        "read_cursor": cmd.read_cursor,
+        "offset": { "command_id": cmd.id, "line": offset },
     })
 }
 

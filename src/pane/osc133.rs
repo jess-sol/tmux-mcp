@@ -195,7 +195,6 @@ impl Osc133Parser {
     fn handle_d(&mut self, param: Option<&str>, state: &mut TerminalState) {
         let exit_code = param.and_then(|p| p.parse::<i32>().ok());
         state.completion_seq += 1;
-        state.last_exit_code = exit_code;
 
         match &self.phase {
             Osc133Phase::Executing { .. } => {

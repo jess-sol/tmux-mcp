@@ -3,8 +3,11 @@
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
@@ -12,15 +15,55 @@ use crate::client::DaemonClient;
 pub struct TmuxMcp {
     client: DaemonClient,
     origin_pane: String,
+    offsets: Offsets,
     tool_router: ToolRouter<Self>,
 }
+
+/// Where this session stands in each command's output, by pane and command:
+/// the reader keeps its own place, and the daemon keeps none.
+#[derive(Clone, Default)]
+struct Offsets(Arc<Mutex<HashMap<String, BTreeMap<u64, u64>>>>);
+
+/// As many commands per pane as the daemon keeps.
+const OFFSETS_PER_PANE: usize = 100;
 
 impl TmuxMcp {
     pub fn new(client: DaemonClient, origin_pane: String) -> Self {
         Self {
             client,
             origin_pane,
+            offsets: Offsets::default(),
             tool_router: Self::tool_router(),
+        }
+    }
+}
+
+impl Offsets {
+    /// The offset to send for a read of `command_id`, or of the newest command
+    /// this session knows on the pane. The daemon applies it only to the
+    /// command it names.
+    fn for_read(&self, pane_id: &str, command_id: Option<u64>) -> Option<Value> {
+        let panes = self.0.lock().expect("offsets lock");
+        let commands = panes.get(pane_id)?;
+        let (id, line) = match command_id {
+            Some(id) => (id, *commands.get(&id)?),
+            None => commands.last_key_value().map(|(id, line)| (*id, *line))?,
+        };
+        Some(json!({ "command_id": id, "line": line }))
+    }
+
+    /// Keeps the offset a read's reply returned.
+    fn record(&self, pane_id: &str, reply: &Value) {
+        let offset = &reply["offset"];
+        let (Some(id), Some(line)) = (offset["command_id"].as_u64(), offset["line"].as_u64())
+        else {
+            return;
+        };
+        let mut panes = self.0.lock().expect("offsets lock");
+        let commands = panes.entry(pane_id.to_string()).or_default();
+        commands.insert(id, line);
+        while commands.len() > OFFSETS_PER_PANE {
+            commands.pop_first();
         }
     }
 }
@@ -323,7 +366,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     let lines_skipped = result["lines_skipped"].as_u64().unwrap_or(0);
     let search_matches = result["search_matches"].as_u64();
-    let read_cursor = result["read_cursor"].as_u64().unwrap_or(0);
+    let offset = result["offset"]["line"].as_u64().unwrap_or(0);
 
     let mut text = String::new();
 
@@ -334,8 +377,8 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     // Skipped lines hint — split into already-read vs not-shown portions
     if lines_skipped > 0 {
-        let already_read = if read_cursor > 0 {
-            read_cursor.min(lines_skipped)
+        let already_read = if offset > 0 {
+            offset.min(lines_skipped)
         } else {
             0
         };
@@ -455,7 +498,7 @@ impl TmuxMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut rpc_params = json!({
             "origin_pane": self.origin_pane,
-            "pane_id": params.pane_id,
+            "pane_id": &params.pane_id,
             "command": params.command,
             "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
@@ -483,6 +526,7 @@ impl TmuxMcp {
             .request("command_run", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        self.offsets.record(&params.pane_id, &result);
 
         let text = format_command_result(&result, true);
         let is_error = result["exit_code"].as_i64().is_some_and(|c| c != 0);
@@ -500,12 +544,13 @@ impl TmuxMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut rpc_params = json!({
             "origin_pane": self.origin_pane,
-            "pane_id": params.pane_id,
+            "pane_id": &params.pane_id,
             "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
         if let Some(id) = params.command_id {
             rpc_params["command_id"] = json!(id);
         }
+        let command_id = params.command_id.and_then(|id| u64::try_from(id).ok());
         if let Some(n) = params.next {
             rpc_params["next"] = json!(n);
         }
@@ -524,12 +569,16 @@ impl TmuxMcp {
         if let Some(n) = params.after {
             rpc_params["after"] = json!(n);
         }
+        if let Some(offset) = self.offsets.for_read(&params.pane_id, command_id) {
+            rpc_params["offset"] = offset;
+        }
 
         let result = self
             .client
             .request("command_read", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        self.offsets.record(&params.pane_id, &result);
 
         let text = format_command_result(&result, false);
         let is_error = result["exit_code"].as_i64().is_some_and(|c| c != 0);

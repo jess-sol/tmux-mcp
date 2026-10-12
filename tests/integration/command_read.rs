@@ -96,6 +96,28 @@ async fn a_window_on_a_finished_command_reports_its_exit_code() {
     }
 }
 
+/// Each MCP server keeps its own place in a command's output, and a place in
+/// one command never carries over to a newer one.
+#[tokio::test]
+async fn each_mcp_server_reads_from_its_own_place() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    h.run_with(&shell, "seq 4", Read::default().head(1)).await;
+    let other = h.another_session().await;
+
+    let mine = h.read(&shell, Read::default().next(2)).await;
+    let theirs = other.read(&shell, Read::default().next(2)).await;
+    h.run_with(&shell, "seq 3", Read::default().head(1)).await;
+    let newer = h.read(&shell, Read::default().next(2)).await;
+
+    assert!(mine.starts_with("1\n2\n"), "{mine:?}");
+    assert!(theirs.starts_with("1\n2\n"), "{theirs:?}");
+    assert!(
+        newer.starts_with("1\n2\n") && !newer.contains("already read"),
+        "{newer:?}"
+    );
+}
+
 #[tokio::test]
 async fn only_next_moves_the_cursor() {
     let h = Harness::new().await;

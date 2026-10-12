@@ -21,8 +21,6 @@ pub struct CommandRecord {
     pub output_done: bool,
     /// Whether the command has completed (B marker finalized).
     pub completed: bool,
-    /// Read cursor — line offset into output. Only `next` advances this.
-    pub read_cursor: usize,
     /// When this record was created.
     pub timestamp: Instant,
 }
@@ -62,8 +60,6 @@ pub struct TerminalState {
     /// Used by command_run to detect completion even when the command
     /// isn't recorded in history (e.g., no C marker, empty command).
     pub completion_seq: u64,
-    /// Exit code from the most recent D marker.
-    pub last_exit_code: Option<i32>,
     /// When the most recent OSC 133 marker was received.
     /// Used to determine if shell integration is active.
     pub last_osc133_marker: Option<Instant>,
@@ -91,7 +87,6 @@ impl TerminalState {
             osc7_since_command: false,
             seq_counter: 0,
             completion_seq: 0,
-            last_exit_code: None,
             last_osc133_marker: None,
             last_data: None,
             osc133_cache: VecDeque::new(),
@@ -137,7 +132,6 @@ impl TerminalState {
             exit_code: None,
             output_done: false,
             completed: false,
-            read_cursor: 0,
             timestamp: Instant::now(),
         });
         while self.commands.len() > MAX_COMMAND_HISTORY {
@@ -180,11 +174,6 @@ impl TerminalState {
     /// Find a command by ID.
     pub fn command_by_id(&self, id: u64) -> Option<&CommandRecord> {
         self.commands.iter().find(|c| c.id == id)
-    }
-
-    /// Find a command by ID (mutable).
-    pub fn command_by_id_mut(&mut self, id: u64) -> Option<&mut CommandRecord> {
-        self.commands.iter_mut().find(|c| c.id == id)
     }
 
     /// Get the most recent N commands (newest first).
@@ -250,14 +239,14 @@ mod tests {
     #[test]
     fn push_and_retrieve_commands() {
         let mut s = TerminalState::new();
-        let id1 = s.push_command_start("ls".into());
-        let cmd = s.command_by_id_mut(id1).unwrap();
+        s.push_command_start("ls".into());
+        let cmd = s.commands.front_mut().unwrap();
         cmd.output = "file1\nfile2".into();
         cmd.exit_code = Some(0);
         cmd.completed = true;
 
-        let id2 = s.push_command_start("pwd".into());
-        let cmd = s.command_by_id_mut(id2).unwrap();
+        s.push_command_start("pwd".into());
+        let cmd = s.commands.front_mut().unwrap();
         cmd.output = "/home/user".into();
         cmd.exit_code = Some(0);
         cmd.completed = true;
@@ -273,9 +262,8 @@ mod tests {
     fn command_history_capped() {
         let mut s = TerminalState::new();
         for i in 0..150 {
-            let id = s.push_command_start(format!("cmd{}", i));
-            let cmd = s.command_by_id_mut(id).unwrap();
-            cmd.completed = true;
+            s.push_command_start(format!("cmd{}", i));
+            s.commands.front_mut().unwrap().completed = true;
         }
         assert_eq!(s.commands.len(), MAX_COMMAND_HISTORY);
         assert_eq!(s.commands.front().unwrap().command, "cmd149");

@@ -26,14 +26,20 @@ use tmux_mcp::daemon::rpc::OSC133_INJECT_LINES;
 pub const SETTLE: Duration = Duration::from_secs(10);
 
 pub struct Harness {
-    client: RunningService<RoleClient, ()>,
-    /// The MCP server process, killed when the harness drops.
-    _server: tokio::process::Child,
+    session: Session,
     /// What every tmux-mcp process gets: this server, this pane, this HOME.
     env: Vec<(&'static str, String)>,
     socket: PathBuf,
     /// Held for its `Drop`: everything the harness makes lives in it.
     dir: TempDir,
+}
+
+/// One MCP server: a tmux-mcp process, talked to as one Claude Code session
+/// talks to it.
+pub struct Session {
+    client: RunningService<RoleClient, ()>,
+    /// The MCP server process, killed when the session drops.
+    _server: tokio::process::Child,
 }
 
 pub struct Shell {
@@ -186,28 +192,19 @@ impl Harness {
             ("HOME", home.display().to_string()),
             ("XDG_RUNTIME_DIR", runtime.display().to_string()),
         ];
-        let mut server = tokio::process::Command::from(tmux_mcp(&env));
-        if let Some(version) = version {
-            server.env("TMUX_MCP_VERSION", version);
-        }
-        server
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut server = server.spawn().expect("the tmux-mcp binary");
-        let pipes = (
-            server.stdout.take().expect("piped stdout"),
-            server.stdin.take().expect("piped stdin"),
-        );
-        let client = ().serve(pipes).await.expect("an MCP session with tmux-mcp");
+        let session = Session::start(&env, version).await;
         Harness {
-            client,
-            _server: server,
+            session,
             env,
             socket,
             dir,
         }
+    }
+
+    /// A second MCP server on the same daemon, as a second Claude Code session
+    /// in the same window would be.
+    pub async fn another_session(&self) -> Session {
+        Session::start(&self.env, None).await
     }
 
     /// A pane beside the harness's own, started in `dir()`. Returns once its
@@ -580,9 +577,45 @@ impl Read {
     }
 }
 
+impl Session {
+    /// `command_read` of the pane's latest command, from this session.
+    pub async fn read(&self, shell: &Shell, read: Read) -> String {
+        self.call("command_read", read.set("pane_id", shell.pane.as_str()).0)
+            .await
+    }
+}
+
 // --- Internal ---
 
 impl Harness {
+    async fn call(&self, tool: &str, arguments: Map<String, Value>) -> String {
+        self.session.call(tool, arguments).await
+    }
+}
+
+impl Session {
+    async fn start(env: &[(&'static str, String)], version: Option<&str>) -> Session {
+        let mut server = tokio::process::Command::from(tmux_mcp(env));
+        if let Some(version) = version {
+            server.env("TMUX_MCP_VERSION", version);
+        }
+        server
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut server = server.spawn().expect("the tmux-mcp binary");
+        let pipes = (
+            server.stdout.take().expect("piped stdout"),
+            server.stdin.take().expect("piped stdin"),
+        );
+        let client = ().serve(pipes).await.expect("an MCP session with tmux-mcp");
+        Session {
+            client,
+            _server: server,
+        }
+    }
+
     async fn call(&self, tool: &str, arguments: Map<String, Value>) -> String {
         let request = CallToolRequestParam {
             name: tool.to_string().into(),
