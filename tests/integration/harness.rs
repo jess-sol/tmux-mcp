@@ -58,10 +58,51 @@ pub struct Read(Map<String, Value>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
+    /// No decision: Claude Code's own permissions decide (a Bash call only).
+    Pass,
     /// Claude Code asks the human first.
     Ask,
     Deny,
 }
+
+/// What the policy decides for one command on each channel, and the id of
+/// the rule each decision's reason starts with ("" for none).
+#[derive(Debug)]
+pub struct Judged {
+    pub tmux: Decision,
+    pub tmux_rule: String,
+    pub bash: Decision,
+    pub bash_rule: String,
+}
+
+/// `decides!(h, { "command" => terms, … })` checks each command's
+/// [`Judged`] against a pattern, then fails once with
+/// every command that missed. A command maps to 1 to 4 terms, `_` anywhere:
+/// `D` both channels decide `D`; `(D, "rule")` both decide `D` by `rule`;
+/// `(Dtmux, Dbash)`; `(Dtmux, Dbash, "rule")` one rule for both;
+/// `(Dtmux, "rule", Dbash, "rule")`.
+macro_rules! decides {
+    ($h:expr, { $($line:literal => $want:tt),* $(,)? }) => {{
+        let judged = $h.judge(&[$($line),*]);
+        let mut judged = judged.iter();
+        let mut misses: Vec<String> = Vec::new();
+        $(
+            let j = judged.next().expect("one judgement per command");
+            let got = (j.tmux, j.tmux_rule.as_str(), j.bash, j.bash_rule.as_str());
+            if !matches!(got, $crate::harness::decides!(@pattern $want)) {
+                misses.push(format!("{:?} => {:?}", $line, got));
+            }
+        )*
+        assert!(misses.is_empty(), "these commands missed:\n{}", misses.join("\n"));
+    }};
+    (@pattern ($t:pat, $tr:pat, $b:pat, $br:pat)) => { ($t, $tr, $b, $br) };
+    (@pattern ($t:pat, $b:pat, $r:pat)) => { ($t, $r, $b, $r) };
+    // A literal second term is a rule; anything else, the Bash decision.
+    (@pattern ($d:pat, $r:literal)) => { ($d, $r, $d, $r) };
+    (@pattern ($t:pat, $b:pat)) => { ($t, _, $b, _) };
+    (@pattern $d:pat) => { ($d, _, $d, _) };
+}
+pub(crate) use decides;
 
 const POLL: Duration = Duration::from_millis(10);
 
@@ -282,6 +323,31 @@ impl Harness {
             "tool_input": {"command": command},
         });
         self.ask_hook(&env, input)
+    }
+
+    /// What the policy decides for each of `lines`, on both channels, in a
+    /// shell at the project root (`policy-eval --json`).
+    pub fn judge(&self, lines: &[&str]) -> Vec<Judged> {
+        let rows: Vec<Value> = self
+            .eval(&[&["--json"][..], lines].concat())
+            .lines()
+            .map(|row| serde_json::from_str(row).expect("a JSON row"))
+            .collect();
+        rows.chunks(2)
+            .map(|pair| {
+                let [tmux, bash] = pair else {
+                    panic!("one row per channel: {pair:?}")
+                };
+                let (tmux, tmux_rule) = judgement(tmux);
+                let (bash, bash_rule) = judgement(bash);
+                Judged {
+                    tmux,
+                    tmux_rule,
+                    bash,
+                    bash_rule,
+                }
+            })
+            .collect()
     }
 
     /// What `tmux-mcp policy-eval` prints for `args`, run in the project
@@ -520,6 +586,21 @@ fn tmux(socket: &Path) -> Command {
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
     cmd
+}
+
+/// One `policy-eval --json` row's decision, and the id its first reason
+/// starts with ("" for none).
+fn judgement(row: &Value) -> (Decision, String) {
+    let decision = match row["decision"].as_str() {
+        Some("allow") => Decision::Allow,
+        Some("passthrough") => Decision::Pass,
+        Some("ask") => Decision::Ask,
+        Some("deny") => Decision::Deny,
+        other => panic!("policy-eval decided {other:?}"),
+    };
+    let reason = row["reasons"][0].as_str().unwrap_or("");
+    let rule = reason.split([':', ' ']).next().unwrap_or("");
+    (decision, rule.to_string())
 }
 
 /// The tmux-mcp binary in `env`, with the developer's `TMUX` and `TMUX_PANE`
