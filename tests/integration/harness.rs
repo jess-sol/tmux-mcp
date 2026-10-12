@@ -124,6 +124,16 @@ const POLL: Duration = Duration::from_millis(10);
 
 impl Harness {
     pub async fn new() -> Harness {
+        Harness::launch(None).await
+    }
+
+    /// A harness whose MCP server, and the daemon it starts, run as another
+    /// build of `version`; hooks run as this build.
+    pub async fn claiming(version: &str) -> Harness {
+        Harness::launch(Some(version)).await
+    }
+
+    async fn launch(version: Option<&str>) -> Harness {
         // Under /tmp, so the sockets inside stay within `sun_path`'s 108 bytes.
         let dir = tempfile::Builder::new()
             .prefix("tmux-mcp-harness-")
@@ -177,6 +187,9 @@ impl Harness {
             ("XDG_RUNTIME_DIR", runtime.display().to_string()),
         ];
         let mut server = tokio::process::Command::from(tmux_mcp(&env));
+        if let Some(version) = version {
+            server.env("TMUX_MCP_VERSION", version);
+        }
         server
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -434,6 +447,11 @@ impl Harness {
             .write_all(input.to_string().as_bytes())
             .expect("hook input");
         let output = hook.wait_with_output().expect("the hook's answer");
+        // Claude Code reads exit status 2 as a denial, with stderr its reason.
+        if output.status.code() == Some(2) {
+            let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Some((Decision::Deny, reason));
+        }
         assert!(
             output.status.success(),
             "hook failed: {}",

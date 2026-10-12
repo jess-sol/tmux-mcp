@@ -5,6 +5,7 @@ mod harness;
 
 mod command_read;
 mod command_run;
+mod daemon;
 mod guards;
 mod harness_contract;
 mod keys;

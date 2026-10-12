@@ -8,6 +8,7 @@ use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +17,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::oneshot;
+
+use crate::version::Version;
 
 // --- Tmux session ---
 
@@ -189,60 +192,42 @@ struct Shared {
 }
 
 impl DaemonClient {
-    /// Connect to an existing daemon, or spawn one and connect.
+    /// Connects to the session's daemon when it runs this version, retires an
+    /// older one and spawns this build's, and refuses a newer one. Whatever
+    /// answers after a spawn is checked again, since another build may race.
     pub async fn connect(session: &TmuxSession) -> Result<Self, Box<dyn std::error::Error>> {
         let sock = session.socket();
-
-        // Try connecting to existing daemon
-        match UnixStream::connect(&sock).await {
-            Ok(stream) => {
-                tracing::info!("Connected to existing daemon at {:?}", sock);
-                return Ok(Self::from_stream(stream));
+        let mine = Version::current();
+        for _ in 0..3 {
+            let Ok(stream) = UnixStream::connect(&sock).await else {
+                spawn_daemon(session).await?;
+                continue;
+            };
+            let pid = stream.peer_cred().ok().and_then(|cred| cred.pid());
+            let client = Self::from_stream(stream);
+            let theirs = client.daemon_version().await;
+            if theirs == mine {
+                return Ok(client);
             }
-            Err(_) => {
-                tracing::info!("No daemon found, spawning one");
+            if theirs > mine {
+                return Err(format!(
+                    "The tmux-mcp daemon for this session runs {theirs}, newer than this \
+                     {mine}. Update tmux-mcp and restart its MCP server."
+                )
+                .into());
             }
+            tracing::info!("Retiring the daemon running {theirs} for {mine}");
+            drop(client);
+            retire(pid, &sock).await?;
         }
+        Err("The tmux-mcp daemon kept changing; another build may be replacing it".into())
+    }
 
-        // Spawn daemon as detached process.
-        // If two clients race here, both spawn daemons — the second daemon
-        // will fail to acquire the lock file and exit. Both clients poll
-        // for the socket and connect to whichever daemon wins.
-        // The daemon reads the same `$TMUX` this process inherited.
-        session.create_dir()?;
-        let exe = std::env::current_exe()?;
-        let mut child = tokio::process::Command::new(&exe)
-            .arg("daemon")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr({
-                match std::fs::File::create(session.log()) {
-                    Ok(f) => Stdio::from(f),
-                    Err(_) => Stdio::null(),
-                }
-            })
-            .kill_on_drop(false)
-            .spawn()?;
-
-        tracing::info!("Spawned daemon (pid={:?}), waiting for socket", child.id());
-
-        // Poll for socket
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            if let Ok(stream) = UnixStream::connect(&sock).await {
-                tracing::info!("Connected to new daemon");
-                return Ok(Self::from_stream(stream));
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                // Check if daemon died
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Err(format!("Daemon exited with {}", status).into());
-                }
-                return Err("Timed out waiting for daemon socket".into());
-            }
+    /// The daemon's version; one that can't say is older than any that can.
+    async fn daemon_version(&self) -> Version {
+        match self.request("version", Value::Null).await {
+            Ok(reply) => Version::parse(reply["version"].as_str().unwrap_or("")),
+            Err(_) => Version::default(),
         }
     }
 
@@ -290,6 +275,54 @@ impl DaemonClient {
         }
         Ok(resp.result.unwrap_or(Value::Null))
     }
+}
+
+/// Starts a detached daemon for `session` and returns once its socket answers.
+/// Of two daemons spawned at once, the second fails to take the lock file and
+/// exits; the daemon reads the same `$TMUX` this process inherited.
+async fn spawn_daemon(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error>> {
+    session.create_dir()?;
+    let log = std::fs::File::create(session.log()).map_or(Stdio::null(), Stdio::from);
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .kill_on_drop(false)
+        .spawn()?;
+    tracing::info!("Spawned daemon (pid={:?}), waiting for socket", child.id());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if UnixStream::connect(session.socket()).await.is_ok() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(format!("Daemon exited with {status}").into());
+            }
+            return Err("Timed out waiting for daemon socket".into());
+        }
+    }
+}
+
+/// Stops the older daemon at `sock`, process `pid`, with SIGTERM, and returns
+/// once its socket stops answering.
+async fn retire(pid: Option<i32>, sock: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let pid = pid.ok_or("The older tmux-mcp daemon's process is unknown")?;
+    tokio::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(sock).await.is_ok() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("The older tmux-mcp daemon (pid {pid}) did not stop").into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
 
 /// Hands each reply to the request waiting for its id. When the daemon closes

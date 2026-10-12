@@ -30,7 +30,7 @@ Targets **tmux + bash** specifically. Other shells or terminal multiplexers prob
                    └───────────────────────┘                 └───────────────────┘
 ```
 
-The **MCP server** is stateless — it spawns on demand and connects to a **background daemon** over a unix socket. The daemon attaches to tmux in control mode, maintaining a live model of every pane. It auto-spawns on first use and exits after 5 minutes when no clients are connected.
+The **MCP server** is stateless — it spawns on demand and connects to a **background daemon** over a unix socket. The daemon attaches to tmux in control mode, maintaining a live model of every pane. It auto-spawns on first use and exits after 5 minutes when no clients are connected. When builds meet, the newest daemon serves: a newer tmux-mcp replaces an older daemon, and an older one refuses a newer daemon and exits, naming both versions.
 
 ## Key Features
 
@@ -257,3 +257,11 @@ cargo build
   tmux  allow        cargo
   bash  deny         prefer-tmux: …
 ```
+
+## Workflow
+
+`main` is always stable, though not always released. Run `prek install` once per clone: it gates every commit on fmt, clippy, the unit tests and the licence check.
+
+1. **Start** work on a branch off `main`.
+2. **Finish** it by rebasing onto the tip of `main` (`git fetch && git rebase origin/main`), then `git switch main && git merge --no-ff <branch> && git push`. The branch's commits sit in a line on `main`, joined by a merge commit; never squash-merge or rebase-merge.
+3. **Release** from `main` when it is worth installing: `cargo release <patch|minor|major> --execute` bumps the version (the one that decides which daemon serves), commits, tags `v<version>` and pushes. While the version is `0.x`, a release with features is minor and one with only fixes is patch.
