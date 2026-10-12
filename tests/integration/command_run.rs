@@ -59,6 +59,11 @@ async fn finished_commands_reply_with_their_output_and_exit_code() {
             "printf '\\033]0;title\\007%s\\033[K\\n' \"${HOME##*/}\"",
             "$ printf '\\033]0;title\\007%s\\033[K\\n' \"${HOME##*/}\"\nhome\n\nExit code: 0",
         ),
+        // A lone carriage return redraws the line: only its last state shows.
+        (
+            "for p in 50 100; do printf '\\r%s%%' \"$p\"; done; printf '\\n%s\\n' \"$p\"",
+            "$ for p in 50 100; do printf '\\r%s%%' \"$p\"; done; printf '\\n%s\\n' \"$p\"\n100%\n100\n\nExit code: 0",
+        ),
         // A signal's exit code is 128 plus the signal number.
         (
             "bash -c 'kill -TERM $$'",

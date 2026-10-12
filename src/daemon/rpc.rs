@@ -231,10 +231,15 @@ fn apply_read_params(
 ) -> ReadResult {
     // The terminal adds `\r` to each `\n`, and shells injected with an older
     // PS0 line send readline's `\x01`/`\x02` markers; neither is the command's.
+    // A `\r` inside a line redraws it, as a progress bar does, so a line is
+    // what follows its last one.
     let text = output.replace(['\x01', '\x02'], "");
     let all_lines: Vec<String> = text
         .split_terminator('\n')
-        .map(|line| line.trim_end_matches('\r').to_string())
+        .map(|line| {
+            let line = line.trim_end_matches('\r');
+            line.rsplit('\r').next().unwrap_or(line).to_string()
+        })
         .collect();
     let total_lines = all_lines.len();
     let consumable = if output_done || text.ends_with('\n') {
