@@ -14,26 +14,36 @@ async fn a_pane_the_user_is_typing_in_refuses_commands() {
 }
 
 #[tokio::test]
-async fn the_typing_refusal_suggests_ctrl_c_only_when_nothing_sits_before_the_cursor() {
+async fn the_typing_refusal_suggests_ctrl_c_only_when_the_cursor_sits_outside_the_text() {
     let h = Harness::new().await;
     let shell = h.shell().await;
-    // A background job prints `xyz` at the idle prompt and moves the cursor
-    // back before it: a garbled line, with nothing typed. Octal keeps `xyz`
-    // off the command line itself; the sleep keeps `set -b` from redrawing.
+    // Background jobs print at the idle prompt: a garbled line, with nothing
+    // typed. `xyz` leaves the cursor before it, `abc` ends in a newline that
+    // leaves the cursor below it. Octal keeps the text off the command line
+    // itself; the sleep keeps `set -b` from redrawing.
     shell.say("(sleep 0.5; printf '\\170\\171\\172\\033[3D'; sleep 30) &");
     shell.wait_until(SETTLE, |s| s.contains("xyz")).unwrap();
-
-    let garbled = h.run(&shell, "seq 1").await;
+    let before = h.run(&shell, "seq 1").await;
+    h.press_key(&shell, "C-c").await;
+    shell.say("(sleep 0.5; printf '\\141\\142\\143\\n'; sleep 30) &");
+    shell
+        .wait_until(SETTLE, |s| s.lines().any(|row| row.ends_with("$ abc")))
+        .unwrap();
+    let above = h.run(&shell, "seq 1").await;
     h.press_key(&shell, "C-c").await;
     shell.type_text("git sta");
     let typing = h.run(&shell, "seq 1").await;
 
+    for garbled in [&before, &above] {
+        assert!(
+            garbled.starts_with("User is typing") && garbled.contains("press_key C-c"),
+            "{garbled}"
+        );
+    }
     assert!(
-        garbled.starts_with("User is typing") && garbled.contains("press_key C-c"),
-        "{garbled}"
-    );
-    assert!(
-        typing.starts_with("User is typing") && !typing.contains("press_key C-c"),
+        typing.starts_with("User is typing")
+            && typing.contains("Read as input: \"git sta\"")
+            && !typing.contains("press_key C-c"),
         "{typing}"
     );
 }

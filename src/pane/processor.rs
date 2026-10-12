@@ -162,8 +162,35 @@ impl PaneProcessor {
         self.state.input_start.is_some() && !self.read_input().is_empty()
     }
 
+    /// Whether the text after the prompt looks garbled rather than typed:
+    /// typing, editing included, keeps the cursor within its line.
+    pub fn input_looks_garbled(&self) -> bool {
+        let Some(end_line) = self.input_end_line() else {
+            return false;
+        };
+        !self.has_input_before_cursor() || self.cursor_position().0 > end_line
+    }
+
+    /// The line the cursor stands on after typing the input's last
+    /// character: the next one when that character fills the right edge.
+    fn input_end_line(&self) -> Option<usize> {
+        let (start_line, start_col) = self.state.input_start?;
+        let mut end = None;
+        // The lines `read_input` reads, one char per column.
+        for line in start_line..self.screen_lines() {
+            let from = if line == start_line { start_col } else { 0 };
+            let width = self.screen_line_text(line).chars().count();
+            if width > from {
+                end = Some((line, width));
+            } else if line != start_line {
+                break;
+            }
+        }
+        end.map(|(line, width)| line + usize::from(width >= self.columns()))
+    }
+
     /// Whether any cell from the end of the prompt to the cursor holds text.
-    pub fn has_input_before_cursor(&self) -> bool {
+    fn has_input_before_cursor(&self) -> bool {
         let Some((start_line, start_col)) = self.state.input_start else {
             return false;
         };
@@ -875,6 +902,35 @@ mod tests {
         p.process_chunk(b"\x1b]133;A\x1b\\user@host\r\n$ \x1b]133;B\x1b\\");
         assert_eq!(p.read_input(), "");
         assert!(!p.has_input_content());
+    }
+
+    // --- input_looks_garbled ---
+
+    #[test]
+    fn input_looks_garbled_only_when_the_cursor_sits_outside_the_text() {
+        // (columns, what follows the prompt `$ `, garbled)
+        let cases: [(usize, &[u8], bool); 8] = [
+            (80, b"", false),
+            (80, b"ls -la", false),
+            (80, b"git ", false),
+            (80, b"echo hello\x1b[5D", false),
+            // Nothing between the prompt and the cursor: Ctrl-A, or a job's output.
+            (80, b"echo hello\x1b[3G", true),
+            (80, b"abc\r\n", true),
+            // Typed to the exact width: readline wraps with a space and a CR.
+            (20, b"echo 123456789abcd \r", false),
+            (20, b"echo this-is-a-long-cmd-x", false),
+        ];
+        let mut misses = Vec::new();
+        for (columns, input, garbled) in cases {
+            let mut p = PaneProcessor::new(24, columns);
+            p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+            p.process_chunk(input);
+            if p.input_looks_garbled() != garbled {
+                misses.push(String::from_utf8_lossy(input).into_owned());
+            }
+        }
+        assert!(misses.is_empty(), "misjudged: {misses:?}");
     }
 
     // --- read_input: command text at C marker ---

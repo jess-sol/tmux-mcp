@@ -845,16 +845,20 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
                     // Guard 2: User is typing
                     if tp.processor.has_input_content() {
                         let screen = capture_screen(&tp, 20);
-                        let garbled = if tp.processor.has_input_before_cursor() {
-                            ""
+                        let garbled = if tp.processor.input_looks_garbled() {
+                            "\nThe cursor sits outside that text, so it may be a garbled line rather \
+                             than typing. If the screen shows no command being typed, press_key C-c \
+                             clears the line.\n"
                         } else {
-                            "\nNothing sits between the prompt and the cursor, so the text after the \
-                             cursor may be a garbled line rather than typing. If the screen shows no \
-                             command being typed, press_key C-c clears the line.\n"
+                            ""
                         };
                         return Err(RpcError::internal(format!(
-                            "User is typing in pane {}. Wait for them to finish or use a different pane.\n{}\nScreen:\n{}",
-                            pane_id, garbled, screen
+                            "User is typing in pane {}. Wait for them to finish or use a different pane.\n\
+                             Read as input: {:?}\n{}\nScreen:\n{}",
+                            pane_id,
+                            tp.processor.read_input(),
+                            garbled,
+                            screen
                         )));
                     }
                     break;
