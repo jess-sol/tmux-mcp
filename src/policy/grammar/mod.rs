@@ -108,6 +108,9 @@ struct Opt {
     value: bool,
     /// Its value is a command up to `;` or `{} +` (`-exec...`).
     command: bool,
+    /// Its value may be written `-VALUE`: digits, or one of these words,
+    /// upper-cased (`head -5`, `kill -KILL`).
+    dash: Option<Vec<String>>,
 }
 
 #[derive(Default)]

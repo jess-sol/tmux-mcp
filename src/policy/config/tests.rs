@@ -194,7 +194,7 @@ fn serde_reads_argument_settings_beside_flattened_levels() {
     let config = parse_config(
         r#"
         [commands.git]
-        parser = { name = "gnu", number = "max_count" }
+        parser = { name = "gnu", short_equals = true }
         arguments = ["dir=-C:", ["pattern", "-e:"], "subcommand"]
         argument.dir.default = ["."]
         argument.subcommand.words = ["add"]

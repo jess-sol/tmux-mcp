@@ -102,18 +102,18 @@ impl Level {
             let word = &words[i];
             let at_start = i == 0;
             i += 1;
+            let own = if after_word {
+                &[][..]
+            } else {
+                &self.options[..]
+            };
+            let active: Vec<&Opt> = own.iter().chain(globals.iter().copied()).collect();
             match word {
                 Word::Unknown { splits } if !scan.options_end || *splits => {
                     run.unsure = true;
                     break;
                 }
-                Word::Known(text) if self.parser.is_option(text, at_start, &scan) => {
-                    let own = if after_word {
-                        &[][..]
-                    } else {
-                        &self.options[..]
-                    };
-                    let active: Vec<&Opt> = own.iter().chain(globals.iter().copied()).collect();
+                Word::Known(text) if self.parser.is_option(text, at_start, &active, &scan) => {
                     let read =
                         self.parser
                             .option(text, &words[i..], at_start, &active, &mut scan, run);

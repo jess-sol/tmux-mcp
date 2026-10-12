@@ -1,15 +1,15 @@
 //! The `gnu` parser: getopt_long as GNU tools use it. Options stand anywhere
-//! until `--`; `-rf` clusters; `-n10` and `--lines=10` attach a value; the
-//! parser settings read a tool's number options and `-e=x`.
+//! until `--`; `-rf` clusters; `-n10` and `--lines=10` attach a value; a
+//! `dash` option reads `-5` and `-KILL`; the parser setting reads `-e=x`.
 
 use super::{Parser, Scan};
 use crate::policy::grammar::Opt;
 use crate::policy::grammar::run::{Read, Run, push_value, set_flag, take_value};
 use crate::policy::parse::Word;
 
-pub(super) fn is_option(p: &Parser, text: &str, at_start: bool) -> bool {
+pub(super) fn is_option(text: &str, at_start: bool, active: &[&Opt]) -> bool {
     (text.starts_with('-') && text.len() > 1)
-        || (at_start && p.leading_number.is_some() && is_number(text, true))
+        || (at_start && is_plus_number(text) && active.iter().any(|o| o.dash.is_some()))
 }
 
 pub(super) fn option(
@@ -25,21 +25,8 @@ pub(super) fn option(
         scan.options_end = true;
         return Read::took(0);
     }
-    if let Some(name) = &p.leading_number
-        && at_start
-        && is_number(text, true)
-    {
-        push_value(
-            run,
-            name,
-            Word::Known(text.trim_start_matches('-').to_string()),
-        );
-        return Read::took(0);
-    }
-    if let Some(name) = &p.number
-        && is_number(text, false)
-    {
-        push_value(run, name, Word::Known(text[1..].to_string()));
+    if let Some((o, value)) = dash_value(text, at_start, active) {
+        push_value(run, &o.name, Word::Known(value));
         return Read::took(0);
     }
     if let Some(long) = text.strip_prefix("--") {
@@ -80,14 +67,27 @@ pub(super) fn option(
 }
 
 /// `-5`, and with `plus` also `+5`.
-fn is_number(text: &str, plus: bool) -> bool {
-    let digits = match text.strip_prefix('-') {
-        Some(d) => d,
-        None if plus => match text.strip_prefix('+') {
-            Some(d) => d,
-            None => return false,
-        },
-        None => return false,
-    };
-    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+/// The `dash` option that `text` is a value of, and the value: `-5` or
+/// `-KILL` (read before a cluster of flags), or a first word `+5`, which
+/// keeps its sign.
+fn dash_value<'a>(text: &str, at_start: bool, active: &[&'a Opt]) -> Option<(&'a Opt, String)> {
+    if at_start && is_plus_number(text) {
+        let o = active.iter().find(|o| o.dash.is_some())?;
+        return Some((o, text.to_string()));
+    }
+    let value = text.strip_prefix('-').filter(|v| !v.starts_with('-'))?;
+    let o = active.iter().find(|o| {
+        o.dash
+            .as_ref()
+            .is_some_and(|words| is_digits(value) || words.contains(&value.to_uppercase()))
+    })?;
+    Some((o, value.to_string()))
+}
+
+fn is_plus_number(text: &str) -> bool {
+    text.strip_prefix('+').is_some_and(is_digits)
+}
+
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }

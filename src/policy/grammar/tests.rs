@@ -98,38 +98,55 @@ fn the_posix_parser_stops_options_at_the_first_operand() {
 
 #[test]
 fn parser_settings_copy_one_tool() {
-    let head = r#"
-        [commands.head]
-        parser = { name = "gnu", leading_number = "lines" }
-        arguments = ["files...", "--lines|-n:"]
-    "#;
-    let log = r#"
-        [commands.log]
-        parser = { name = "gnu", number = "max_count" }
-        arguments = ["files...", "--max-count|-n:"]
-    "#;
     let pflag = r#"
         [commands.k]
         parser = { name = "gnu", short_equals = true }
         arguments = ["files...", "--expr|-e:"]
+    "#;
+    check(pflag, &[("k -e=x", "expr", strings(&["x"]))]);
+    check(SORT, &[("sort -o=x", "output", strings(&["=x"]))]);
+}
+
+/// `argument.<name>.dash`: `-VALUE` is a value of the option, anywhere
+/// options are read. A value is digits, or one of its `words` whatever its
+/// case, read before a cluster of flags; a first word may be `+digits`.
+#[test]
+fn a_dash_option_reads_minus_value_as_its_value() {
+    let head = r#"
+        [commands.head]
+        parser = "gnu"
+        arguments = ["files...", "--lines|-n:", "--quiet|-q"]
+        argument.lines.dash = true
+    "#;
+    let pkill = r#"
+        [commands.pkill]
+        parser = "gnu"
+        arguments = ["pattern", "--signal:", "--full|-f", "--exact|-x", "--newest|-n", "--terminal|-t:"]
+        argument.signal.dash = true
+        argument.signal.words = ["KILL", "SIGKILL", "INT", "TERM"]
     "#;
     check(
         head,
         &[
             ("head -5 a", "lines", strings(&["5"])),
             ("head +5 a", "lines", strings(&["+5"])),
+            ("head a -5", "lines", strings(&["5"])),
+            ("head a +5", "files", strings(&["a", "+5"])),
+            ("head -q a", "quiet", TriVal::Bool(true)),
         ],
     );
     check(
-        head,
+        pkill,
         &[
-            ("head a -5", "files", strings(&["a"])),
-            ("head a -5", "lines", strings(&[])),
+            ("pkill -KILL node", "signal", strings(&["KILL"])),
+            ("pkill -sigkill node", "signal", strings(&["sigkill"])),
+            ("pkill -INT node", "signal", strings(&["INT"])),
+            ("pkill -9 node", "signal", strings(&["9"])),
+            ("pkill -fx node", "signal", strings(&[])),
+            ("pkill -fx node", "exact", TriVal::Bool(true)),
+            ("pkill --signal TERM node", "signal", strings(&["TERM"])),
         ],
     );
-    check(log, &[("log a -5", "max_count", strings(&["5"]))]);
-    check(pflag, &[("k -e=x", "expr", strings(&["x"]))]);
-    check(SORT, &[("sort -o=x", "output", strings(&["=x"]))]);
 }
 
 #[test]
@@ -281,8 +298,8 @@ const GIT: &str = r#"
     marks.cwd = ["dir"]
 
     [commands.git.log]
-    parser = { name = "gnu", number = "max_count" }
     arguments = ["files...", "--output:", "find_copies=-C", "--max-count|-n:"]
+    argument.max_count.dash = true
     marks.read = ["files"]
     marks.write = ["output"]
 
@@ -465,6 +482,22 @@ fn a_rule_command_declares_the_names_of_its_levels() {
 fn a_grammar_that_breaks_the_format_does_not_load() {
     let rows = [
         ("arguments = [\"x\"]", "needs `parser`"),
+        (
+            "parser = { name = \"gnu\", leading_number = \"x\" }\narguments = [\"--x:\"]",
+            "leading_number",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"--x\"]\nargument.x.dash = true",
+            "only for an option with a value",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"x\"]\nargument.x.dash = true",
+            "only for an option with a value",
+        ),
+        (
+            "parser = \"gnu\"\narguments = [\"--x:\"]\nargument.x.words = [\"a\"]",
+            "`subcommand` or a `dash` option",
+        ),
         (
             "parser = \"gnu\"\narguments = [\"--a|b\"]",
             "not an argument string",

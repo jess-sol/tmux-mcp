@@ -81,7 +81,8 @@ impl Level {
 
         let sub_at = check_slots(path, &slots)?;
         let names = check_names(path, &slots, &options, &global, chain)?;
-        let (defaults, words, appends) = settings(path, config, &mut slots, &options, &global)?;
+        let (defaults, words, appends) =
+            settings(path, config, &mut slots, &mut options, &mut global)?;
         let marks = marks(path, config, &names, &slots, appends)?;
         let with = with(path, &config.with, |n| {
             names.contains(n) || chain.names.contains(n)
@@ -171,6 +172,7 @@ fn parse_spec(path: &str, spec: &str, parser: &Parser) -> Result<Item, String> {
             single: vec![],
             value,
             command,
+            dash: None,
         };
         for spelling in body.split('|') {
             if let Some(long) = spelling.strip_prefix("--") {
@@ -327,16 +329,19 @@ fn settings(
     path: &str,
     config: &GrammarConfig,
     slots: &mut [Slot],
-    options: &[Opt],
-    global: &[Opt],
+    options: &mut [Opt],
+    global: &mut [Opt],
 ) -> Result<Settings, String> {
     let mut defaults = BTreeMap::new();
     let mut words = BTreeSet::new();
     let mut appends = BTreeSet::new();
     for (name, s) in &config.argument {
-        let opt = options.iter().chain(global).find(|o| &o.name == name);
+        let mut opt = options
+            .iter_mut()
+            .chain(global.iter_mut())
+            .find(|o| &o.name == name);
         let slot = slots.iter_mut().find(|x| &x.name == name);
-        let kind = match (&slot, opt) {
+        let kind = match (&slot, &opt) {
             (Some(slot), _) => Some(slot.kind),
             (None, Some(_)) => None,
             (None, None) => {
@@ -345,10 +350,18 @@ fn settings(
                 ));
             }
         };
-        if let Some(w) = &s.words {
+        if s.dash {
+            let Some(o) = opt.as_deref_mut().filter(|o| o.value) else {
+                return Err(format!(
+                    "{path}: `argument.{name}.dash` is only for an option with a value"
+                ));
+            };
+            let names = s.words.iter().flatten().map(|w| w.to_uppercase());
+            o.dash = Some(names.collect());
+        } else if let Some(w) = &s.words {
             if kind != Some(SlotKind::Subcommand) {
                 return Err(format!(
-                    "{path}: `argument.{name}.words` is only for `subcommand`"
+                    "{path}: `argument.{name}.words` is only for `subcommand` or a `dash` option"
                 ));
             }
             words = w.iter().cloned().collect();

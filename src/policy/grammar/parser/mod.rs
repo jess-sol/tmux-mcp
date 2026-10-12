@@ -14,10 +14,6 @@ use crate::policy::parse::Word;
 #[derive(Clone)]
 pub(super) struct Parser {
     pub(super) name: ParserName,
-    /// `head -5`: a first-argument number is a value of this option.
-    leading_number: Option<String>,
-    /// `git log -5`: a number anywhere is a value of this option.
-    number: Option<String>,
     /// pflag tools read `-e=x` as the value `x`.
     short_equals: bool,
 }
@@ -36,27 +32,30 @@ impl Parser {
         match config {
             ParserConfig::Name(name) => Parser {
                 name: *name,
-                leading_number: None,
-                number: None,
                 short_equals: false,
             },
             ParserConfig::Settings(s) => Parser {
                 name: s.name,
-                leading_number: s.leading_number.clone(),
-                number: s.number.clone(),
                 short_equals: s.short_equals,
             },
         }
     }
 
-    /// Whether the word `text` is read as an option.
-    pub(super) fn is_option(&self, text: &str, at_start: bool, scan: &Scan) -> bool {
+    /// Whether the word `text` is read as an option, among the `active`
+    /// options.
+    pub(super) fn is_option(
+        &self,
+        text: &str,
+        at_start: bool,
+        active: &[&Opt],
+        scan: &Scan,
+    ) -> bool {
         if scan.options_end {
             return false;
         }
         match self.name {
             ParserName::Find => find::is_option(text),
-            ParserName::Gnu | ParserName::Posix => gnu::is_option(self, text, at_start),
+            ParserName::Gnu | ParserName::Posix => gnu::is_option(text, at_start, active),
         }
     }
 

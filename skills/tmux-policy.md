@@ -140,10 +140,11 @@ the built-in `git` text and add the table to it.
 
 | Key | Meaning |
 |---|---|
-| `parser` | `"gnu"`, `"posix"`, `"find"`, or `{ name = "gnu", leading_number = "<part>", number = "<part>", short_equals = true }`. Required at the top level; a sub-level inherits it |
+| `parser` | `"gnu"`, `"posix"`, `"find"`, or `{ name = "gnu", short_equals = true }`. Required at the top level; a sub-level inherits it |
 | `arguments` | List of argument strings and groups. These options parse only before this level's subcommand word |
 | `global` | Options (no operands, no groups) that parse at this level and every level below, before or after subcommand words |
-| `argument.<name>.words` | On `subcommand` only: the words parsed by this level itself |
+| `argument.<name>.words` | On `subcommand`: the words parsed by this level itself. On a `dash` option: the names its `-VALUE` form accepts |
+| `argument.<name>.dash = true` | On an option with a value: `-VALUE` is also its value, anywhere options are read. A value is digits (`head -5`, `git log -5`), or one of its `words` in any case (`kill -KILL`, `-sigterm`), read before a cluster of flags; a first `+digits` counts too (`tail +5`) |
 | `argument.<name>.match` | Glob an operand must match to take a word; a one-word operand that fails is skipped |
 | `argument.<name>.default` | Words used when the part is absent (`["."]` makes an implicit path visible; `~` expands) |
 | `argument.<name>.appends = true` | On a `marks.command` part: the tool adds words at run time (`xargs`) |
@@ -184,12 +185,9 @@ Marks name only arguments declared at their own level (its `global` included).
 | `posix` | anything that runs a command (`timeout`, `sudo`, `ssh`, `xargs`), and tools whose options end at the first operand | As `gnu`, but the first operand ends options |
 | `find` | `find` | Single-dash words; `( ) ! , -a -o -not -and -or` are operators |
 
-Settings for `gnu`/`posix`: `leading_number` (a first word `-5` is that part's value: `head -5`,
-`nice -5`), `number` (`-5` anywhere: `git log -5`), `short_equals = true` (`-e=x` gives `x`;
-pflag/cobra tools such as `helmfile`, `k3d`, and clap tools). `leading_number` and `number` name a
-value option of the same level (`leading_number = "lines"` with `"--lines|-n:"`); the number is
-pushed onto that list. A name that is not declared is not a load error: the number is dropped
-without a trace.
+The one setting for `gnu`/`posix` is `short_equals = true` (`-e=x` gives `x`; pflag/cobra tools
+such as `helmfile`, `k3d`, and clap tools). A tool's `-5` or `-KILL` form is a property of the
+option, not the parser: `argument.<name>.dash` (**Keys of a level**).
 
 ### Subcommands
 
@@ -371,7 +369,8 @@ Other grammar errors name the offending string and the rule it breaks.
 
 These load silently: `default` spelled wrong (read as ask); an unknown CEL identifier (an allow
 never fires, an ask or deny fires everywhere); a misspelled option spelling in a grammar (the line
-asks `outside-project … (could not be ruled out)`); an undeclared `leading_number`/`number` name.
+asks `outside-project … (could not be ruled out)`); a `dash` word the tool accepts but `words`
+leaves out (`-WINCH` reads as a cluster of flags).
 Verify each rule with the dry run.
 
 ## Examples

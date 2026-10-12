@@ -100,10 +100,6 @@ pub enum ParserConfig {
 pub struct ParserSettings {
     pub name: ParserName,
     #[serde(default)]
-    pub leading_number: Option<String>,
-    #[serde(default)]
-    pub number: Option<String>,
-    #[serde(default)]
     pub short_equals: bool,
 }
 
@@ -134,6 +130,9 @@ pub struct ArgumentSettings {
     /// The tool adds words at the end of the command that this argument holds.
     #[serde(default)]
     pub appends: bool,
+    /// The option's value may also be written `-VALUE` (`head -5`, `kill -KILL`).
+    #[serde(default)]
+    pub dash: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

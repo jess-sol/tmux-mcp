@@ -90,16 +90,18 @@ arguments = ["files...", "--check|-c", "--binary|-b", "--quiet", "--status", "--
 marks.read = ["files"]
 
 [commands.head]
-parser = { name = "gnu", leading_number = "lines" }    # head reads a first-argument -5 as --lines 5
+parser = "gnu"
 arguments = ["files...", "--lines|-n:", "--bytes|-c:", "--quiet|--silent|-q", "--verbose|-v"]
+argument.lines.dash = true                             # head -5 is head --lines 5
 marks.read = ["files"]
 
 [commands.tail]
-parser = { name = "gnu", leading_number = "lines" }    # tail also reads +5
+parser = "gnu"
 arguments = [
   "files...", "--lines|-n:", "--bytes|-c:", "--follow|-f", "follow_retry=-F", "--quiet|--silent|-q",
   "--verbose|-v",
 ]
+argument.lines.dash = true                             # tail -5, and a first +5
 marks.read = ["files"]
 
 [commands.uniq]
@@ -250,8 +252,9 @@ arguments = ["duration", "command...", "--signal|-s:", "--kill-after|-k:", "--pr
 marks.command = ["command"]
 
 [commands.nice]
-parser = { name = "posix", leading_number = "adjustment" }   # nice -5 is nice -n 5
+parser = "posix"
 arguments = ["command...", "--adjustment|-n:"]
+argument.adjustment.dash = true                        # nice -5 is nice -n 5
 marks.command = ["command"]
 
 [commands.nohup]
@@ -470,25 +473,50 @@ marks.write = ["files"]
 
 # --- Signals: the signal is a value, so a rule can tell SIGKILL from the default ---
 
+# Each reads -9 and -KILL as its signal; a name it does not list reads as flags.
 [commands.kill]
-parser = { name = "posix", leading_number = "signal" }
+parser = "posix"
 arguments = ["pids...", "--signal|-s:", "signal_number=-n:", "--list|-l", "--table|-L"]
+argument.signal.dash = true
+argument.signal.words = [
+  "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+  "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "WINCH",
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL",
+  "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGWINCH",
+]
 
 # pkill's -s is the session, not the signal.
 [commands.pkill]
-parser = { name = "gnu", leading_number = "signal" }
+parser = "gnu"
 arguments = [
   "pattern", "--signal:", "--full|-f", "--exact|-x", "--newest|-n", "--oldest|-o", "--echo|-e",
   "--count|-c", "--ignore-case|-i", "--euid|-u:", "--uid|-U:", "--pgroup|-g:", "--group|-G:",
   "--parent|-P:", "--session|-s:", "--terminal|-t:",
 ]
+argument.signal.dash = true
+argument.signal.words = [
+  "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+  "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "WINCH",
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL",
+  "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGWINCH",
+]
 
 [commands.killall]
-parser = { name = "gnu", leading_number = "signal" }
+parser = "gnu"
 arguments = [
   "names...", "--signal|-s:", "--exact|-e", "--ignore-case|-I", "--process-group|-g",
   "--interactive|-i", "--list|-l", "--quiet|-q", "--regexp|-r", "--user|-u:", "--verbose|-v",
   "--wait|-w", "--younger-than|-y:", "--older-than|-o:",
+]
+argument.signal.dash = true
+argument.signal.words = [
+  "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+  "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "WINCH",
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL",
+  "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGWINCH",
 ]
 
 # --- Programs with their own language ---
@@ -600,7 +628,6 @@ arguments = ["commits...", "--tags", "--always", "--dirty", "--long", "--abbrev"
 arguments = ["objects...", "-t", "-s", "-p", "-e"]
 
 [commands.git.log]
-parser = { name = "gnu", number = "max_count" }       # git log reads -5 anywhere as --max-count 5
 arguments = [
   "files...",
   "--output:",
@@ -613,6 +640,7 @@ arguments = [
   "--pretty", "--color", "--no-color", "--topo-order", "--date-order", "--left-right",
   "--branches", "--tags", "--remotes", "--source", "--regexp-ignore-case|-i",
 ]
+argument.max_count.dash = true                        # git log -5 is --max-count 5
 marks.read = ["files"]
 marks.write = ["output"]
 
