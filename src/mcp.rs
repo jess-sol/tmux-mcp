@@ -37,7 +37,10 @@ pub struct CommandRunParams {
                        Don't echo status or pipe into head/tail/grep."
     )]
     pub command: String,
-    #[schemars(description = "Timeout in seconds (default 30)")]
+    #[schemars(
+        description = "Seconds to wait before returning (default 5). Err low: on timeout the command \
+                       keeps running, and command_read continues from where this left off."
+    )]
     pub timeout_secs: Option<i64>,
     #[schemars(
         description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail."
@@ -391,8 +394,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
             if let Some(id) = command_id {
                 if output.is_empty() {
                     text.push_str(&format!(
-                        "\n[No new output. Command still running (id={}). Increase timeout_secs or use press_key C-c to cancel.]",
-                        id
+                        "\n[No new output. Command still running (id={id}). Use command_read(command_id={id}) to keep waiting, or press_key C-c to cancel.]"
                     ));
                 } else {
                     let lines_shown = output.lines().count();
@@ -451,7 +453,7 @@ impl TmuxMcp {
             "origin_pane": self.origin_pane,
             "pane_id": params.pane_id,
             "command": params.command,
-            "timeout_secs": params.timeout_secs.unwrap_or(30),
+            "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
         if let Some(n) = params.next {
             rpc_params["next"] = json!(n);
@@ -680,7 +682,7 @@ impl ServerHandler for TmuxMcp {
                  never with the tmux CLI from Bash.\n\n\
                  command_run: Combine with next=N + search=\"regex\" to return as soon \
                  as N matching lines appear, leaving the command running. Reach for \
-                 this any time you'd otherwise set timeout_secs past ~30s and the \
+                 this any time you'd otherwise raise timeout_secs and the \
                  command emits a recognizable progress marker (server ready line, \
                  build artifact written, test summary). In search mode, size \
                  timeout_secs to when the match should appear if things go well, not \
@@ -693,7 +695,7 @@ impl ServerHandler for TmuxMcp {
                  head=N + search behaves the same over the first N matches. \
                  Without next/head, the call blocks until the command completes or \
                  timeout_secs elapses; on timeout the command keeps running — continue \
-                 with command_read(command_id=N). \
+                 with command_read(command_id=N). So keep timeout_secs low. \
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit). \
                  If command_run says a pane is busy, use command_read with timeout_secs \
