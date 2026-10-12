@@ -20,6 +20,30 @@ pub struct PaneState {
     pub x: usize,
     pub y: usize,
     pub processor: PaneProcessor,
+    pub mode: PaneMode,
+}
+
+/// The tmux mode a pane is in, such as copy mode. While one is on, tmux hands
+/// typed keys to the mode instead of the program.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PaneMode {
+    /// tmux announced a change and has not yet said to what, or was never
+    /// asked.
+    #[default]
+    Unknown,
+    Off,
+    /// The mode's name, as tmux's `pane_mode` gives it (`copy-mode`).
+    On(String),
+}
+
+impl PaneMode {
+    /// What tmux's `pane_mode` format gave: a mode's name, or nothing.
+    pub fn from_format(value: &str) -> PaneMode {
+        match value.trim() {
+            "" => PaneMode::Off,
+            name => PaneMode::On(name.to_string()),
+        }
+    }
 }
 
 /// A tracked pane: immutable identity + locked mutable state.
@@ -44,6 +68,12 @@ impl TrackedPane {
     /// the pane busy.
     pub async fn lock_run(&self) -> MutexGuard<'_, ()> {
         self.run.lock().await
+    }
+
+    /// Records the pane's `mode` and wakes whatever waits on the pane.
+    pub async fn set_mode(&self, mode: PaneMode) {
+        self.lock().await.mode = mode;
+        self.notify_state_changed();
     }
 
     /// Signal that pane state has changed (new output, completion, etc.).
@@ -176,6 +206,7 @@ impl PaneRegistry {
                         x: lp.x,
                         y: lp.y,
                         processor,
+                        mode: PaneMode::Unknown,
                     }),
                     state_tx,
                     run: Mutex::new(()),

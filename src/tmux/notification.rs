@@ -13,7 +13,10 @@ pub enum Notification {
     LayoutChange { window_id: String, layout: String },
     /// `%window-add @<window_id>`
     WindowAdd { window_id: String },
-    /// Anything else (pane-mode-changed, etc.)
+    /// `%pane-mode-changed %<pane_id>`: the pane entered or left a mode; the
+    /// notification does not say which.
+    PaneModeChanged { pane_id: String },
+    /// Anything else
     Other { line: String },
 }
 
@@ -116,6 +119,9 @@ pub fn parse_notification(line: &str) -> Notification {
         },
         Some("%window-add") if parts.len() >= 2 => Notification::WindowAdd {
             window_id: parts[1].to_string(),
+        },
+        Some("%pane-mode-changed") if parts.len() >= 2 => Notification::PaneModeChanged {
+            pane_id: parts[1].to_string(),
         },
         Some("%exit") => Notification::Exit {
             reason: parts.get(1).map(|s| s.to_string()),
@@ -228,6 +234,17 @@ mod tests {
             n,
             Notification::WindowAdd {
                 window_id: "@5".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pane_mode_changed() {
+        let n = parse_notification("%pane-mode-changed %3");
+        assert_eq!(
+            n,
+            Notification::PaneModeChanged {
+                pane_id: "%3".to_string()
             }
         );
     }

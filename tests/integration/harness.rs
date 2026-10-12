@@ -505,6 +505,16 @@ impl Shell {
         run(tmux(&self.socket).args(["resize-pane", "-t", &self.pane, "-y", &rows]));
     }
 
+    /// Puts the pane in copy mode, as a person scrolling back would.
+    pub fn copy_mode(&self) {
+        run(tmux(&self.socket).args(["copy-mode", "-t", &self.pane]));
+    }
+
+    /// Leaves copy mode.
+    pub fn leave_copy_mode(&self) {
+        run(tmux(&self.socket).args(["send-keys", "-t", &self.pane, "-X", "cancel"]));
+    }
+
     /// Polls the screen, as tmux renders it, until `pred` holds.
     pub fn wait_until(
         &self,

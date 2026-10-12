@@ -79,6 +79,27 @@ async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
     assert_eq!((ran, refused), (1, 1), "{first:?}\n{second:?}");
 }
 
+/// Keys sent to a pane in copy mode drive copy mode, not the shell; tmux
+/// announces each change of mode, so the pane takes commands again once the
+/// person leaves it.
+#[tokio::test]
+async fn a_pane_in_copy_mode_says_so_and_refuses_commands_until_it_leaves() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    shell.copy_mode();
+
+    let refused = h.run(&shell, "seq 1").await;
+    let row = h.list_panes().await.row(&shell);
+    shell.leave_copy_mode();
+    let ran = h.run(&shell, "seq 2").await;
+    let history = h.history(&shell).await;
+
+    assert!(refused.contains("copy-mode"), "{refused}");
+    assert!(row.contains("copy-mode"), "{row}");
+    assert!(ran.ends_with("Exit code: 0"), "{ran}");
+    assert!(!history.contains("seq 1"), "{history}");
+}
+
 #[tokio::test]
 async fn a_pane_running_a_command_refuses_another() {
     let h = Harness::new().await;

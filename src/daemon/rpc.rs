@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::pane::osc133::Osc133Phase;
-use crate::pane::registry::{PaneHandle, PaneRegistry};
+use crate::pane::registry::{PaneHandle, PaneMode, PaneRegistry};
 use crate::pane::state::{Activity, CommandRecord};
 use crate::policy;
 use crate::policy::approval::ApprovalStore;
@@ -602,6 +602,8 @@ struct PaneEntry {
     osc_hostname: Option<String>,
     foreground: Option<String>,
     activity: String,
+    /// The tmux mode the pane is in (`copy-mode`), or null in none.
+    mode: Option<String>,
     /// Seconds since last OSC 133 marker, or null if never seen.
     osc133_last_marker_secs: Option<f64>,
     /// Seconds since last terminal data received, or null if never seen.
@@ -679,6 +681,10 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
             }),
             foreground,
             activity: format!("{:?}", term_state.activity),
+            mode: match &ps.mode {
+                PaneMode::On(mode) => Some(mode.clone()),
+                PaneMode::Off | PaneMode::Unknown => None,
+            },
             osc133_last_marker_secs,
             last_data_secs,
             osc133_status: osc133_status.to_string(),
@@ -842,6 +848,32 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
         loop {
             {
                 let tp = pane_handle.lock().await;
+
+                // A mode takes typed keys, so the command would never reach
+                // the shell. Unknown waits for tmux to say which mode.
+                match &tp.mode {
+                    PaneMode::On(mode) => {
+                        return Err(RpcError::internal(format!(
+                            "Pane {pane_id} is in {mode}, which takes typed keys instead of the \
+                             shell: the person may be scrolling back or selecting. Wait for them \
+                             to leave it, ask them, or use a different pane."
+                        )));
+                    }
+                    PaneMode::Unknown if tokio::time::Instant::now() >= guard_deadline => {
+                        return Err(RpcError::internal(format!(
+                            "Pane {pane_id} changed mode and tmux has not said to which; try again."
+                        )));
+                    }
+                    PaneMode::Unknown => {
+                        drop(tp);
+                        tokio::select! {
+                            _ = rx.changed() => {}
+                            _ = tokio::time::sleep_until(guard_deadline) => {}
+                        }
+                        continue;
+                    }
+                    PaneMode::Off => {}
+                }
 
                 let is_busy = tp.processor.state().active_command().is_some()
                     || tp.processor.state().activity == Activity::Busy

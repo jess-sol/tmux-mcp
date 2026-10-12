@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::TmuxSession;
-use crate::pane::registry::{PaneRegistry, SyncAction};
+use crate::pane::registry::{PaneMode, PaneRegistry, SyncAction};
 use crate::parse::escape::unescape_tmux_output;
 use crate::parse::layout::parse_layout;
 use crate::tmux::connection::{self, TmuxCommands, TmuxNotifications};
@@ -140,6 +140,23 @@ async fn event_loop(
                 handle.notify_state_changed();
             }
 
+            // The notification names no mode: Unknown until tmux says which.
+            Notification::PaneModeChanged { pane_id } => {
+                let handle = {
+                    let registry = state.registry.read().await;
+                    registry.get_handle(&pane_id)
+                };
+                let Some(handle) = handle else {
+                    continue;
+                };
+                handle.set_mode(PaneMode::Unknown).await;
+                let mode = state.conn.lock().await.query_pane_mode(&pane_id).await;
+                match mode {
+                    Ok(mode) => handle.set_mode(mode).await,
+                    Err(e) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
+                }
+            }
+
             Notification::Exit { .. } | Notification::SessionClose { .. } => {
                 tracing::info!("Session ended");
                 break;
@@ -174,6 +191,15 @@ async fn execute_actions(
                     Err(e) => {
                         tracing::warn!("Failed to query pid for {}: {}", pane_id, e);
                     }
+                }
+                // Later changes arrive as %pane-mode-changed.
+                match (
+                    conn.query_pane_mode(pane_id).await,
+                    registry.get_handle(pane_id),
+                ) {
+                    (Ok(mode), Some(handle)) => handle.set_mode(mode).await,
+                    (Ok(_), None) => {}
+                    (Err(e), _) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
                 }
             }
             SyncAction::PaneRemoved { pane_id } => {

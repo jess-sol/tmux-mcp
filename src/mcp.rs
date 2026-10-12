@@ -185,7 +185,11 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
                     x - ox,
                     y - oy,
                 ),
-                p["activity"].as_str().unwrap_or("Unknown").to_lowercase(),
+                // A mode takes the pane's keys, so it outranks its activity.
+                p["mode"]
+                    .as_str()
+                    .unwrap_or_else(|| p["activity"].as_str().unwrap_or("Unknown"))
+                    .to_lowercase(),
                 p["osc133_status"].as_str().unwrap_or("unknown").to_string(),
                 p["foreground"].as_str().unwrap_or("-").to_string(),
                 p["last_data_secs"]

@@ -11,6 +11,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client::TmuxSession;
+use crate::pane::registry::PaneMode;
 use crate::tmux::notification::Notification;
 use crate::tmux::reader;
 
@@ -188,6 +189,14 @@ impl TmuxCommands {
         self.execute(&format!("refresh-client -A '{}:off'", pane_id))
             .await
             .map(|_| ())
+    }
+
+    /// Query the mode a pane is in.
+    pub async fn query_pane_mode(&mut self, pane_id: &str) -> Result<PaneMode> {
+        let output = self
+            .execute(&format!("display-message -t {pane_id} -p '#{{pane_mode}}'"))
+            .await?;
+        Ok(PaneMode::from_format(&output))
     }
 
     /// Query the shell PID of a pane.
