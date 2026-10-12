@@ -105,10 +105,6 @@ impl TmuxCommands {
         &self.session
     }
 
-    pub fn child_pid(&self) -> Option<u32> {
-        self._child.id()
-    }
-
     /// Execute a tmux control mode command and wait for the response.
     pub async fn execute(&mut self, command: &str) -> Result<String> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -133,7 +129,9 @@ impl TmuxCommands {
         let response = response_rx.await.map_err(|_| Error::ConnectionClosed)?;
 
         if response.is_error {
-            Err(Error::CommandFailed { message: response.output })
+            Err(Error::CommandFailed {
+                message: response.output,
+            })
         } else {
             Ok(response.output)
         }
@@ -144,7 +142,8 @@ impl TmuxCommands {
         let lines: Vec<&str> = keys.split('\n').collect();
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
-                self.execute(&format!("send-keys -t {} C-j", target)).await?;
+                self.execute(&format!("send-keys -t {} C-j", target))
+                    .await?;
             }
             if !line.is_empty() {
                 self.execute(&format!(
@@ -161,7 +160,8 @@ impl TmuxCommands {
     /// Send keys followed by Enter.
     pub async fn send_command(&mut self, target: &str, command: &str) -> Result<()> {
         self.send_keys(target, command).await?;
-        self.execute(&format!("send-keys -t {} Enter", target)).await?;
+        self.execute(&format!("send-keys -t {} Enter", target))
+            .await?;
         Ok(())
     }
 
@@ -171,7 +171,8 @@ impl TmuxCommands {
         // Quoted, so `;` or `#` in keys cannot end or comment out the tmux
         // command; tmux strips the quotes and still reads a key name.
         let keys = crate::parse::escape::shell_escape(keys);
-        self.execute(&format!("send-keys -t {} {}", target, keys)).await?;
+        self.execute(&format!("send-keys -t {} {}", target, keys))
+            .await?;
         Ok(())
     }
 
@@ -192,11 +193,17 @@ impl TmuxCommands {
     /// Query the shell PID of a pane.
     pub async fn query_pane_pid(&mut self, pane_id: &str) -> Result<u32> {
         let output = self
-            .execute(&format!("display-message -t {} -p '#{{pane_pid}}'", pane_id))
+            .execute(&format!(
+                "display-message -t {} -p '#{{pane_pid}}'",
+                pane_id
+            ))
             .await?;
-        output.trim().parse::<u32>().map_err(|_| Error::CommandFailed {
-            message: format!("invalid pane_pid: {}", output.trim()),
-        })
+        output
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| Error::CommandFailed {
+                message: format!("invalid pane_pid: {}", output.trim()),
+            })
     }
 }
 

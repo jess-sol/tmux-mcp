@@ -14,25 +14,38 @@ async fn a_pane_the_user_is_typing_in_refuses_commands() {
 }
 
 #[tokio::test]
-async fn the_typing_refusal_suggests_ctrl_c_only_when_nothing_sits_before_the_cursor() {
+async fn the_typing_refusal_suggests_ctrl_c_only_when_the_cursor_sits_outside_the_text() {
     let h = Harness::new().await;
     let shell = h.shell().await;
-    // A background job prints `xyz` at the idle prompt and moves the cursor
-    // back before it: a garbled line, with nothing typed. Octal keeps `xyz`
-    // off the command line itself; the sleep keeps `set -b` from redrawing.
+    // Background jobs print at the idle prompt: a garbled line, with nothing
+    // typed. `xyz` leaves the cursor before it, `abc` ends in a newline that
+    // leaves the cursor below it. Octal keeps the text off the command line
+    // itself; the sleep keeps `set -b` from redrawing.
     shell.say("(sleep 0.5; printf '\\170\\171\\172\\033[3D'; sleep 30) &");
     shell.wait_until(SETTLE, |s| s.contains("xyz")).unwrap();
-
-    let garbled = h.run(&shell, "seq 1").await;
+    let before = h.run(&shell, "seq 1").await;
+    h.press_key(&shell, "C-c").await;
+    shell.say("(sleep 0.5; printf '\\141\\142\\143\\n'; sleep 30) &");
+    shell
+        .wait_until(SETTLE, |s| s.lines().any(|row| row.ends_with("$ abc")))
+        .unwrap();
+    let above = h.run(&shell, "seq 1").await;
     h.press_key(&shell, "C-c").await;
     shell.type_text("git sta");
     let typing = h.run(&shell, "seq 1").await;
 
+    for garbled in [&before, &above] {
+        assert!(
+            garbled.starts_with("User is typing") && garbled.contains("press_key C-c"),
+            "{garbled}"
+        );
+    }
     assert!(
-        garbled.starts_with("User is typing") && garbled.contains("press_key C-c"),
-        "{garbled}"
+        typing.starts_with("User is typing")
+            && typing.contains("Read as input: \"git sta\"")
+            && !typing.contains("press_key C-c"),
+        "{typing}"
     );
-    assert!(typing.starts_with("User is typing") && !typing.contains("press_key C-c"), "{typing}");
 }
 
 #[tokio::test]
@@ -52,11 +65,16 @@ async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
     let h = Harness::new().await;
     let shell = h.shell().await;
 
-    let (first, second) =
-        tokio::join!(h.run(&shell, "sleep 1; seq 1"), h.run(&shell, "sleep 1; seq 2"));
+    let (first, second) = tokio::join!(
+        h.run(&shell, "sleep 1; seq 1"),
+        h.run(&shell, "sleep 1; seq 2")
+    );
 
     let replies = [&first, &second];
-    let ran = replies.iter().filter(|r| r.contains("Exit code: 0")).count();
+    let ran = replies
+        .iter()
+        .filter(|r| r.contains("Exit code: 0"))
+        .count();
     let refused = replies.iter().filter(|r| r.contains("busy")).count();
     assert_eq!((ran, refused), (1, 1), "{first:?}\n{second:?}");
 }
@@ -69,5 +87,8 @@ async fn a_pane_running_a_command_refuses_another() {
 
     let reply = h.run(&shell, "seq 1").await;
 
-    assert!(reply.contains("busy") && reply.contains("sleep 30"), "{reply:?}");
+    assert!(
+        reply.contains("busy") && reply.contains("sleep 30"),
+        "{reply:?}"
+    );
 }

@@ -1,318 +1,1573 @@
-# Built-in policy rules — compiled into the tmux-mcp binary.
-# Every matching rule counts, and the strictest wins: deny, then ask, then
-# allow; no match asks. A user loosens one with an override rule
-# (`override = true`), which decides alone when it matches.
+# Built-in policy, compiled into the tmux-mcp binary.
+#
+# A grammar declares what its rules read, every option whose value is a path or a command, and
+# the flags agents commonly use with a command the rules allow. Anything else is undeclared,
+# which only makes a line ask.
 
 default = "ask"
 
-# --- Circumvention patterns (deny by default, user can override to ask) ---
+# =============================================================================
+# Readers
+# =============================================================================
+
+[commands.cat]
+parser = "gnu"
+arguments = [
+  "files...", "--number|-n", "--number-nonblank|-b", "--show-all|-A", "--show-ends|-E",
+  "--show-tabs|-T", "--squeeze-blank|-s", "--show-nonprinting|-v",
+]
+marks.read = ["files"]
+
+[commands.less]
+parser = "gnu"
+arguments = [
+  "files...", "--log-file|-o|--LOG-FILE|-O:", "--pattern|-p:", "--tag|-t:",
+  "raw_ansi=-R", "chop=-S", "line_numbers=-N", "quit_if_one_screen=-F", "no_init=-X", "ignore_case=-i",
+]
+marks.read = ["files"]
+marks.write = ["log_file"]
+
+[commands.more]
+parser = "gnu"
+arguments = ["files...", "--lines|-n:"]
+marks.read = ["files"]
+
+[commands.wc]
+parser = "gnu"
+arguments = [
+  "files...", "--files0-from:", "--lines|-l", "--words|-w", "--bytes|-c", "--chars|-m",
+  "--max-line-length|-L",
+]
+marks.read = ["files", "files0_from"]
+
+[commands.file]
+parser = "gnu"
+arguments = ["files...", "--files-from|-f:", "--magic-file|-m:", "--brief|-b", "--mime|-i", "--mime-type", "--dereference|-L"]
+marks.read = ["files", "files_from", "magic_file"]
+
+[commands.stat]
+parser = "gnu"
+arguments = ["files...", "--format|-c:", "--printf:", "--dereference|-L", "--file-system|-f", "--terse|-t"]
+marks.read = ["files"]
+
+[commands.realpath]
+parser = "gnu"
+arguments = [
+  "files...", "--relative-to:", "--relative-base:", "--canonicalize-existing|-e",
+  "--canonicalize-missing|-m", "--no-symlinks|-s", "--quiet|-q",
+]
+marks.read = ["files", "relative_to", "relative_base"]
+
+[commands.readlink]
+parser = "gnu"
+arguments = ["files...", "--canonicalize|-f", "--canonicalize-existing|-e", "--canonicalize-missing|-m", "--no-newline|-n"]
+marks.read = ["files"]
+
+[commands.diff]
+parser = "gnu"
+arguments = [
+  "files...", "--from-file:", "--to-file:", "--exclude-from|-X:", "--exclude|-x:",
+  "--unified|-U:", "--context|-C:", "--label|-L:",
+  "-u", "-c", "--recursive|-r", "--new-file|-N", "--brief|-q", "--side-by-side|-y",
+  "--ignore-all-space|-w", "--ignore-space-change|-b", "--ignore-blank-lines|-B", "--ignore-case|-i",
+  "--text|-a", "--color",
+]
+marks.read = ["files", "from_file", "to_file", "exclude_from"]
+
+[commands.base64]
+parser = "gnu"
+arguments = ["files...", "--wrap|-w:", "--decode|-d", "--ignore-garbage|-i"]
+marks.read = ["files"]
+
+[commands.md5sum]
+parser = "gnu"
+arguments = ["files...", "--check|-c", "--binary|-b", "--quiet", "--status", "--tag"]
+marks.read = ["files"]
+
+[commands.sha256sum]
+parser = "gnu"
+arguments = ["files...", "--check|-c", "--binary|-b", "--quiet", "--status", "--tag"]
+marks.read = ["files"]
+
+[commands.head]
+parser = "gnu"
+arguments = ["files...", "--lines|-n:", "--bytes|-c:", "--quiet|--silent|-q", "--verbose|-v"]
+argument.lines.dash = true                             # head -5 is head --lines 5
+marks.read = ["files"]
+
+[commands.tail]
+parser = "gnu"
+arguments = [
+  "files...", "--lines|-n:", "--bytes|-c:", "--follow|-f", "follow_retry=-F", "--quiet|--silent|-q",
+  "--verbose|-v",
+]
+argument.lines.dash = true                             # tail -5, and a first +5
+marks.read = ["files"]
+
+[commands.uniq]
+parser = "gnu"
+arguments = [
+  "input", "output", "--count|-c", "--repeated|-d", "--unique|-u", "--ignore-case|-i",
+  "--skip-fields|-f:", "--skip-chars|-s:", "--check-chars|-w:",
+]
+marks.read = ["input"]
+marks.write = ["output"]
+
+[commands.cut]
+parser = "gnu"
+arguments = [
+  "files...", "--fields|-f:", "--delimiter|-d:", "--bytes|-b:", "--characters|-c:",
+  "--only-delimited|-s", "--complement", "--output-delimiter:",
+]
+marks.read = ["files"]
+
+[commands.sort]
+parser = "gnu"
+arguments = [
+  "files...", "--output|-o:", "--temporary-directory|-T:", "--files0-from:", "--key|-k:",
+  "--field-separator|-t:", "--numeric-sort|-n", "--reverse|-r", "--unique|-u",
+  "--human-numeric-sort|-h", "--version-sort|-V", "--ignore-case|-f", "--ignore-leading-blanks|-b",
+  "--stable|-s", "--general-numeric-sort|-g", "--zero-terminated|-z", "--check|-c",
+]
+marks.read = ["files", "files0_from"]
+marks.write = ["output", "temporary_directory"]
+
+[commands.ls]
+parser = "gnu"
+arguments = [
+  "files...", "--ignore|-I:", "--sort:", "--all|-a", "--almost-all|-A", "-l", "--human-readable|-h",
+  "-t", "--reverse|-r", "--recursive|-R", "one_per_line=-1", "--directory|-d", "size_sort=-S",
+  "--inode|-i", "--classify|-F", "--numeric-uid-gid|-n", "--size|-s", "--color",
+  "--group-directories-first",
+]
+argument.files.default = ["."]
+marks.read = ["files"]
+
+[commands.tree]
+parser = "gnu"
+arguments = [
+  "files...", "output=-o:", "level=-L:", "pattern=-P:", "ignore=-I:", "all=-a", "dirs_only=-d",
+  "full_path=-f", "human=-h", "colorize=-C", "json=-J", "--gitignore", "--noreport", "--dirsfirst",
+]
+argument.files.default = ["."]
+marks.read = ["files"]
+marks.write = ["output"]
+
+# --- Search: grep, egrep, fgrep are three entries on purpose ---
+
+[commands.grep]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--exclude-from:", "--include:", "--exclude:", "--exclude-dir:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--recursive|-r", "--dereference-recursive|-R", "--line-number|-n", "--ignore-case|-i",
+  "--files-with-matches|-l", "--files-without-match|-L", "--invert-match|-v", "--word-regexp|-w",
+  "--line-regexp|-x", "--count|-c", "--only-matching|-o", "--with-filename|-H", "--no-filename|-h",
+  "--extended-regexp|-E", "--fixed-strings|-F", "--perl-regexp|-P", "--no-messages|-s",
+  "--quiet|--silent|-q", "--null-data|-z", "--text|-a", "binary_skip=-I", "--color|--colour",
+]
+marks.read = ["files", "file", "exclude_from"]
+
+[commands.egrep]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--exclude-from:", "--include:", "--exclude:", "--exclude-dir:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--recursive|-r", "--dereference-recursive|-R", "--line-number|-n", "--ignore-case|-i",
+  "--files-with-matches|-l", "--files-without-match|-L", "--invert-match|-v", "--word-regexp|-w",
+  "--line-regexp|-x", "--count|-c", "--only-matching|-o", "--with-filename|-H", "--no-filename|-h",
+  "--extended-regexp|-E", "--fixed-strings|-F", "--perl-regexp|-P", "--no-messages|-s",
+  "--quiet|--silent|-q", "--null-data|-z", "--text|-a", "binary_skip=-I", "--color|--colour",
+]
+marks.read = ["files", "file", "exclude_from"]
+
+[commands.fgrep]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--exclude-from:", "--include:", "--exclude:", "--exclude-dir:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--recursive|-r", "--dereference-recursive|-R", "--line-number|-n", "--ignore-case|-i",
+  "--files-with-matches|-l", "--files-without-match|-L", "--invert-match|-v", "--word-regexp|-w",
+  "--line-regexp|-x", "--count|-c", "--only-matching|-o", "--with-filename|-H", "--no-filename|-h",
+  "--extended-regexp|-E", "--fixed-strings|-F", "--perl-regexp|-P", "--no-messages|-s",
+  "--quiet|--silent|-q", "--null-data|-z", "--text|-a", "binary_skip=-I", "--color|--colour",
+]
+marks.read = ["files", "file", "exclude_from"]
+
+[commands.rg]
+parser = "gnu"
+arguments = [
+  ["pattern", "--regexp|-e:", "--file|-f:"],
+  "files...",
+  "--ignore-file:", "--pre:", "--hostname-bin:",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--glob|-g:", "--iglob:", "--type|-t:", "--type-not|-T:", "--max-depth|-d:", "--replace|-r:",
+  "--sort:", "--sortr:", "--color:",
+  "--ignore-case|-i", "--smart-case|-S", "--case-sensitive|-s", "--word-regexp|-w", "--line-regexp|-x",
+  "--line-number|-n", "--no-line-number|-N", "--files-with-matches|-l", "--count|-c",
+  "--invert-match|-v", "--unrestricted|-u", "--fixed-strings|-F", "--only-matching|-o", "--hidden",
+  "--no-ignore", "list_files=--files", "--json", "--follow|-L", "--multiline|-U", "--text|-a", "--heading",
+  "--no-heading", "--vimgrep", "--with-filename|-H", "--no-filename", "--pretty|-p", "--quiet|-q",
+]
+argument.files.default = ["."]                        # with no path, rg searches the directory
+marks.read = ["files", "file", "ignore_file"]
+
+[commands.find]
+parser = "find"                                       # spellings are single-dash words
+arguments = [
+  "files...",                                         # the start points
+  "follow_links=-L", "follow_args=-H", "no_follow=-P",
+  "-delete",
+  "-newer:", "-anewer:", "-cnewer:", "-samefile:", "-files0-from:",
+  "-fprint:", "-fprint0:", "-fls:", "-fprintf:",
+  "-name:", "-iname:", "-path:", "-ipath:", "-wholename:", "-iwholename:",
+  "-regex:", "-iregex:", "-lname:", "-ilname:",
+  "-type:", "-xtype:", "-perm:", "-size:", "-user:", "-group:", "-uid:", "-gid:",
+  "-mtime:", "-mmin:", "-atime:", "-amin:", "-ctime:", "-cmin:", "-maxdepth:", "-mindepth:",
+  "-newermt:", "-printf:", "-regextype:",
+  "-print", "-print0", "-ls", "-prune", "-quit", "-empty", "-executable", "-readable", "-writable",
+  "-depth", "-xdev", "-mount", "-follow", "-true", "-false", "-nouser", "-nogroup", "-daystart",
+  "-exec...", "-execdir...", "-ok...", "-okdir...",   # a command up to ";" or "{} +"
+]
+argument.files.default = ["."]
+marks.read = ["files", "newer", "anewer", "cnewer", "samefile", "files0_from"]
+marks.write = ["fprint", "fprint0", "fls", "fprintf"]
+marks.command = ["exec", "execdir", "ok", "okdir"]
+# -execdir and -okdir run their command in each file's directory, which cannot be known.
+with.cwd = 'args.execdir == [] && args.okdir == [] ? null : unknown'
+
+# =============================================================================
+# Commands that run commands
+# =============================================================================
+
+[commands.timeout]
+parser = "posix"
+arguments = ["duration", "command...", "--signal|-s:", "--kill-after|-k:", "--preserve-status", "--foreground", "--verbose|-v"]
+marks.command = ["command"]
+
+[commands.nice]
+parser = "posix"
+arguments = ["command...", "--adjustment|-n:"]
+argument.adjustment.dash = true                        # nice -5 is nice -n 5
+marks.command = ["command"]
+
+[commands.nohup]
+parser = "posix"
+arguments = ["command..."]
+marks.command = ["command"]
+
+[commands.xargs]
+parser = "posix"
+arguments = [
+  "command...", "--arg-file|-a:", "--delimiter|-d:", "eof=-E:", "replace=-I:", "max_lines=-L:",
+  "--max-args|-n:", "--max-procs|-P:", "--max-chars|-s:", "--process-slot-var:",
+  "--null|-0", "--interactive|-p", "--no-run-if-empty|-r", "--verbose|-t", "--exit|-x", "--open-tty|-o",
+  "--show-limits",
+]
+argument.command.default = ["echo"]
+argument.command.appends = true                       # xargs adds its input to the command
+marks.command = ["command"]
+marks.read = ["arg_file"]
+
+[commands.env]
+parser = "posix"
+arguments = [
+  "assigns...", "command...", "--chdir|-C:", "--split-string|-S:", "--unset|-u:",
+  "--ignore-environment|-i", "--null|-0", "--debug|-v",
+]
+argument.assigns.match = "*=*"
+marks.variables = ["assigns"]
+marks.command = ["command"]
+marks.shell = ["split_string"]
+with.cwd = 'last(args.chdir)'
+
+[commands.export]
+parser = "posix"
+arguments = ["names...", "unexport=-n", "functions=-f", "print=-p"]
+marks.variables = ["names"]
+
+[commands.sudo]
+parser = "posix"
+arguments = [
+  "command...",
+  "--user|-u:", "--group|-g:", "--chdir|-D:", "--close-from|-C:", "--host:", "--prompt|-p:",
+  "--role|-r:", "--type|-t:", "--command-timeout|-T:", "--other-user|-U:",
+  "--login|-i", "--shell|-s", "--edit|-e", "--preserve-env|-E", "--non-interactive|-n",
+  "--background|-b", "--list|-l", "--validate|-v", "--reset-timestamp|-k", "--remove-timestamp|-K",
+  "--set-home|-H", "--stdin|-S",
+]
+argument.user.default = ["root"]
+marks.command = ["command"]
+with.user = 'last(args.user)'
+with.cwd = 'args.login ? home(with.user) : last(args.chdir)'
+
+[commands.ssh]
+parser = "posix"                                      # ssh's options end at the destination
+arguments = [
+  "destination", "command...",
+  "bind_interface=-B:", "bind_address=-b:", "cipher_spec=-c:", "dynamic=-D:", "log_file=-E:",
+  "escape_char=-e:", "config=-F:", "pkcs11=-I:", "identity_file=-i:", "jump=-J:", "local=-L:",
+  "login_name=-l:", "mac_spec=-m:", "control=-O:", "option=-o:", "port=-p:", "query=-Q:",
+  "remote=-R:", "control_path=-S:", "forward_stdio=-W:", "tunnel=-w:",
+  "ipv4=-4", "ipv6=-6", "agent=-A", "no_agent=-a", "compress=-C", "background=-f", "gateway=-g",
+  "no_stdin=-n", "no_command=-N", "quiet=-q", "subsystem=-s", "no_tty=-T", "tty=-t", "verbose=-v",
+  "x11=-X", "no_x11=-x", "trusted_x11=-Y",
+]
+marks.read = ["config", "identity_file"]
+marks.write = ["log_file"]
+marks.shell = ["command"]                             # ssh joins its words into one remote line
+with.host = 'host_of(args.destination)'
+with.user = 'or(last(args.login_name), user_of(args.destination))'
+with.cwd = 'home(with.user)'
+
+# sh, bash, dash, zsh: four entries on purpose. With -c the line is a shell line; else the first
+# operand is a script file, and with neither the shell reads its commands from standard input.
+
+[commands.sh]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "--login|-l", "interactive=-i",
+  "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v", "noexec=-n", "stdin=-s",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+
+[commands.bash]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "shopt=-O:", "--rcfile|--init-file:",
+  "--login|-l", "interactive=-i", "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v",
+  "noexec=-n", "stdin=-s", "--norc", "--noprofile", "--posix", "--restricted|-r",
+]
+marks.read = ["file", "rcfile"]
+marks.shell = ["command"]
+
+[commands.dash]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "--login|-l", "interactive=-i",
+  "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v", "noexec=-n", "stdin=-s",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+
+[commands.zsh]
+parser = "posix"
+arguments = [
+  ["file", "command=-c:"], "positional...", "option=-o:", "--login|-l", "interactive=-i",
+  "errexit=-e", "xtrace=-x", "nounset=-u", "verbose=-v", "noexec=-n", "stdin=-s", "no_rcs=-f",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+
+# cd and pushd move the rest of their && chain to `dir`. `cd -` and `pushd +N` take a directory
+# from the stack, so `dir` takes no word that starts with `-` or `+`, and the cwd is Unknown.
+# pushd's -n keeps the directory; it stays undeclared, so the cwd after it is Unknown too.
+
+[commands.cd]
+parser = "posix"
+arguments = ["dir", "logical=-L", "physical=-P", "exit_on_error=-e"]
+argument.dir.default = ["~"]
+argument.dir.match = "[!+-]*"
+marks.cwd = ["dir"]
+
+[commands.pushd]
+parser = "posix"
+arguments = ["dir"]
+argument.dir.match = "[!+-]*"
+marks.cwd = ["dir"]
+
+[commands.popd]
+parser = "posix"
+arguments = ["entry", "no_change=-n"]
+
+# =============================================================================
+# Writers
+# =============================================================================
+
+[commands.rm]
+parser = "gnu"
+arguments = [
+  "files...", "--recursive|-r|-R", "--force|-f", "--interactive|-i", "once=-I", "--verbose|-v",
+  "--dir|-d",
+]
+marks.write = ["files"]
+
+[commands.rmdir]
+parser = "gnu"
+arguments = ["files...", "--parents|-p", "--verbose|-v", "--ignore-fail-on-non-empty"]
+marks.write = ["files"]
+
+[commands.mkdir]
+parser = "gnu"
+arguments = ["files...", "--mode|-m:", "--parents|-p", "--verbose|-v"]
+marks.write = ["files"]
+
+[commands.touch]
+parser = "gnu"
+arguments = [
+  "files...", "--reference|-r:", "--date|-d:", "stamp=-t:", "-a", "-m", "--no-create|-c",
+  "--no-dereference|-h",
+]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+[commands.tee]
+parser = "gnu"
+arguments = ["files...", "--append|-a", "--ignore-interrupts|-i"]
+marks.write = ["files"]
+
+[commands.cp]
+parser = "gnu"
+arguments = [
+  "files...", ["dest", "--target-directory|-t:"], "--suffix|-S:",
+  "--recursive|-r|-R", "--archive|-a", "--force|-f", "--interactive|-i", "--no-clobber|-n", "-p",
+  "--preserve", "--verbose|-v", "--update|-u", "--dereference|-L", "--no-dereference|-P",
+  "--link|-l", "--symbolic-link|-s", "--no-target-directory|-T", "--parents",
+]
+marks.read = ["files"]
+marks.write = ["dest", "target_directory"]
+
+[commands.mv]
+parser = "gnu"
+arguments = [
+  "files...", ["dest", "--target-directory|-t:"], "--suffix|-S:",
+  "--force|-f", "--interactive|-i", "--no-clobber|-n", "--verbose|-v", "--update|-u",
+  "--no-target-directory|-T",
+]
+marks.write = ["files", "dest", "target_directory"]   # a moved source is removed
+
+[commands.ln]
+parser = "gnu"
+arguments = [
+  "files...", ["dest", "--target-directory|-t:"], "--suffix|-S:",
+  "--symbolic|-s", "--force|-f", "--no-dereference|-n", "--verbose|-v", "--relative|-r",
+  "--no-target-directory|-T", "--logical|-L", "--physical|-P",
+]
+marks.read = ["files"]
+marks.write = ["dest", "target_directory"]
+
+[commands.chmod]
+parser = "gnu"
+arguments = [["mode", "--reference:"], "files...", "--recursive|-R", "--verbose|-v", "--changes|-c", "--silent|--quiet|-f"]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+[commands.chown]
+parser = "gnu"
+arguments = [["owner", "--reference:"], "files...", "--recursive|-R", "--verbose|-v", "--changes|-c", "--silent|--quiet|-f"]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+[commands.chgrp]
+parser = "gnu"
+arguments = [["group", "--reference:"], "files...", "--recursive|-R", "--verbose|-v", "--changes|-c", "--silent|--quiet|-f"]
+marks.read = ["reference"]
+marks.write = ["files"]
+
+# --- Signals: the signal is a value, so a rule can tell SIGKILL from the default ---
+
+# Each reads -9 and -KILL as its signal; a name it does not list reads as flags.
+[commands.kill]
+parser = "posix"
+arguments = ["pids...", "--signal|-s:", "signal_number=-n:", "--list|-l", "--table|-L"]
+argument.signal.dash = true
+argument.signal.words = [
+  "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+  "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "WINCH",
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL",
+  "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGWINCH",
+]
+
+# pkill's -s is the session, not the signal.
+[commands.pkill]
+parser = "gnu"
+arguments = [
+  "pattern", "--signal:", "--full|-f", "--exact|-x", "--newest|-n", "--oldest|-o", "--echo|-e",
+  "--count|-c", "--ignore-case|-i", "--euid|-u:", "--uid|-U:", "--pgroup|-g:", "--group|-G:",
+  "--parent|-P:", "--session|-s:", "--terminal|-t:",
+]
+argument.signal.dash = true
+argument.signal.words = [
+  "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+  "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "WINCH",
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL",
+  "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGWINCH",
+]
+
+[commands.killall]
+parser = "gnu"
+arguments = [
+  "names...", "--signal|-s:", "--exact|-e", "--ignore-case|-I", "--process-group|-g",
+  "--interactive|-i", "--list|-l", "--quiet|-q", "--regexp|-r", "--user|-u:", "--verbose|-v",
+  "--wait|-w", "--younger-than|-y:", "--older-than|-o:",
+]
+argument.signal.dash = true
+argument.signal.words = [
+  "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+  "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "WINCH",
+  "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL",
+  "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGCHLD", "SIGCONT",
+  "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGWINCH",
+]
+
+# --- Programs with their own language ---
+
+[commands.sed]
+parser = "gnu"
+arguments = [
+  ["script", "--expression|-e:", "--file|-f:"], "files...", "--line-length|-l:",
+  "--quiet|--silent|-n", "--regexp-extended|-E|-r", "--in-place|-i", "--separate|-s",
+  "--null-data|-z", "--unbuffered|-u", "--posix", "--debug", "--sandbox",
+]
+marks.read = ["files", "file"]
+
+[commands.awk]
+parser = "gnu"
+arguments = [
+  ["program", "--source|-e:", "--file|-f|--include|-i:"],
+  "files...", "--field-separator|-F:", "--assign|-v:",
+]
+marks.read = ["files", "file"]
+
+[commands.gawk]
+parser = "gnu"
+arguments = [
+  ["program", "--source|-e:", "--file|-f|--include|-i:"],
+  "files...", "--field-separator|-F:", "--assign|-v:",
+]
+marks.read = ["files", "file"]
+
+# mawk and nawk reject --source; declaring it reads no line they accept differently, and lets
+# one rule cover every awk.
+[commands.mawk]
+parser = "gnu"
+arguments = [["program", "--source:", "--file|-f:"], "files...", "--field-separator|-F:", "--assign|-v:"]
+marks.read = ["files", "file"]
+
+[commands.nawk]
+parser = "posix"
+arguments = [["program", "--source:", "file=-f:"], "files...", "field_separator=-F:", "assign=-v:"]
+marks.read = ["files", "file"]
+
+# =============================================================================
+# Tools with subcommands
+# =============================================================================
+
+[commands.git]
+parser = "gnu"
+arguments = [
+  "dir=-C:", "--git-dir:", "--work-tree:", "config=-c:", "--config-env:", "--namespace:",
+  "--exec-path", "--no-pager|-P", "--paginate|-p", "--bare", "--no-replace-objects",
+  "--literal-pathspecs", "--no-optional-locks", "subcommand",
+]
+argument.dir.default = ["."]                          # git reads the repository of its directory
+# git won't let an alias shadow a built-in, so a listed name is never an
+# alias for `push`; an unlisted one could be, and stays Unknown.
+argument.subcommand.words = [
+  "add", "rm", "mv", "checkout", "switch", "restore", "merge", "rebase", "pull", "fetch",
+  "clone", "init", "worktree", "cherry-pick", "revert", "am", "apply", "bisect", "submodule",
+  "gc", "prune", "merge-base", "rev-list", "for-each-ref", "show-ref", "symbolic-ref",
+  "ls-remote", "name-rev", "cherry", "range-diff", "check-ignore", "format-patch", "notes",
+  "sparse-checkout", "fsck", "archive", "bundle", "version", "help",
+]
+marks.cwd = ["dir"]
+marks.read = ["git_dir", "work_tree"]
+
+[commands.git.status]
+arguments = [
+  "files...", "--short|-s", "--branch|-b", "--porcelain", "--long", "--verbose|-v", "--ignored",
+  "-z", "--show-stash", "--ahead-behind",
+]
+marks.read = ["files"]
+
+[commands.git.blame]
+arguments = ["files...", "line_range=-L:", "-w", "-e", "-s", "-l", "--porcelain", "--line-porcelain"]
+marks.read = ["files"]
+
+[commands.git.ls-files]
+arguments = [
+  "files...", "--others|-o", "--modified|-m", "--deleted|-d", "--cached|-c", "--exclude-standard",
+  "--ignored|-i", "-z", "--stage|-s", "--full-name", "--directory", "--error-unmatch",
+]
+marks.read = ["files"]
+
+[commands.git.ls-tree]
+arguments = ["tree", "files...", "-r", "-t", "-d", "--name-only", "--long|-l", "-z", "--full-name", "--full-tree"]
+marks.read = ["files"]
+
+[commands.git.grep]
+arguments = [
+  ["pattern", "--regexp|-e:", "file=-f:"], "files...",
+  "--after-context|-A:", "--before-context|-B:", "--context|-C:", "--max-count|-m:",
+  "--line-number|-n", "--ignore-case|-i", "--files-with-matches|-l", "--word-regexp|-w",
+  "--invert-match|-v", "--count|-c", "--extended-regexp|-E", "--fixed-strings|-F",
+  "--perl-regexp|-P", "--cached", "--untracked", "--no-index", "-h", "with_filename=-H", "--heading", "--break",
+  "--show-function|-p",
+]
+marks.read = ["files", "file"]
+
+[commands.git.shortlog]
+arguments = ["revisions...", "--summary|-s", "--numbered|-n", "--email|-e", "--all"]
+
+[commands.git.rev-parse]
+arguments = [
+  "revisions...", "--show-toplevel", "--abbrev-ref", "show_git_dir=--git-dir", "--short", "--verify",
+  "--quiet|-q", "--is-inside-work-tree", "--show-prefix", "--show-cdup", "--absolute-git-dir",
+  "--symbolic-full-name", "--git-common-dir", "--is-bare-repository",
+]
+
+[commands.git.describe]
+arguments = ["commits...", "--tags", "--always", "--dirty", "--long", "--abbrev", "--all", "--exact-match", "--contains"]
+
+[commands.git.cat-file]
+arguments = ["objects...", "-t", "-s", "-p", "-e"]
+
+[commands.git.log]
+arguments = [
+  "files...",
+  "--output:",
+  "find_copies=-C", "combined=-c",                    # log's own -C, not git's -C <dir>
+  "--max-count|-n:", "--skip:", "--since|--after:", "--until|--before:", "--author:", "--committer:",
+  "--grep:", "pickaxe_regex=-G:", "pickaxe=-S:", "line_range=-L:", "--format:", "--date:",
+  "--oneline", "--graph", "--stat", "--all", "--decorate", "--no-decorate", "--patch|-p",
+  "--no-patch|-s", "--name-only", "--name-status", "--no-merges", "--merges", "--reverse",
+  "--first-parent", "--follow", "--abbrev-commit", "--shortstat", "--numstat", "--summary",
+  "--pretty", "--color", "--no-color", "--topo-order", "--date-order", "--left-right",
+  "--branches", "--tags", "--remotes", "--source", "--regexp-ignore-case|-i",
+]
+argument.max_count.dash = true                        # git log -5 is --max-count 5
+marks.read = ["files"]
+marks.write = ["output"]
+
+[commands.git.diff]
+arguments = [
+  "files...", "--output:", "find_copies=-C", "pickaxe_regex=-G:", "pickaxe=-S:", "--diff-filter:",
+  "--stat", "--cached|--staged", "--name-only", "--name-status", "--patch|-p", "--numstat",
+  "--shortstat", "--summary", "--color", "--no-color", "--ignore-all-space|-w", "--word-diff",
+  "--check", "reverse=-R", "--exit-code", "--quiet", "--no-index", "--relative", "--no-renames",
+]
+marks.read = ["files"]
+marks.write = ["output"]
+
+[commands.git.show]
+arguments = [
+  "files...", "--output:", "--format:", "--stat", "--name-only", "--name-status", "--oneline",
+  "--patch|-p", "--no-patch|-s", "--pretty", "--color", "--no-color", "--abbrev-commit",
+  "--summary", "--shortstat", "--numstat", "--quiet",
+]
+marks.read = ["files"]
+marks.write = ["output"]
+
+[commands.git.commit]
+arguments = [
+  "--file|-F:", "--template|-t:", "--message|-m:", "--reuse-message|-C:", "--reedit-message|-c:",
+  "--author:", "--date:", "--fixup:", "--squash:", "--trailer:",
+]
+marks.read = ["file", "template"]
+
+[commands.git.config]
+arguments = [
+  "names...", "--file|-f:", "--type:", "--default:", "--blob:",
+  "--list|-l", "--get", "--get-all", "--get-regexp",
+  "--unset", "--unset-all", "--add", "--replace-all", "--edit|-e", "--rename-section", "--remove-section",
+  "--global", "--local", "--system", "--worktree", "--show-origin", "--show-scope", "--name-only",
+  "--null|-z", "--includes", "--no-includes",
+]
+marks.read = ["file"]
+
+[commands.git.branch]
+arguments = [
+  "names...",
+  "--list|-l", "--delete|-d", "force_delete=-D", "--move|-m", "force_move=-M", "--copy|-c", "force_copy=-C",
+  "--unset-upstream", "--edit-description", "--set-upstream-to|-u:",
+  "--contains:", "--no-contains:", "--merged:", "--no-merged:", "--points-at:", "--sort:", "--format:",
+  "--all|-a", "--remotes|-r", "--verbose|-v", "--show-current", "--column", "--no-column",
+  "--ignore-case|-i",
+]
+
+[commands.git.tag]
+arguments = [
+  "names...", "--list|-l", "--delete|-d", "--file|-F:", "--message|-m:", "--local-user|-u:",
+  "--contains:", "--no-contains:", "--merged:", "--no-merged:", "--points-at:", "--sort:", "--format:",
+  "lines=-n", "--column", "--ignore-case|-i",
+]
+marks.read = ["file"]
+
+[commands.git.remote]
+arguments = ["subcommand", "names...", "--verbose|-v"]
+argument.subcommand.words = [
+  "add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "show", "get-url",
+  "prune", "update",
+]
+
+[commands.git.stash]
+arguments = ["subcommand", "names..."]
+argument.subcommand.words = [
+  "list", "show", "push", "pop", "apply", "drop", "clear", "branch", "create", "store",
+]
+global = ["--patch|-p", "--stat", "--name-only", "--include-untracked|-u", "--quiet|-q"]   # after the word
+
+[commands.git.reflog]
+arguments = ["subcommand", "names..."]
+argument.subcommand.words = ["show", "expire", "delete", "exists"]
+
+[commands.git.push]
+arguments = [
+  "repository", "refspecs...",
+  "--force|-f", "--force-with-lease", "--force-if-includes", "--delete|-d", "--mirror", "--prune",
+  "--push-option|-o:", "--repo:", "--receive-pack:", "--exec:",
+]
+
+[commands.git.reset]
+arguments = ["--soft", "--mixed", "--hard", "--merge", "--keep"]
+
+[commands.git.clean]
+arguments = ["--force|-f", "--exclude|-e:"]
+
+[commands.cargo]
+parser = "gnu"
+arguments = ["toolchain", "dir=-C:", "subcommand", "rest..."]
+argument.toolchain.match = "+*"
+argument.dir.default = ["."]                          # cargo reads the package of its directory
+argument.subcommand.words = [
+  "build", "check", "test", "run", "bench", "doc", "clippy", "fmt", "clean", "update", "add",
+  "remove", "tree", "metadata", "search", "uninstall", "publish", "new", "init", "fetch", "fix",
+  "vendor", "package", "login", "logout", "owner", "yank",
+]
+global = [                                            # subcommand options come after the word
+  "--config:", "unstable=-Z:", "--color:", "--manifest-path:", "--target-dir:",
+  "--package|-p:", "--features|-F:", "--target:", "--bin:", "--example:", "--test:", "--bench:",
+  "--jobs|-j:", "--profile:", "--message-format:",
+  "--release|-r", "--all-targets", "--all-features", "--no-default-features", "--workspace", "--all",
+  "--lib", "--bins", "--tests", "--benches", "--examples", "--doc", "--no-run", "--no-fail-fast",
+  "--keep-going", "--locked", "--offline", "--frozen", "--verbose|-v", "--quiet|-q",
+]
+marks.cwd = ["dir"]
+marks.read = ["manifest_path"]
+marks.write = ["target_dir"]
+
+[commands.cargo.install]
+arguments = ["crates...", "--path:", "--root:", "--git:", "--version:"]
+marks.read = ["path"]
+marks.write = ["root"]
+
+[commands.apt]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "purge", "autoremove", "update", "upgrade", "full-upgrade", "search",
+  "show", "list", "policy",
+]
+global = ["--config-file|-c:", "--option|-o:"]        # options come before or after the word
+marks.read = ["config_file"]
+
+[commands.apt-get]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "purge", "autoremove", "update", "upgrade", "dist-upgrade", "source",
+  "build-dep", "clean", "autoclean", "check",
+]
+global = ["--config-file|-c:", "--option|-o:"]
+marks.read = ["config_file"]
+
+[commands.dnf]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "erase", "autoremove", "update", "upgrade", "search", "info", "list",
+]
+
+[commands.yum]
+parser = "gnu"
+arguments = ["subcommand", "packages..."]
+argument.subcommand.words = [
+  "install", "remove", "erase", "autoremove", "update", "upgrade", "search", "info", "list",
+]
+
+[commands.pacman]
+parser = "gnu"
+arguments = [
+  "targets...", "--sync|-S", "--remove|-R", "--query|-Q", "--upgrade|-U", "--database|-D",
+  "--files|-F", "--deptest|-T",
+]
+
+[commands.systemctl]
+parser = "gnu"
+arguments = ["subcommand", "units..."]
+argument.subcommand.words = [
+  "status", "start", "stop", "restart", "reload", "enable", "disable", "mask", "unmask",
+  "is-active", "is-enabled", "list-units", "daemon-reload", "show", "cat",
+]
+global = [                                            # options come before or after the word
+  "--host|-H:", "--machine|-M:", "--property|-p:", "--type|-t:", "--signal|-s:", "--lines|-n:",
+  "--output|-o:", "--state:",
+]
+
+# --- Infrastructure: each grammar names only the local forms a rule lets through ---
+
+[commands.kubectl]
+parser = { name = "gnu", short_equals = true }
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["kustomize"]
+global = ["--namespace|-n:", "--context:", "--kubeconfig:", "--cluster:", "--user:"]
+
+[commands.kubectl.create]
+# A bare `--dry-run` is kubectl's client dry run and leaves the next word an
+# operand; this reads `--dry-run client` as the value, which is also client.
+arguments = ["operands...", "--dry-run:", "--output|-o:", "--filename|-f:", "--image:"]
+
+[commands.helm]
+parser = { name = "gnu", short_equals = true }
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["template", "lint", "show", "create", "package", "version"]
+global = ["--namespace|-n:", "--kube-context:", "--kubeconfig:", "--debug"]
+
+[commands.terraform]
+parser = "gnu"                                        # `-chdir=` reads as Unknown flags
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["fmt", "validate", "version"]
+
+[commands.tofu]
+parser = "gnu"
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["fmt", "validate", "version"]
+
+# =============================================================================
+# Rules: code from text (deny)
+# =============================================================================
 
 [[rules]]
-description = "eval"
-when = 'command.name == "eval"'
+id = "eval"
+via = ["tmux", "bash"]
+command = "eval"
 action = "deny"
 message = "eval executes arbitrary strings"
 
 [[rules]]
-description = "source"
-when = 'command.name in ["source", "."]'
+id = "source"
+via = ["tmux", "bash"]
+command = "source"
 action = "deny"
 message = "source executes file contents"
 
 [[rules]]
-description = "exec"
-when = 'command.name == "exec"'
+id = "dot-source"
+via = ["tmux", "bash"]
+command = "."
+action = "deny"
+message = "source executes file contents"
+
+[[rules]]
+id = "exec"
+via = ["tmux", "bash"]
+command = "exec"
 action = "deny"
 message = "exec replaces the shell process"
 
 [[rules]]
-description = "pipe to shell"
-when = 'command.name in ["bash","sh","zsh","dash","ksh","csh","tcsh","fish"] && command.is_pipe_target'
+id = "sh-reads-stdin"
+via = ["tmux", "bash"]
+command = "sh"
+when = 'args.command == [] && args.file == null'
 action = "deny"
-message = "piping to a shell interpreter can execute arbitrary code"
-
-# --- Directory changes (ask, with cwd capture) ---
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
 
 [[rules]]
-description = "cd/pushd/popd"
-when = 'command.name in ["cd", "pushd", "popd"]'
+id = "bash-reads-stdin"
+via = ["tmux", "bash"]
+command = "bash"
+when = 'args.command == [] && args.file == null'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
+
+[[rules]]
+id = "dash-reads-stdin"
+via = ["tmux", "bash"]
+command = "dash"
+when = 'args.command == [] && args.file == null'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
+
+[[rules]]
+id = "zsh-reads-stdin"
+via = ["tmux", "bash"]
+command = "zsh"
+when = 'args.command == [] && args.file == null'
+action = "deny"
+message = "dynamic command dispatch isn't allowed: with neither -c nor a script file, the shell runs what it reads from standard input"
+
+[[rules]]
+id = "git-config-command"
+via = ["tmux", "bash"]
+command = "git"
+when = 'args.config != [] || args.config_env != [] || args.exec_path'
+action = "deny"
+message = "git -c and --exec-path can set a command to run (core.pager, core.sshCommand, …); set it in the repository's config instead"
+
+# =============================================================================
+# Rules: lints (deny, with a message that says how to fix the command)
+# =============================================================================
+
+# A command at the end of a pipeline: `command.op_before == "|"` and nothing piped on.
+
+[[rules]]
+id = "pipe-to-tail"
+command = "tail"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to tail — use the tail parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", tail={{ or(last(args.lines), "20") }})
+
+This preserves full output in history. Use command_read(search=...) to search it later.'''
+
+[[rules]]
+id = "pipe-to-head"
+command = "head"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to head — use the head parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", head={{ or(last(args.lines), "20") }})
+
+This preserves full output in history. Use command_read(search=...) to search it later.'''
+
+[[rules]]
+id = "pipe-to-grep"
+command = "grep"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to grep — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-egrep"
+command = "egrep"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to egrep — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-fgrep"
+command = "fgrep"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to fgrep — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-rg"
+command = "rg"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to rg — use the search parameter instead.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}", search="{{ or(args.pattern, or(last(args.regexp), "pattern")) }}")
+
+search supports full regex. This preserves full output for multiple different searches.'''
+
+[[rules]]
+id = "pipe-to-tee"
+command = "tee"
+when = 'command.top && command.op_before == "|" && command.op_after != "|"'
+action = "deny"
+message = '''
+Don't pipe to tee — output is already saved in command history.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}")
+
+Use command_read to access full output as many times as needed.'''
+
+# echo/printf of `$?` as the line's last command, alone in its pipeline, with no redirect (which
+# would keep the value somewhere).
+
+[[rules]]
+id = "echo-status"
+when = '''
+  command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
+  && command.op_after == null && command.op_before != null && command.op_before != "|"
+'''
+action = "deny"
+message = '''
+Don't echo $? — command_run already reports each command's exit code.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}")
+
+The exit status of the last command is captured and shown automatically; reading it back with echo just duplicates it. To branch on the status, use it directly (e.g. `cmd && on_success || on_failure`).'''
+
+[[rules]]
+id = "echo-status-alone"
+when = '''
+  command.top && command.name in ["echo", "printf"] && "?" in command.expands && command.redirects == []
+  && command.op_before == null && command.op_after == null
+'''
+action = "deny"
+message = '''
+Don't re-run a command to read $? — use the command_history tool.
+
+Rejected:    command_run(command="{{ line }}")
+
+command_history lists recent commands with their exit codes, captured directly when each command finished. A bare `echo $?` in a new command_run is fragile: the shell prompt runs between runs and can reset $?.'''
+
+# A constant echo/printf: a progress marker that runs unconditionally, or a success marker that
+# only restates the exit code. `|| echo fail` changes the exit code, so it passes.
+
+[[rules]]
+id = "constant-echo"
+when = '''
+  command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
+  && !(command.op_before in ["|", "&&", "||"]) && command.op_after != "|"
+'''
+action = "deny"
+message = '''
+Don't run echo/printf with only constant text — its output is already known.
+
+Rejected:  command_run(command="{{ line }}")
+Marker:    {{ command.text }}
+
+A top-level echo of a fixed string is almost always a leftover progress marker (e.g. "=== Building ==="). command_run tracks each command separately — output, exit code, and a command_history entry — so markers between commands add nothing. Run the real commands as separate command_run calls. To inspect a value, echo the variable itself (e.g. echo "$VAR"), which this lint allows.'''
+
+[[rules]]
+id = "constant-success-echo"
+when = '''
+  command.top && command.name in ["echo", "printf"] && command.constant && command.redirects == []
+  && command.op_before == "&&" && command.op_after == null
+'''
+action = "deny"
+message = '''
+Don't echo a constant success marker — command_run reports the exit code.
+
+Rejected:  command_run(command="{{ line }}")
+Try:       command_run(command="{{ drop(command) }}")
+
+A trailing `&& echo …` runs only when the preceding command succeeds, so it just restates the exit status that command_run already captures for the last command. Drop it — the reported exit code tells you whether the command succeeded. (`|| echo fail` isn't needed either; a non-zero exit code is shown automatically.)'''
+
+[[rules]]
+id = "stderr-to-stdout"
+when = 'command.top && command.op_after == null && "2>&1" in command.redirects'
+action = "deny"
+message = '''
+Don't redirect stderr — it's already captured.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command, "2>&1") }}")
+
+Both stdout and stderr are visible in the terminal and captured automatically.'''
+
+[[rules]]
+id = "background"
+when = 'command.top && command.op_after == "&"'
+action = "deny"
+message = '''
+Don't background commands with & — use a separate pane instead.
+
+Rejected:    command_run(command="{{ line }}")
+
+Background jobs bypass output capture and can't be monitored reliably. Use list_panes to find or create another pane and run the command there.'''
+
+# `cd <the pane's directory> && …`: the cd changes nothing. `sure`: never on an Unknown directory.
+
+[[rules]]
+id = "redundant-cd"
+command = "cd"
+when = '''
+  command.top && command.op_before == null && command.op_after in ["&&", ";"]
+  && sure(command.cwd == command.shell_cwd)
+'''
+action = "deny"
+message = '''
+Redundant cd — the pane is already in that directory.
+
+Instead of:  command_run(command="{{ line }}")
+Try:         command_run(command="{{ drop(command) }}")
+
+The pane's working directory is already {{ command.shell_cwd }}.'''
+
+# Through Bash, these run unseen and out of the user's shell history; in a pane
+# the user watches them, answers their prompts, and finds them again. A project
+# lifts one with an allow that has `via = "bash"` and exempts the rule's id.
+
+[[rules]]
+id = "prefer-tmux"
+via = "bash"
+when = 'command.name in ["cargo", "make", "npm"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, where the user can watch it:
+
+  command_run(command="{{ line }}")
+
+Use list_panes to pick the pane.'''
+
+[[rules]]
+id = "ssh-in-a-pane"
+via = "bash"
+when = 'command.name in ["ssh", "mosh"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, where the user can watch it and answer its prompts.
+A one-off remote command needs only:
+
+  command_run(command="{{ line }}")
+
+To open a session:
+
+1. command_run(command="{{ line }}", timeout_secs=0) sends it and returns.
+2. debug_pane until the remote shell's prompt shows. A password, passphrase or
+   host-key prompt is the user's to answer.
+3. inject_osc133 on the pane, so command_run can track the remote commands.
+4. list_panes: the pane's Cwd names the remote host and Integration is confirmed.
+
+Then run commands in that pane with command_run.'''
+
+[[rules]]
+id = "transfer-in-a-pane"
+via = "bash"
+when = 'command.name in ["scp", "sftp", "rsync"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, where the user can watch the transfer:
+
+  command_run(command="{{ line }}")
+
+Keep timeout_secs low and follow a long transfer with command_read. sftp's
+interactive session can't be driven by command_run; use scp or rsync.'''
+
+[[rules]]
+id = "database-in-a-pane"
+via = "bash"
+when = 'command.name in ["psql", "mysql", "mariadb", "mongosh", "redis-cli"]'
+action = "deny"
+message = '''
+Run this in a tmux pane, with the query on the command line (psql -c or -f,
+mysql -e, mongosh --eval, redis-cli's arguments):
+
+  command_run(command="{{ line }}")
+
+command_run can't drive an interactive client session.'''
+
+[[rules]]
+id = "infra-in-a-pane"
+via = "bash"
+when = '''command.name in [
+  "kubectl", "helm", "k9s", "kubectx", "kubens", "argocd", "eksctl", "terraform", "tofu",
+  "pulumi", "ansible", "ansible-playbook", "packer", "vault", "aws", "gcloud", "gsutil", "bq",
+  "az", "doctl", "flyctl",
+]'''
+action = "deny"
+message = '''
+Run this in a tmux pane: it acts with the user's credentials and context, and
+the user can watch it and find it in their history.
+
+  command_run(command="{{ line }}")
+
+A command that asks for confirmation (terraform apply) waits for the user's
+answer in the pane. Use list_panes to pick the pane.'''
+
+[[rules]]
+id = "system-switch-in-a-pane"
+via = "bash"
+when = 'command.name in ["nixos-rebuild", "home-manager", "darwin-rebuild"]'
+action = "deny"
+message = '''
+Run this in a tmux pane: it runs long and may ask for the user's sudo password
+there.
+
+  command_run(command="{{ line }}")
+
+Keep timeout_secs low and follow it with command_read.'''
+
+# What renders, formats or checks local files runs fine through Bash.
+
+[[rules]]
+id = "helm-local"
+via = "bash"
+command = "helm"
+when = 'subcommand in ["template", "lint", "show", "create", "package", "version"]'
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+[[rules]]
+id = "terraform-local"
+via = "bash"
+command = ["terraform", "tofu"]
+when = 'subcommand in ["fmt", "validate", "version"]'
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+[[rules]]
+id = "kubectl-kustomize"
+via = "bash"
+command = "kubectl kustomize"
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+[[rules]]
+id = "kubectl-client-dry-run"
+via = "bash"
+command = "kubectl create"
+when = 'args.dry_run == ["client"]'
+action = "allow"
+exempts = ["infra-in-a-pane"]
+
+# The tmux CLI reaches the panes around tmux-mcp: no command tracking, no
+# policy, and keystrokes into a shell the person may be typing in.
+
+[[rules]]
+id = "tmux-cli"
+via = "bash"
+command = "tmux"
+action = "deny"
+message = '''
+Don't drive tmux from Bash. Use the tmux-mcp tools: list_panes to find a pane,
+command_run to run in it, command_read to read output, press_key for keys.'''
+
+# =============================================================================
+# Rules: paths
+# =============================================================================
+
+[[rules]]
+id = "outside-project"
+path = '!in_project(path) && !is_device(path)'
 action = "ask"
-capture_cwd = 'path(command.args[0])'
+message = "a path outside the project"
 
-# --- Dangerous commands (ask) ---
+# =============================================================================
+# Rules: commands that change state (ask)
+# =============================================================================
 
 [[rules]]
-description = "privilege escalation"
-when = 'command.name in ["sudo", "su", "doas"]'
+id = "variable-runs-code"
+when = '''
+  variables.exists(v, v in ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV",
+                            "PROMPT_COMMAND", "PS4", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
+                            "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EDITOR",
+                            "GIT_EXEC_PATH", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "PAGER",
+                            "EDITOR", "VISUAL", "LESSOPEN", "LESSCLOSE", "PYTHONPATH", "PYTHONSTARTUP",
+                            "NODE_OPTIONS", "PERL5OPT", "RUBYOPT", "RUSTC_WRAPPER", "CARGO_TARGET_DIR"]
+                || startsWith(v, "BASH_FUNC_") || startsWith(v, "GIT_CONFIG_"))
+'''
+action = "ask"
+message = "the variable can make a later command run another program"
+
+[[rules]]
+id = "privilege-escalation"
+via = ["tmux", "bash"]
+when = 'command.name in ["su", "doas"]'
 action = "ask"
 
 [[rules]]
-description = "find dangerous flags"
-when = 'command.name == "find" && command.args.exists(a, a in ["-exec", "-execdir", "-delete", "-ok"])'
+id = "rm-r"
+via = ["tmux", "bash"]
+command = "rm"
+when = 'args.recursive'
 action = "ask"
 
 [[rules]]
-description = "rm recursive"
-when = 'command.name == "rm" && has_short_flag(command.args, "r")'
+id = "find-delete"
+via = ["tmux", "bash"]
+command = "find"
+when = 'args.delete'
 action = "ask"
 
 [[rules]]
-description = "git destructive"
-when = 'command.name == "git" && command.args.exists(a, a in ["push","reset","clean"]) && (command.args.exists(a, startsWith(a, "--force") || a == "--hard") || has_short_flag(command.args, "f") || has_short_flag(command.args, "D"))'
+id = "rg-runs-program"
+via = ["tmux", "bash"]
+command = "rg"
+when = 'args.pre != [] || args.hostname_bin != []'
+action = "ask"
+message = "--pre and --hostname-bin run the program they name"
+
+# git push: one rule per way it rewrites or deletes remote branches, so that an exemption names one.
+
+[[rules]]
+id = "git-push-force"
+via = ["tmux", "bash"]
+command = "git push"
+when = 'args.force || args.force_with_lease || args.force_if_includes || args.refspecs.exists(r, startsWith(r, "+"))'
 action = "ask"
 
 [[rules]]
-description = "disk and filesystem"
+id = "git-push-delete"
+via = ["tmux", "bash"]
+command = "git push"
+when = 'args.delete || args.refspecs.exists(r, startsWith(r, ":"))'
+action = "ask"
+
+[[rules]]
+id = "git-push-mirror"
+via = ["tmux", "bash"]
+command = "git push"
+when = 'args.mirror'
+action = "ask"
+
+[[rules]]
+id = "git-push-prune"
+via = ["tmux", "bash"]
+command = "git push"
+when = 'args.prune'
+action = "ask"
+
+[[rules]]
+id = "git-reset-hard"
+via = ["tmux", "bash"]
+command = "git reset"
+when = 'args.hard'
+action = "ask"
+
+[[rules]]
+id = "git-clean-force"
+via = ["tmux", "bash"]
+command = "git clean"
+when = 'args.force'
+action = "ask"
+
+# awk_is_plain / sed_is_plain: true only for a program that neither runs a command nor opens a
+# file of its own; anything they cannot vouch for is false.
+
+[[rules]]
+id = "awk-program"
+command = ["awk", "gawk", "mawk", "nawk"]
+when = '''
+  args.file != [] || args.program != null && !awk_is_plain(args.program)
+  || args.source.exists(p, !awk_is_plain(p))
+'''
+action = "ask"
+message = "the awk program can run a command or open a file: system(), a | pipe, a > redirect, getline < file, or a program file"
+
+[[rules]]
+id = "sed-script"
+command = "sed"
+when = '''
+  args.file != [] || args.script != null && !sed_is_plain(args.script)
+  || args.expression.exists(s, !sed_is_plain(s))
+'''
+action = "ask"
+message = "the sed script can run a command or open a file: e, s///e, w, r, or a script file"
+
+[[rules]]
+id = "disk-and-filesystem"
+via = ["tmux", "bash"]
 when = 'command.name in ["dd", "mkfs", "fdisk", "mount", "umount"]'
 action = "ask"
 
 [[rules]]
-description = "system power"
+id = "system-power"
+via = ["tmux", "bash"]
 when = 'command.name in ["reboot", "shutdown", "poweroff", "halt"]'
 action = "ask"
 
 [[rules]]
-description = "process signals"
+id = "process-signals"
 when = 'command.name in ["kill", "pkill", "killall"]'
 action = "ask"
 
+# On Bash, auto mode judges an ordinary signal; SIGKILL leaves the process no chance to clean up.
+# kill's rare `-n 9` spelling is left to auto mode.
 [[rules]]
-description = "package removal"
-when = 'command.name in ["apt","dnf","pacman","yum"] && command.args.exists(a, a in ["remove","purge","autoremove"])'
+id = "sigkill"
+via = "bash"
+command = ["kill", "pkill", "killall"]
+when = 'args.signal.exists(s, matches(s, "(?i)^(sig)?kill$|^9$"))'
+action = "ask"
+message = "SIGKILL leaves the process no chance to clean up"
+
+[[rules]]
+id = "package-remove"
+via = ["tmux", "bash"]
+command = ["apt", "apt-get", "dnf", "yum"]
+when = 'subcommand in ["remove", "purge", "erase", "autoremove"]'
 action = "ask"
 
 [[rules]]
-description = "firewall"
+id = "pacman-remove"
+via = ["tmux", "bash"]
+command = "pacman"
+when = 'args.remove'
+action = "ask"
+
+[[rules]]
+id = "firewall"
+via = ["tmux", "bash"]
 when = 'command.name in ["iptables", "ufw", "firewall-cmd"]'
 action = "ask"
 
 [[rules]]
-description = "service disruption"
-when = 'command.name == "systemctl" && command.args.exists(a, a in ["stop","disable","mask","restart"])'
+id = "service-disruption"
+via = ["tmux", "bash"]
+command = "systemctl"
+when = 'subcommand in ["stop", "disable", "mask", "restart"]'
 action = "ask"
 
 [[rules]]
-description = "xargs"
-when = 'command.name == "xargs"'
-action = "ask"
-
-[[rules]]
-description = "curl/wget"
+id = "curl-wget"
 when = 'command.name in ["curl", "wget"]'
 action = "ask"
 
 [[rules]]
-description = "awk code execution"
-when = 'command.name in ["awk","gawk","mawk","nawk"] && command.args.exists(a, contains(a, "system"))'
+id = "permissions"
+when = 'command.name in ["chmod", "chown", "chgrp"]'
+action = "ask"
+
+# On Bash, auto mode judges a single file's mode; a recursive change reaches a whole tree.
+[[rules]]
+id = "permissions-recursive"
+via = "bash"
+command = ["chmod", "chown", "chgrp"]
+when = 'args.recursive'
 action = "ask"
 
 [[rules]]
-description = "chmod"
-when = 'command.name == "chmod"'
-action = "ask"
-
-[[rules]]
-description = "chown"
-when = 'command.name == "chown"'
-action = "ask"
-
-[[rules]]
-description = "cargo install"
-when = 'command.name == "cargo" && command.args.exists(a, a == "install")'
+id = "cargo-install"
+via = ["tmux", "bash"]
+command = "cargo install"
 action = "ask"
 message = "cargo install downloads and compiles arbitrary code from crates.io"
 
-# --- Write redirect protection ---
+# =============================================================================
+# Rules: allowed (the rules above ask when these reach too far)
+# =============================================================================
 
 [[rules]]
-description = "write redirect out-of-project"
-when = 'command.write_targets.exists(t, !in_project(path(t)) && !(t in ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/stdin", "/dev/stdout", "/dev/stderr"] || startsWith(t, "/dev/fd/")))'
-action = "ask"
-message = "write redirect targets a file outside project directory"
-
-# --- Safe commands (allow) ---
-
-# Noop wrappers — these don't change security context, just scheduling/tracing.
-# Only evaluated when has_inner=false (no inner command extracted, e.g. bare "timeout").
-# When has_inner=true, these are skipped by the engine.
-[[rules]]
-description = "noop wrappers"
-when = 'command.name in ["timeout","nice","nohup","command","builtin","watch","strace"]'
+id = "info-commands"
+when = '''
+  command.name in [null, "echo", "printf", "pwd", "whoami", "hostname", "date", "uname", "id",
+                   "which", "ps", "uptime", "seq", "sleep", "true", "false", "test", "[", ":", "type",
+                   "man", "tr"]
+'''                                                   # null: a line that only assigns or redirects
 action = "allow"
 
-# Commands that don't take file paths — unrestricted
-[[rules]]
-description = "info commands"
-when = 'command.name in ["echo","printf","pwd","whoami","hostname","date","uname","id","which","ps","uptime","seq","sleep","true","false","test",":","type","man"]'
-action = "allow"
+# A command that runs an inner command is allowed; the inner command meets the rules itself, in
+# the context the outer command gives it.
 
-# File-reading tools — contained to project dir
 [[rules]]
-description = "file readers (in-project)"
-when = 'command.name in ["cat","head","tail","less","wc","file","stat","realpath","diff","base64","md5sum","sha256sum"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
-action = "allow"
-
-# Search/list tools — contained to project dir
-[[rules]]
-description = "search tools (in-project)"
-when = 'command.name in ["ls","grep","rg","find","fd","tree","sort","uniq"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
-action = "allow"
-
-# File-write tools — contained to project dir
-[[rules]]
-description = "file ops (in-project)"
-when = 'command.name in ["mkdir","cp","mv","touch","ln","rm","chmod","sed","awk","cut","tr","tee"] && command.args.all(a, startsWith(a, "-") || in_project(path(a)))'
-action = "allow"
-
-# Dev tools — no path restriction (they manage their own paths)
-[[rules]]
-description = "cargo"
-when = 'command.name == "cargo"'
+id = "wrappers-and-export"
+when = 'command.name in ["timeout", "nice", "nohup", "xargs", "env", "export"]'
 action = "allow"
 
 [[rules]]
-description = "git read-only"
-when = 'command.name == "git" && command.args.exists(a, a in ["status","log","diff","show","branch","tag","remote","config","ls-files","ls-tree","rev-parse","describe","shortlog","blame","reflog"])'
+id = "sudo-with-command"
+command = "sudo"
+when = 'args.command != [] && !args.edit && !args.shell && !args.login'
 action = "allow"
 
-# --- Wrapper definitions ---
-# These drive the generic extraction engine in parse.rs.
-# First matching wrapper wins (ordered by order → source → file position).
+# -o and -F can set a ProxyCommand, which runs on this machine.
+[[rules]]
+id = "ssh-with-command"
+command = "ssh"
+when = 'args.command != [] && args.option == [] && args.config == []'
+action = "allow"
 
-# Transparent passthrough (no getopt needed)
+[[rules]]
+id = "shell-c"
+command = ["sh", "bash", "dash", "zsh"]
+when = 'args.command != []'
+action = "allow"
 
-[[wrappers]]
-name = "command/builtin"
-when = 'command.name in ["command","builtin"]'
-inner = 'command.args'
+[[rules]]
+id = "cd-pushd-popd"
+when = 'command.name in ["cd", "pushd", "popd"]'
+action = "allow"
 
-[[wrappers]]
-name = "nohup"
-when = 'command.name == "nohup"'
-inner = 'command.args'
+[[rules]]
+id = "file-tools"
+when = '''
+  command.name in ["cat", "less", "more", "wc", "file", "stat", "realpath", "readlink", "diff",
+                   "base64", "md5sum", "sha256sum", "uniq", "head", "tail", "ls", "tree", "cut", "sort",
+                   "grep", "egrep", "fgrep", "rg", "find", "mkdir", "rmdir", "touch", "tee", "cp", "mv",
+                   "ln", "rm", "sed", "awk", "gawk", "mawk", "nawk"]
+'''
+action = "allow"
 
-# Skip-flags (getopt field, inner = operands)
+[[rules]]
+id = "cargo"
+command = "cargo"
+action = "allow"
 
-[[wrappers]]
-name = "nice"
-when = 'command.name == "nice"'
-getopt = "n:"
-inner = 'command.getopt.operands'
+[[rules]]
+id = "git-reads"
+command = "git"
+when = '''
+  subcommand in ["status", "log", "diff", "show", "shortlog", "blame", "ls-files", "ls-tree",
+                 "rev-parse", "describe", "cat-file", "grep"]
+'''
+action = "allow"
 
-[[wrappers]]
-name = "strace"
-when = 'command.name == "strace"'
-getopt = "e:s:o:p:"
-inner = 'command.getopt.operands'
+[[rules]]
+id = "git-remote-listings"
+command = "git remote"
+when = 'subcommand in [null, "show", "get-url"]'
+action = "allow"
 
-[[wrappers]]
-name = "watch"
-when = 'command.name == "watch"'
-getopt = "n:"
-inner = 'command.getopt.operands'
+[[rules]]
+id = "git-stash-listings"
+command = "git stash"
+when = 'subcommand in ["list", "show"]'
+action = "allow"
 
-# Skip-flags + skip positionals
+[[rules]]
+id = "git-reflog-listings"
+command = "git reflog"
+when = 'subcommand in [null, "show"]'
+action = "allow"
 
-[[wrappers]]
-name = "timeout"
-when = 'command.name == "timeout"'
-getopt = { short = "s:k:", long = ["signal:", "kill-after:"] }
-inner = 'command.getopt.operands_from(1)'
+[[rules]]
+id = "git-branch-listings"
+command = "git branch"
+when = '''
+  (args.list || args.names == [])
+  && !(args.delete || args.force_delete || args.move || args.force_move || args.copy || args.force_copy
+       || args.unset_upstream || args.edit_description || args.set_upstream_to != [])
+'''
+action = "allow"
 
-# Privilege escalation
+[[rules]]
+id = "git-tag-listings"
+command = "git tag"
+when = '(args.list || args.names == []) && !args.delete'
+action = "allow"
 
-[[wrappers]]
-name = "sudo"
-when = 'command.name == "sudo"'
-getopt = "isC:D:g:r:t:U:u:"
-inner = 'command.getopt.operands'
-capture_user = 'or(command.getopt.value("-u"), "root")'
-changes_cwd = true
-
-[[wrappers]]
-name = "doas"
-when = 'command.name == "doas"'
-getopt = "u:"
-inner = 'command.getopt.operands'
-capture_user = 'or(command.getopt.value("-u"), "root")'
-
-[[wrappers]]
-name = "su"
-when = 'command.name == "su" && command.args.exists(a, a == "-c")'
-getopt = "c:"
-inner = 'command.getopt.value("-c")'
-capture_user = 'or(command.getopt.positional(0), "root")'
-
-# Remote execution
-
-[[wrappers]]
-name = "ssh"
-when = 'command.name == "ssh"'
-getopt = "b:c:D:E:e:F:I:i:J:L:l:m:O:o:p:Q:R:S:W:w:"
-inner = 'command.getopt.operands_from(1)'
-capture_host = 'rsplit(command.getopt.positional(0), "@", 2)[1]'
-capture_user = 'rsplit(command.getopt.positional(0), "@", 2)[0]'
-changes_cwd = true
-
-# Container/kubectl exec — GNU mode (pflag/cobra)
-# "exec" is an operand: operands = [exec, container/pod, cmd...]
-
-[[wrappers]]
-name = "container exec"
-when = 'command.name in ["podman","docker"] && command.args.exists(a, a == "exec")'
-getopt_gnu = { short = "e:u:w:", long = ["env:", "user:", "workdir:"] }
-inner = 'command.getopt.operands_from(2)'
-capture_host = 'command.getopt.positional(1)'
-changes_cwd = true
-
-[[wrappers]]
-name = "kubectl exec"
-when = 'command.name == "kubectl" && command.args.exists(a, a == "exec")'
-getopt_gnu = { short = "n:c:", long = ["namespace:", "container:"] }
-inner = 'command.getopt.operands_from(2)'
-capture_host = 'command.getopt.positional(1)'
-changes_cwd = true
-
-# Shell eval (inner is String -> engine reparses)
-
-[[wrappers]]
-name = "shell eval"
-when = 'command.name in ["sh","bash","zsh","dash"] && command.args.exists(a, a == "-c")'
-getopt = "c:"
-inner = 'command.getopt.value("-c")'
-
-# Delegating (args_complete=false)
-
-[[wrappers]]
-name = "find exec"
-when = 'command.name == "find" && command.args.exists(a, a in ["-exec","-execdir","-ok","-okdir"])'
-inner = 'split_at(command.args, ["-exec","-execdir","-ok","-okdir"]).filter(g, g[0] in ["-exec","-execdir","-ok","-okdir"]).map(g, take_until(slice(g, 1), [";","+"]))'
-args_complete = false
-
-[[wrappers]]
-name = "xargs"
-when = 'command.name == "xargs"'
-getopt = "d:I:L:n:P:s:E:"
-inner = 'command.getopt.operands'
-args_complete = false
-
-# Environment — shell puts FOO=bar in prefix, not args, so we can't distinguish
-# env-with-vars from bare env via args alone. Always evaluate both.
-
-# env with -C/--chdir: cwd changes for inner commands
-[[wrappers]]
-name = "env chdir"
-when = 'command.name == "env" && command.args.exists(a, a == "-C" || startsWith(a, "--chdir"))'
-getopt = "u:S:C:"
-inner = 'command.getopt.operands'
-changes_cwd = true
-skip_wrapper = false
-order = -1
-
-# env without -C: inherits cwd
-[[wrappers]]
-name = "env"
-when = 'command.name == "env"'
-getopt = "u:S:"
-inner = 'command.getopt.operands'
-skip_wrapper = false
+[[rules]]
+id = "git-config-reads"
+command = "git config"
+when = '''
+  !(args.unset || args.unset_all || args.add || args.replace_all || args.edit
+    || args.rename_section || args.remove_section)
+  && (args.list || args.get || args.get_all || args.get_regexp
+      || args.names.size() == 1 || args.names.size() > 0 && args.names[0] in ["get", "list"])
+'''
+action = "allow"

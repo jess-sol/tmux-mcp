@@ -6,7 +6,6 @@
 /// (pane_id, window_id) are accessible without locking, while mutable
 /// state (processor, pid, position) is behind a per-pane Mutex.
 /// The registry itself is wrapped in an RwLock by the daemon.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -72,19 +71,22 @@ pub enum SyncAction {
     /// Pane gone. Caller must disable `%output`.
     PaneRemoved { pane_id: String },
     /// Dimensions changed. VTE already resized. Informational.
-    Resized { pane_id: String, width: usize, height: usize },
+    Resized {
+        pane_id: String,
+        width: usize,
+        height: usize,
+    },
 }
 
 /// Manages all tracked panes across the session.
+#[derive(Default)]
 pub struct PaneRegistry {
     panes: HashMap<String, PaneHandle>,
 }
 
 impl PaneRegistry {
     pub fn new() -> Self {
-        Self {
-            panes: HashMap::new(),
-        }
+        Self::default()
     }
 
     // --- Public lookup API (called under read lock) ---
@@ -131,14 +133,19 @@ impl PaneRegistry {
             .collect();
 
         // Remove tracked panes in this window that aren't in the layout
-        let dead: Vec<String> = self.panes
+        let dead: Vec<String> = self
+            .panes
             .iter()
-            .filter(|(_, h)| h.window_id == window_id && !layout_ids.contains_key(h.pane_id.as_str()))
+            .filter(|(_, h)| {
+                h.window_id == window_id && !layout_ids.contains_key(h.pane_id.as_str())
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &dead {
             self.panes.remove(id);
-            actions.push(SyncAction::PaneRemoved { pane_id: id.clone() });
+            actions.push(SyncAction::PaneRemoved {
+                pane_id: id.clone(),
+            });
         }
 
         // Add new panes, update existing
@@ -174,7 +181,9 @@ impl PaneRegistry {
                     run: Mutex::new(()),
                 };
                 self.panes.insert(pane_id.clone(), Arc::new(tracked));
-                actions.push(SyncAction::PaneAdded { pane_id: pane_id.clone() });
+                actions.push(SyncAction::PaneAdded {
+                    pane_id: pane_id.clone(),
+                });
             }
         }
 
@@ -190,7 +199,8 @@ impl PaneRegistry {
 
     /// Remove all panes in a window. Returns `PaneRemoved` actions.
     pub fn remove_window(&mut self, window_id: &str) -> Vec<SyncAction> {
-        let dead: Vec<String> = self.panes
+        let dead: Vec<String> = self
+            .panes
             .iter()
             .filter(|(_, h)| h.window_id == window_id)
             .map(|(id, _)| id.clone())
@@ -210,7 +220,13 @@ mod tests {
     use super::*;
 
     fn lp(pane_number: u32, width: usize, height: usize, x: usize, y: usize) -> LayoutPane {
-        LayoutPane { pane_number, width, height, x, y }
+        LayoutPane {
+            pane_number,
+            width,
+            height,
+            x,
+            y,
+        }
     }
 
     fn has_action(actions: &[SyncAction], expected: &SyncAction) -> bool {
@@ -220,24 +236,39 @@ mod tests {
     #[tokio::test]
     async fn adds_new_panes() {
         let mut reg = PaneRegistry::new();
-        let actions = reg.apply_layout("@1", &[
-            lp(0, 80, 24, 0, 0),
-            lp(1, 80, 24, 0, 25),
-        ]).await;
+        let actions = reg
+            .apply_layout("@1", &[lp(0, 80, 24, 0, 0), lp(1, 80, 24, 0, 25)])
+            .await;
         assert_eq!(actions.len(), 2);
-        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%0".into() }));
-        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%1".into() }));
+        assert!(has_action(
+            &actions,
+            &SyncAction::PaneAdded {
+                pane_id: "%0".into()
+            }
+        ));
+        assert!(has_action(
+            &actions,
+            &SyncAction::PaneAdded {
+                pane_id: "%1".into()
+            }
+        ));
         assert_eq!(reg.len(), 2);
     }
 
     #[tokio::test]
     async fn removes_dead_panes() {
         let mut reg = PaneRegistry::new();
-        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)]).await;
+        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)])
+            .await;
         assert_eq!(reg.len(), 2);
 
         let actions = reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
-        assert!(has_action(&actions, &SyncAction::PaneRemoved { pane_id: "%2".into() }));
+        assert!(has_action(
+            &actions,
+            &SyncAction::PaneRemoved {
+                pane_id: "%2".into()
+            }
+        ));
         assert_eq!(reg.len(), 1);
     }
 
@@ -247,9 +278,14 @@ mod tests {
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
 
         let actions = reg.apply_layout("@1", &[lp(1, 120, 40, 0, 0)]).await;
-        assert!(has_action(&actions, &SyncAction::Resized {
-            pane_id: "%1".into(), width: 120, height: 40,
-        }));
+        assert!(has_action(
+            &actions,
+            &SyncAction::Resized {
+                pane_id: "%1".into(),
+                width: 120,
+                height: 40,
+            }
+        ));
 
         let handle = reg.get_handle("%1").unwrap();
         let state = handle.lock().await;
@@ -287,7 +323,12 @@ mod tests {
         assert_eq!(reg.len(), 2);
 
         let actions = reg.apply_layout("@1", &[]).await;
-        assert!(has_action(&actions, &SyncAction::PaneRemoved { pane_id: "%1".into() }));
+        assert!(has_action(
+            &actions,
+            &SyncAction::PaneRemoved {
+                pane_id: "%1".into()
+            }
+        ));
         assert_eq!(reg.len(), 1);
         assert!(reg.get_handle("%2").is_some());
     }
@@ -295,7 +336,8 @@ mod tests {
     #[tokio::test]
     async fn remove_window_clears_all() {
         let mut reg = PaneRegistry::new();
-        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)]).await;
+        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)])
+            .await;
         reg.apply_layout("@2", &[lp(3, 80, 24, 0, 0)]).await;
         assert_eq!(reg.len(), 3);
 
@@ -326,15 +368,30 @@ mod tests {
         let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
 
-        reg.get_handle("%1").unwrap().lock().await.processor.process_chunk(b"hello world");
+        reg.get_handle("%1")
+            .unwrap()
+            .lock()
+            .await
+            .processor
+            .process_chunk(b"hello world");
         assert_eq!(
-            reg.get_handle("%1").unwrap().lock().await.processor.screen_line_text(0),
+            reg.get_handle("%1")
+                .unwrap()
+                .lock()
+                .await
+                .processor
+                .screen_line_text(0),
             "hello world"
         );
 
         reg.apply_layout("@1", &[lp(1, 120, 24, 0, 0)]).await;
         assert_eq!(
-            reg.get_handle("%1").unwrap().lock().await.processor.screen_line_text(0),
+            reg.get_handle("%1")
+                .unwrap()
+                .lock()
+                .await
+                .processor
+                .screen_line_text(0),
             "hello world"
         );
     }
@@ -349,17 +406,35 @@ mod tests {
     async fn multi_window_lifecycle() {
         let mut reg = PaneRegistry::new();
 
-        reg.apply_layout("@1", &[lp(1, 100, 50, 0, 0), lp(2, 99, 50, 101, 0)]).await;
+        reg.apply_layout("@1", &[lp(1, 100, 50, 0, 0), lp(2, 99, 50, 101, 0)])
+            .await;
         reg.apply_layout("@2", &[lp(3, 80, 24, 0, 0)]).await;
         assert_eq!(reg.len(), 3);
 
-        let actions = reg.apply_layout("@1", &[
-            lp(1, 100, 50, 0, 0),
-            lp(2, 99, 25, 101, 0),
-            lp(4, 99, 24, 101, 26),
-        ]).await;
-        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%4".into() }));
-        assert!(has_action(&actions, &SyncAction::Resized { pane_id: "%2".into(), width: 99, height: 25 }));
+        let actions = reg
+            .apply_layout(
+                "@1",
+                &[
+                    lp(1, 100, 50, 0, 0),
+                    lp(2, 99, 25, 101, 0),
+                    lp(4, 99, 24, 101, 26),
+                ],
+            )
+            .await;
+        assert!(has_action(
+            &actions,
+            &SyncAction::PaneAdded {
+                pane_id: "%4".into()
+            }
+        ));
+        assert!(has_action(
+            &actions,
+            &SyncAction::Resized {
+                pane_id: "%2".into(),
+                width: 99,
+                height: 25
+            }
+        ));
         assert_eq!(reg.len(), 4);
 
         let actions = reg.remove_window("@2");

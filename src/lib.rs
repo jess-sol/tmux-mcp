@@ -1,6 +1,5 @@
 pub mod client;
 pub mod daemon;
-pub mod lint;
 pub mod mcp;
 pub mod pane;
 pub mod parse;

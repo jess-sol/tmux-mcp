@@ -1,6 +1,5 @@
 /// MCP server: exposes tmux tools over stdio using rmcp.
 /// Forwards tool calls to the daemon over the Unix socket client.
-
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
@@ -32,21 +31,40 @@ impl TmuxMcp {
 pub struct CommandRunParams {
     #[schemars(description = "Target pane ID (e.g. \"%0\")")]
     pub pane_id: String,
-    #[schemars(description = "Shell command to execute")]
+    #[schemars(
+        description = "One shell command, written as a runbook step a sysadmin will read, verify and run: \
+                       expressive and obviously correct. It lands in the person's shell history. \
+                       Don't echo status or pipe into head/tail/grep."
+    )]
     pub command: String,
-    #[schemars(description = "Timeout in seconds (default 30)")]
+    #[schemars(
+        description = "Seconds to wait before returning (default 5). Err low: on timeout the command \
+                       keeps running, and command_read continues from where this left off."
+    )]
     pub timeout_secs: Option<i64>,
-    #[schemars(description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail.")]
+    #[schemars(
+        description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail."
+    )]
     pub next: Option<i64>,
-    #[schemars(description = "Show first N lines. Returns as soon as the first N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with next/tail.")]
+    #[schemars(
+        description = "Show first N lines. Returns as soon as the first N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with next/tail."
+    )]
     pub head: Option<i64>,
-    #[schemars(description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head.")]
+    #[schemars(
+        description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head."
+    )]
     pub tail: Option<i64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern. Applied before next/head/tail, which then count matching lines: search=\"a\" with next=3 shows the next three matches, not the matches within the next three lines. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
+    #[schemars(
+        description = "Filter output to lines matching this regex pattern. Applied before next/head/tail, which then count matching lines: search=\"a\" with next=3 shows the next three matches, not the matches within the next three lines. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class)."
+    )]
     pub search: Option<String>,
-    #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
+    #[schemars(
+        description = "Lines of context before each search match (like grep -B). Requires search."
+    )]
     pub before: Option<i64>,
-    #[schemars(description = "Lines of context after each search match (like grep -A). Requires search.")]
+    #[schemars(
+        description = "Lines of context after each search match (like grep -A). Requires search."
+    )]
     pub after: Option<i64>,
 }
 
@@ -58,17 +76,29 @@ pub struct CommandReadParams {
     pub command_id: Option<i64>,
     #[schemars(description = "Timeout in seconds — how long to wait for new output (default 5)")]
     pub timeout_secs: Option<i64>,
-    #[schemars(description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail.")]
+    #[schemars(
+        description = "Show next N lines from cursor (advances cursor). Returns as soon as N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with head/tail."
+    )]
     pub next: Option<i64>,
-    #[schemars(description = "Show first N lines. Returns as soon as the first N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with next/tail.")]
+    #[schemars(
+        description = "Show first N lines. Returns as soon as the first N lines are available — with `search`, as soon as N matches accumulate — and the command keeps running. Mutually exclusive with next/tail."
+    )]
     pub head: Option<i64>,
-    #[schemars(description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head.")]
+    #[schemars(
+        description = "Show last N lines. Waits for the command to complete (or timeout) before returning. Mutually exclusive with next/head."
+    )]
     pub tail: Option<i64>,
-    #[schemars(description = "Filter output to lines matching this regex pattern. Applied before next/head/tail, which then count matching lines: search=\"a\" with next=3 shows the next three matches, not the matches within the next three lines. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class).")]
+    #[schemars(
+        description = "Filter output to lines matching this regex pattern. Applied before next/head/tail, which then count matching lines: search=\"a\" with next=3 shows the next three matches, not the matches within the next three lines. With next, non-matching lines are still consumed from the cursor. Use standard regex with normal JSON string escaping — one backslash in the JSON string reaches the regex engine as-is. Examples: \"error|warn\" (alternation), \"plan\\.metrics\" (literal dot), \"result\\?\" (literal question mark), \"exit code: \\d+\" (digit class)."
+    )]
     pub search: Option<String>,
-    #[schemars(description = "Lines of context before each search match (like grep -B). Requires search.")]
+    #[schemars(
+        description = "Lines of context before each search match (like grep -B). Requires search."
+    )]
     pub before: Option<i64>,
-    #[schemars(description = "Lines of context after each search match (like grep -A). Requires search.")]
+    #[schemars(
+        description = "Lines of context after each search match (like grep -A). Requires search."
+    )]
     pub after: Option<i64>,
 }
 
@@ -127,8 +157,16 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
         .map(|p| pos(p))
         .unwrap_or((0, 0));
 
-    let header = ["ID", "Geometry", "State", "Integration", "Process", "Output", "Cwd"]
-        .map(String::from);
+    let header = [
+        "ID",
+        "Geometry",
+        "State",
+        "Integration",
+        "Process",
+        "Output",
+        "Cwd",
+    ]
+    .map(String::from);
     let rows: Vec<[String; 7]> = panes
         .iter()
         .map(|p| {
@@ -150,7 +188,10 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
                 p["activity"].as_str().unwrap_or("Unknown").to_lowercase(),
                 p["osc133_status"].as_str().unwrap_or("unknown").to_string(),
                 p["foreground"].as_str().unwrap_or("-").to_string(),
-                p["last_data_secs"].as_f64().map(format_age).unwrap_or("-".into()),
+                p["last_data_secs"]
+                    .as_f64()
+                    .map(format_age)
+                    .unwrap_or("-".into()),
                 pane_cwd(p).unwrap_or("-".into()),
             ]
         })
@@ -165,7 +206,11 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
     std::iter::once(&header)
         .chain(&rows)
         .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(c, w)| format!("{c:w$}")).collect();
+            let cells: Vec<String> = row
+                .iter()
+                .zip(widths)
+                .map(|(c, w)| format!("{c:w$}"))
+                .collect();
             cells.join("  ").trim_end().to_string()
         })
         .collect::<Vec<_>>()
@@ -174,7 +219,9 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
 
 /// Prefer osc_cwd (works across SSH), fall back to process_cwd.
 fn pane_cwd(p: &serde_json::Value) -> Option<String> {
-    let path = p["osc_cwd"].as_str().or_else(|| p["process_cwd"].as_str())?;
+    let path = p["osc_cwd"]
+        .as_str()
+        .or_else(|| p["process_cwd"].as_str())?;
     Some(match (p["osc_user"].as_str(), p["osc_hostname"].as_str()) {
         (Some(user), Some(host)) => format!("{user}@{host}:{path}"),
         (None, Some(host)) => format!("{host}:{path}"),
@@ -210,12 +257,18 @@ fn format_command_history(result: &serde_json::Value) -> String {
     let rows: Vec<Row> = entries
         .iter()
         .map(|e| Row {
-            id: e["command_id"].as_u64().map(|v| v.to_string()).unwrap_or("-".into()),
+            id: e["command_id"]
+                .as_u64()
+                .map(|v| v.to_string())
+                .unwrap_or("-".into()),
             exit: e["exit_code"]
                 .as_i64()
                 .map(|v| v.to_string())
                 .unwrap_or("-".into()),
-            lines: e["output_lines"].as_u64().map(|v| v.to_string()).unwrap_or("-".into()),
+            lines: e["output_lines"]
+                .as_u64()
+                .map(|v| v.to_string())
+                .unwrap_or("-".into()),
             command: e["command"].as_str().unwrap_or("").to_string(),
         })
         .collect();
@@ -231,14 +284,24 @@ fn format_command_history(result: &serde_json::Value) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{:>w0$}  {:>w1$}  {:>w2$}  {}\n",
-        headers[0], headers[1], headers[2], headers[3],
-        w0 = w[0], w1 = w[1], w2 = w[2],
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        w0 = w[0],
+        w1 = w[1],
+        w2 = w[2],
     ));
     for r in &rows {
         out.push_str(&format!(
             "{:>w0$}  {:>w1$}  {:>w2$}  {}\n",
-            r.id, r.exit, r.lines, r.command,
-            w0 = w[0], w1 = w[1], w2 = w[2],
+            r.id,
+            r.exit,
+            r.lines,
+            r.command,
+            w0 = w[0],
+            w1 = w[1],
+            w2 = w[2],
         ));
     }
 
@@ -267,7 +330,11 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     // Skipped lines hint — split into already-read vs not-shown portions
     if lines_skipped > 0 {
-        let already_read = if read_cursor > 0 { read_cursor.min(lines_skipped) } else { 0 };
+        let already_read = if read_cursor > 0 {
+            read_cursor.min(lines_skipped)
+        } else {
+            0
+        };
         let not_shown = lines_skipped - already_read;
         if already_read > 0 {
             text.push_str(&format!("<{} lines already read>\n", already_read));
@@ -292,41 +359,42 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                 text.push_str(&format!("\nExit code: {}", code));
             }
             if let Some(matches) = search_matches {
-                text.push_str(&format!("\n[{} matches in {} lines.]", matches, total_lines));
+                text.push_str(&format!(
+                    "\n[{} matches in {} lines.]",
+                    matches, total_lines
+                ));
             }
             // Nudge toward command_read when command_run output was filtered
-            if is_run {
-                if let Some(id) = command_id {
-                    if search_matches == Some(0) {
-                        text.push_str(&format!(
-                            "\n[Search had no matches. Use command_read(command_id={}, tail=50) to browse the end, \
-                             or command_read(command_id={}, search=\"different pattern\") to try again.]",
-                            id, id
-                        ));
-                    } else if lines_skipped > 0 {
-                        text.push_str(&format!(
-                            "\n[Output filtered ({} lines total). \
-                             Use command_read(command_id={}) with head, tail, or search for different views of the same command output.]",
-                            total_lines, id
-                        ));
-                    }
-                }
-            }
-            if output.is_empty() && !is_run {
-                if let Some(id) = command_id {
+            if is_run && let Some(id) = command_id {
+                if search_matches == Some(0) {
                     text.push_str(&format!(
-                        "\n[Command {} completed. No unread output. Use head, tail, or search to review full output ({} lines).]",
-                        id, total_lines
+                        "\n[Search had no matches. Use command_read(command_id={}, tail=50) to browse the end, \
+                         or command_read(command_id={}, search=\"different pattern\") to try again.]",
+                        id, id
+                    ));
+                } else if lines_skipped > 0 {
+                    text.push_str(&format!(
+                        "\n[Output filtered ({} lines total). \
+                         Use command_read(command_id={}) with head, tail, or search for different views of the same command output.]",
+                        total_lines, id
                     ));
                 }
+            }
+            if output.is_empty()
+                && !is_run
+                && let Some(id) = command_id
+            {
+                text.push_str(&format!(
+                    "\n[Command {} completed. No unread output. Use head, tail, or search to review full output ({} lines).]",
+                    id, total_lines
+                ));
             }
         }
         "running" => {
             if let Some(id) = command_id {
                 if output.is_empty() {
                     text.push_str(&format!(
-                        "\n[No new output. Command still running (id={}). Increase timeout_secs or use press_key C-c to cancel.]",
-                        id
+                        "\n[No new output. Command still running (id={id}). Use command_read(command_id={id}) to keep waiting, or press_key C-c to cancel.]"
                     ));
                 } else {
                     let lines_shown = output.lines().count();
@@ -370,7 +438,13 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Run a shell command in a pane and wait for completion")]
+    #[tool(
+        description = "Run one command in a pane, as the person would type it, and wait for it to finish. \
+                       The pane is a durable shell: its directory, variables and functions persist \
+                       between calls. The reply carries the \
+                       exit code and the output; use head/tail/search to window it, and command_read \
+                       to see more."
+    )]
     async fn command_run(
         &self,
         Parameters(params): Parameters<CommandRunParams>,
@@ -379,14 +453,26 @@ impl TmuxMcp {
             "origin_pane": self.origin_pane,
             "pane_id": params.pane_id,
             "command": params.command,
-            "timeout_secs": params.timeout_secs.unwrap_or(30),
+            "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
-        if let Some(n) = params.next { rpc_params["next"] = json!(n); }
-        if let Some(n) = params.head { rpc_params["head"] = json!(n); }
-        if let Some(n) = params.tail { rpc_params["tail"] = json!(n); }
-        if let Some(ref s) = params.search { rpc_params["search"] = json!(s); }
-        if let Some(n) = params.before { rpc_params["before"] = json!(n); }
-        if let Some(n) = params.after { rpc_params["after"] = json!(n); }
+        if let Some(n) = params.next {
+            rpc_params["next"] = json!(n);
+        }
+        if let Some(n) = params.head {
+            rpc_params["head"] = json!(n);
+        }
+        if let Some(n) = params.tail {
+            rpc_params["tail"] = json!(n);
+        }
+        if let Some(ref s) = params.search {
+            rpc_params["search"] = json!(s);
+        }
+        if let Some(n) = params.before {
+            rpc_params["before"] = json!(n);
+        }
+        if let Some(n) = params.after {
+            rpc_params["after"] = json!(n);
+        }
 
         let result = self
             .client
@@ -413,13 +499,27 @@ impl TmuxMcp {
             "pane_id": params.pane_id,
             "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
-        if let Some(id) = params.command_id { rpc_params["command_id"] = json!(id); }
-        if let Some(n) = params.next { rpc_params["next"] = json!(n); }
-        if let Some(n) = params.head { rpc_params["head"] = json!(n); }
-        if let Some(n) = params.tail { rpc_params["tail"] = json!(n); }
-        if let Some(ref s) = params.search { rpc_params["search"] = json!(s); }
-        if let Some(n) = params.before { rpc_params["before"] = json!(n); }
-        if let Some(n) = params.after { rpc_params["after"] = json!(n); }
+        if let Some(id) = params.command_id {
+            rpc_params["command_id"] = json!(id);
+        }
+        if let Some(n) = params.next {
+            rpc_params["next"] = json!(n);
+        }
+        if let Some(n) = params.head {
+            rpc_params["head"] = json!(n);
+        }
+        if let Some(n) = params.tail {
+            rpc_params["tail"] = json!(n);
+        }
+        if let Some(ref s) = params.search {
+            rpc_params["search"] = json!(s);
+        }
+        if let Some(n) = params.before {
+            rpc_params["before"] = json!(n);
+        }
+        if let Some(n) = params.after {
+            rpc_params["after"] = json!(n);
+        }
 
         let result = self
             .client
@@ -491,14 +591,21 @@ impl TmuxMcp {
         let status = result["status"].as_str().unwrap_or("unknown");
         let text = match status {
             "active" => "OSC 133 injection successful — shell integration active.".to_string(),
-            "already_active" => "OSC 133 already active — no injection needed. command_run should work.".to_string(),
+            "already_active" => {
+                "OSC 133 already active — no injection needed. command_run should work.".to_string()
+            }
             _ => {
-                let msg = result["message"].as_str().unwrap_or("Injection may have failed");
+                let msg = result["message"]
+                    .as_str()
+                    .unwrap_or("Injection may have failed");
                 let screen = result["screen"].as_str().unwrap_or("");
                 if screen.is_empty() {
                     format!("OSC 133 injection status: {} — {}", status, msg)
                 } else {
-                    format!("OSC 133 injection status: {} — {}\n\nScreen:\n{}", status, msg, screen)
+                    format!(
+                        "OSC 133 injection status: {} — {}\n\nScreen:\n{}",
+                        status, msg, screen
+                    )
                 }
             }
         };
@@ -561,11 +668,21 @@ impl ServerHandler for TmuxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "MCP server for interacting with tmux panes. Use list_panes to discover \
-                 available panes, then run commands and read their output.\n\n\
+                "MCP server for working in the person's tmux panes. Use list_panes to \
+                 discover available panes, then run commands and read their output.\n\n\
+                 Writing commands: a pane is the person's own terminal. Every command \
+                 you run shows on their screen and stays in their shell history, so \
+                 write each one as a Staff SRE writes a runbook step for a sysadmin to \
+                 read, verify and run: expressive and obviously correct. A pane is a \
+                 durable shell: cd, exported variables and functions persist between \
+                 calls. command_run reports the \
+                 exit code, so don't echo status or $?; window output with \
+                 head/tail/search instead of piping into head, tail or grep, which keeps \
+                 the full output for command_read. Drive tmux only through these tools, \
+                 never with the tmux CLI from Bash.\n\n\
                  command_run: Combine with next=N + search=\"regex\" to return as soon \
                  as N matching lines appear, leaving the command running. Reach for \
-                 this any time you'd otherwise set timeout_secs past ~30s and the \
+                 this any time you'd otherwise raise timeout_secs and the \
                  command emits a recognizable progress marker (server ready line, \
                  build artifact written, test summary). In search mode, size \
                  timeout_secs to when the match should appear if things go well, not \
@@ -578,7 +695,7 @@ impl ServerHandler for TmuxMcp {
                  head=N + search behaves the same over the first N matches. \
                  Without next/head, the call blocks until the command completes or \
                  timeout_secs elapses; on timeout the command keeps running — continue \
-                 with command_read(command_id=N). \
+                 with command_read(command_id=N). So keep timeout_secs low. \
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit). \
                  If command_run says a pane is busy, use command_read with timeout_secs \

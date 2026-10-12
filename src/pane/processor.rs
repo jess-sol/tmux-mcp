@@ -1,12 +1,11 @@
+use alacritty_terminal::Term;
 /// Pane processor: owns a headless alacritty terminal instance and
 /// processes byte chunks with OSC boundary splitting for synchronized
 /// metadata extraction. Integrates the OSC 133 state machine for
 /// structured command tracking.
-
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config;
-use alacritty_terminal::Term;
 use vte::ansi::Processor;
 
 use crate::pane::osc::{OscEvent, OscMatch, find_next_osc_from};
@@ -49,7 +48,13 @@ impl PaneProcessor {
     /// Create a new pane processor with the given dimensions.
     pub fn new(lines: usize, columns: usize) -> Self {
         let dims = PaneDimensions { lines, columns };
-        let config = Config::default();
+        // A pane that grows pulls lines back from history, as tmux does, so
+        // the history covers one resize; tmux's own `history-limit` must not
+        // be smaller.
+        let config = Config {
+            scrolling_history: 1000,
+            ..Config::default()
+        };
         let term = Term::new(config, &dims, VoidListener);
         let processor = Processor::new();
         Self {
@@ -157,18 +162,52 @@ impl PaneProcessor {
         self.state.input_start.is_some() && !self.read_input().is_empty()
     }
 
+    /// Whether the text after the prompt looks garbled rather than typed:
+    /// typing, editing included, keeps the cursor within its line.
+    pub fn input_looks_garbled(&self) -> bool {
+        let Some(end_line) = self.input_end_line() else {
+            return false;
+        };
+        !self.has_input_before_cursor() || self.cursor_position().0 > end_line
+    }
+
+    /// The line the cursor stands on after typing the input's last
+    /// character: the next one when that character fills the right edge.
+    fn input_end_line(&self) -> Option<usize> {
+        let (start_line, start_col) = self.state.input_start?;
+        let mut end = None;
+        // The lines `read_input` reads, one char per column.
+        for line in start_line..self.screen_lines() {
+            let from = if line == start_line { start_col } else { 0 };
+            let width = self.screen_line_text(line).chars().count();
+            if width > from {
+                end = Some((line, width));
+            } else if line != start_line {
+                break;
+            }
+        }
+        end.map(|(line, width)| line + usize::from(width >= self.columns()))
+    }
+
     /// Whether any cell from the end of the prompt to the cursor holds text.
-    pub fn has_input_before_cursor(&self) -> bool {
+    fn has_input_before_cursor(&self) -> bool {
         let Some((start_line, start_col)) = self.state.input_start else {
             return false;
         };
         let (cursor_line, cursor_col) = self.cursor_position();
         (start_line..=cursor_line).any(|line| {
             let from = if line == start_line { start_col } else { 0 };
-            let to = if line == cursor_line { cursor_col } else { usize::MAX };
+            let to = if line == cursor_line {
+                cursor_col
+            } else {
+                usize::MAX
+            };
             // One char per column, as in `read_input`.
             let text = self.screen_line_text(line);
-            text.chars().skip(from).take(to.saturating_sub(from)).any(|c| !c.is_whitespace())
+            text.chars()
+                .skip(from)
+                .take(to.saturating_sub(from))
+                .any(|c| !c.is_whitespace())
         })
     }
 
@@ -195,12 +234,6 @@ impl PaneProcessor {
             text.push(cell.c);
         }
         text.trim_end().to_string()
-    }
-
-    /// Read text from the line where the cursor currently sits.
-    pub fn cursor_line_text(&self) -> String {
-        let cursor_line = self.term.grid().cursor.point.line.0 as usize;
-        self.screen_line_text(cursor_line)
     }
 
     /// Get the cursor position as (line, column).
@@ -285,6 +318,9 @@ impl PaneProcessor {
                 if *marker == b'C' || *marker == b'A' {
                     self.state.input_start = None;
                 }
+                if *marker == b'C' {
+                    self.state.osc7_since_command = false;
+                }
 
                 if matches!(self.osc133.phase(), Osc133Phase::Executing { .. }) {
                     self.state.activity = crate::pane::state::Activity::Busy;
@@ -368,8 +404,20 @@ mod tests {
         let mut p = PaneProcessor::new(24, 80);
         let events = p.process_chunk(b"\x1b]133;A\x07$ \x1b]133;B\x07");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'A', param: None });
-        assert_eq!(events[1].event, OscEvent::Osc133 { marker: b'B', param: None });
+        assert_eq!(
+            events[0].event,
+            OscEvent::Osc133 {
+                marker: b'A',
+                param: None
+            }
+        );
+        assert_eq!(
+            events[1].event,
+            OscEvent::Osc133 {
+                marker: b'B',
+                param: None
+            }
+        );
     }
 
     #[test]
@@ -379,7 +427,13 @@ mod tests {
         let events = p.process_chunk(b"ls -la\x1b]133;C\x07");
         assert_eq!(p.screen_line_text(0), "$ ls -la");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'C', param: None });
+        assert_eq!(
+            events[0].event,
+            OscEvent::Osc133 {
+                marker: b'C',
+                param: None
+            }
+        );
     }
 
     #[test]
@@ -398,7 +452,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].event,
-            OscEvent::Osc7 { uri: "file://myhost/home/user".to_string() }
+            OscEvent::Osc7 {
+                uri: "file://myhost/home/user".to_string()
+            }
         );
         // State should be updated
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
@@ -457,6 +513,21 @@ mod tests {
         assert!(cmds[0].output.contains("hi"));
     }
 
+    /// A command start makes the reported place stale until OSC 7 reports again.
+    #[test]
+    fn osc7_counts_only_since_the_last_command_started() {
+        let mut p = PaneProcessor::new(24, 80);
+        let since = |p: &PaneProcessor| p.state().osc7_since_command;
+        assert!(!since(&p));
+
+        p.process_chunk(b"\x1b]7;file://host/home/u\x1b\\\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        assert!(since(&p));
+        p.process_chunk(b"ssh prod\x1b]133;C\x1b\\");
+        assert!(!since(&p));
+        p.process_chunk(b"\x1b]7;file://prod/root\x1b\\");
+        assert!(since(&p));
+    }
+
     /// E supersedes C cmdline_url when both present.
     #[test]
     fn e_supersedes_c_cmdline_url() {
@@ -466,7 +537,7 @@ mod tests {
 
         // E arrives first, then C with cmdline_url — E wins
         p.process_chunk(
-            b"echo correct\x1b]133;E;echo correct\x1b\\\x1b]133;C;cmdline_url=wrong\x1b\\"
+            b"echo correct\x1b]133;E;echo correct\x1b\\\x1b]133;C;cmdline_url=wrong\x1b\\",
         );
         p.process_chunk(b"\r\ncorrect\r\n\x1b]133;D;0\x1b\\");
         p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
@@ -506,7 +577,11 @@ mod tests {
 
         if let Osc133Phase::Executing { command } = p.osc133_phase() {
             assert!(command.contains("echo hello"), "command: {:?}", command);
-            assert!(!command.contains("\x1b"), "should not contain raw escapes: {:?}", command);
+            assert!(
+                !command.contains("\x1b"),
+                "should not contain raw escapes: {:?}",
+                command
+            );
         } else {
             panic!("Expected Executing");
         }
@@ -829,6 +904,35 @@ mod tests {
         assert!(!p.has_input_content());
     }
 
+    // --- input_looks_garbled ---
+
+    #[test]
+    fn input_looks_garbled_only_when_the_cursor_sits_outside_the_text() {
+        // (columns, what follows the prompt `$ `, garbled)
+        let cases: [(usize, &[u8], bool); 8] = [
+            (80, b"", false),
+            (80, b"ls -la", false),
+            (80, b"git ", false),
+            (80, b"echo hello\x1b[5D", false),
+            // Nothing between the prompt and the cursor: Ctrl-A, or a job's output.
+            (80, b"echo hello\x1b[3G", true),
+            (80, b"abc\r\n", true),
+            // Typed to the exact width: readline wraps with a space and a CR.
+            (20, b"echo 123456789abcd \r", false),
+            (20, b"echo this-is-a-long-cmd-x", false),
+        ];
+        let mut misses = Vec::new();
+        for (columns, input, garbled) in cases {
+            let mut p = PaneProcessor::new(24, columns);
+            p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+            p.process_chunk(input);
+            if p.input_looks_garbled() != garbled {
+                misses.push(String::from_utf8_lossy(input).into_owned());
+            }
+        }
+        assert!(misses.is_empty(), "misjudged: {misses:?}");
+    }
+
     // --- read_input: command text at C marker ---
 
     #[test]
@@ -886,5 +990,4 @@ mod tests {
             panic!("Expected Executing");
         }
     }
-
 }

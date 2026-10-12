@@ -1,9 +1,9 @@
-/// OSC boundary scanner for the raw byte stream.
-///
-/// Scans for OSC sequences we want to intercept (133, 7, 9) and returns
-/// their position and parsed content. Other OSC sequences (window title,
-/// colors, clipboard, etc.) are NOT matched — they pass through to
-/// alacritty_terminal's handler.
+//! OSC boundary scanner for the raw byte stream.
+//!
+//! Scans for OSC sequences we want to intercept (133, 7, 9) and returns
+//! their position and parsed content. Other OSC sequences (window title,
+//! colors, clipboard, etc.) are NOT matched — they pass through to
+//! alacritty_terminal's handler.
 
 /// An intercepted OSC sequence found in the byte stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub enum OscEvent {
 /// Returns `None` if no intercepted OSC is found (including if there are
 /// partial/incomplete sequences at the end of the buffer).
 ///
-/// OSC format: ESC ] <number> ; <data> <terminator>
+/// OSC format: `ESC ] <number> ; <data> <terminator>`
 /// Terminator: BEL (0x07) or ST (ESC \)
 pub fn find_next_osc(bytes: &[u8]) -> Option<OscMatch> {
     let mut pos = 0;
@@ -115,12 +115,12 @@ pub fn find_next_osc_from(bytes: &[u8], offset: usize) -> Option<OscMatch> {
 // --- Internal helpers ---
 
 fn find_byte(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
-    for i in from..bytes.len() {
-        if bytes[i] == needle {
+    for (i, &b) in bytes.iter().enumerate().skip(from) {
+        if b == needle {
             return Some(i);
         }
         // Stop if we hit a terminator or another ESC before finding the semicolon
-        if bytes[i] == 0x07 || bytes[i] == 0x1b {
+        if b == 0x07 || b == 0x1b {
             return None;
         }
     }
@@ -193,15 +193,22 @@ mod tests {
     // --- Helper ---
 
     fn osc133(marker: u8, param: Option<&str>) -> OscEvent {
-        OscEvent::Osc133 { marker, param: param.map(|s| s.to_string()) }
+        OscEvent::Osc133 {
+            marker,
+            param: param.map(|s| s.to_string()),
+        }
     }
 
     fn osc7(uri: &str) -> OscEvent {
-        OscEvent::Osc7 { uri: uri.to_string() }
+        OscEvent::Osc7 {
+            uri: uri.to_string(),
+        }
     }
 
     fn osc9(text: &str) -> OscEvent {
-        OscEvent::Osc9 { text: text.to_string() }
+        OscEvent::Osc9 {
+            text: text.to_string(),
+        }
     }
 
     // --- OSC 133 with BEL terminator ---
@@ -339,10 +346,10 @@ mod tests {
     #[test]
     fn non_intercepted_osc_types_ignored() {
         for bytes in [
-            &b"\x1b]0;Window Title\x07"[..],       // window title
-            &b"\x1b]4;1;rgb:ff/00/00\x07"[..],     // color palette
-            &b"\x1b]52;c;SGVsbG8=\x07"[..],        // clipboard
-            &b"\x1b]10;rgb:ff/ff/ff\x07"[..],      // foreground color
+            &b"\x1b]0;Window Title\x07"[..],         // window title
+            &b"\x1b]4;1;rgb:ff/00/00\x07"[..],       // color palette
+            &b"\x1b]52;c;SGVsbG8=\x07"[..],          // clipboard
+            &b"\x1b]10;rgb:ff/ff/ff\x07"[..],        // foreground color
             &b"\x1b]8;;https://example.com\x07"[..], // hyperlink
         ] {
             assert!(find_next_osc(bytes).is_none(), "should ignore: {:?}", bytes);

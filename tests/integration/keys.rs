@@ -29,7 +29,8 @@ async fn press_key_shows_the_panes_response_to_the_key() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     // Waits silently for one key, then answers 0.3 s later.
-    h.start(&shell, "read -rsn1; sleep 0.3; seq 1 | sed s/1/got/").await;
+    h.start(&shell, "read -rsn1; sleep 0.3; seq 1 | sed s/1/got/")
+        .await;
 
     let screen = h.press_key(&shell, "x").await;
 
@@ -58,5 +59,8 @@ async fn the_documented_key_names_reach_the_pane() {
 
     let screen = h.press_key(&shell, "BSpace").await;
 
-    assert!(screen.lines().any(|row| row.trim_end() == "$ ab"), "{screen}");
+    assert!(
+        screen.lines().any(|row| row.trim_end() == "$ ab"),
+        "{screen}"
+    );
 }

@@ -1,0 +1,74 @@
+# Pre-commit gate, run by `prek` (a Rust reimplementation of pre-commit;
+# `prek install` wires up .git/hooks). The devShell puts `prek` on PATH.
+#
+# The cargo hooks are `language: system`: they use the toolchain from
+# rust-toolchain.toml. `pass_filenames: false` because cargo works on the
+# whole crate, not on the staged files.
+#
+# There is no CI for this repo, so this is the only gate, and
+# `git commit --no-verify` bypasses it.
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        # --all-targets so the integration suite is linted too.
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test (unit)
+        # The unit suite only: the integration suite drives live tmux servers,
+        # takes seconds and can race under load, so it stays a manual run.
+        entry: cargo test --lib --bins
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-doc
+        name: rustdoc -D warnings
+        # Clippy cannot see broken intra-doc links; rustdoc can.
+        entry:
+          env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --document-private-items
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-locked
+        name: cargo metadata --locked
+        # Cargo.lock still agrees with the manifest.
+        entry: cargo metadata --locked --format-version 1
+        language: system
+        files: ^(Cargo\.toml|Cargo\.lock)$
+        pass_filenames: false
+
+      - id: cargo-deny-licenses
+        name: cargo deny check licenses
+        # deny.toml's allowlist: a copyleft crate fails the commit that
+        # brings it in.
+        entry: cargo deny check licenses
+        language: system
+        files: ^(Cargo\.toml|Cargo\.lock|deny\.toml)$
+        pass_filenames: false
+
+  # prek ships native implementations of these, so no Python bootstrap.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-toml
+      - id: check-yaml
+      - id: mixed-line-ending
+        args: [--fix=lf]

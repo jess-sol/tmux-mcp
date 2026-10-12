@@ -1,5 +1,4 @@
 /// Structured pane state — the queryable output of the parsing pipeline.
-
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -53,6 +52,10 @@ pub struct TerminalState {
     pub user: Option<String>,
     /// Hostname (from OSC 7, None if localhost).
     pub hostname: Option<String>,
+    /// OSC 7 reported `cwd` and `hostname` since the last command started
+    /// (OSC 133 C). While a command runs, a session it opens (`ssh`) can
+    /// leave the last report standing for another machine.
+    pub osc7_since_command: bool,
     /// Next sequence number.
     seq_counter: u64,
     /// Incremented on every D marker (command completion signal).
@@ -85,6 +88,7 @@ impl TerminalState {
             cwd: None,
             user: None,
             hostname: None,
+            osc7_since_command: false,
             seq_counter: 0,
             completion_seq: 0,
             last_exit_code: None,
@@ -98,7 +102,10 @@ impl TerminalState {
     /// Look up a leaf PID in the OSC 133 cache.
     /// Returns Some(true) if confirmed, Some(false) if failed, None if unknown.
     pub fn osc133_lookup(&self, pid: u32) -> Option<bool> {
-        self.osc133_cache.iter().find(|(p, _)| *p == pid).map(|(_, v)| *v)
+        self.osc133_cache
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, v)| *v)
     }
 
     /// Mark a leaf PID as having working OSC 133.
@@ -148,7 +155,9 @@ impl TerminalState {
     /// The command still running, if any: it ends at its D marker, or at its B
     /// marker when no D arrives.
     pub fn running_command(&self) -> Option<&CommandRecord> {
-        self.commands.front().filter(|c| !c.completed && !c.output_done)
+        self.commands
+            .front()
+            .filter(|c| !c.completed && !c.output_done)
     }
 
     /// Get a mutable ref to the active command.
@@ -160,10 +169,11 @@ impl TerminalState {
     /// Stops accumulating after D marker (output_done), remaining text before B
     /// is prompt content.
     pub fn append_active_output(&mut self, text: &str) {
-        if let Some(cmd) = self.commands.front_mut() {
-            if !cmd.completed && !cmd.output_done {
-                cmd.output.push_str(text);
-            }
+        if let Some(cmd) = self.commands.front_mut()
+            && !cmd.completed
+            && !cmd.output_done
+        {
+            cmd.output.push_str(text);
         }
     }
 
@@ -183,7 +193,7 @@ impl TerminalState {
     }
 
     /// Update user, hostname, and cwd from an OSC 7 URI.
-    /// Format: file://[user@]hostname/path
+    /// Format: `file://[user@]hostname/path`
     pub fn update_cwd_from_osc7(&mut self, uri: &str) {
         let Some(rest) = uri.strip_prefix("file://") else {
             return;
@@ -202,6 +212,7 @@ impl TerminalState {
 
         self.user = user.filter(|u| !u.is_empty()).map(|u| u.to_string());
         self.cwd = path.map(|p| p.to_string());
+        self.osc7_since_command = true;
 
         // Filter localhost variants
         self.hostname = if hostname.is_empty()

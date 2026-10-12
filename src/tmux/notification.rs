@@ -1,17 +1,17 @@
 /// Parsed notification from tmux control mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notification {
-    /// %output %<pane_id> <escaped-data>
+    /// `%output %<pane_id> <escaped-data>`
     Output { pane_id: String, data: Vec<u8> },
-    /// %window-close @<window_id>
+    /// `%window-close @<window_id>`
     WindowClose { window_id: String },
-    /// %session-closed $<session_id>
+    /// `%session-closed $<session_id>`
     SessionClose { session_id: String },
-    /// %exit [reason]
+    /// `%exit [reason]`
     Exit { reason: Option<String> },
-    /// %layout-change @<window_id> <layout_string>
+    /// `%layout-change @<window_id> <layout_string>`
     LayoutChange { window_id: String, layout: String },
-    /// %window-add @<window_id>
+    /// `%window-add @<window_id>`
     WindowAdd { window_id: String },
     /// Anything else (pane-mode-changed, etc.)
     Other { line: String },
@@ -104,23 +104,25 @@ pub fn parse_notification(line: &str) -> Notification {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
 
     match parts.first().copied() {
-        Some("%window-close") if parts.len() >= 2 => {
-            Notification::WindowClose { window_id: parts[1].to_string() }
-        }
-        Some("%session-closed") if parts.len() >= 2 => {
-            Notification::SessionClose { session_id: parts[1].to_string() }
-        }
-        Some("%layout-change") if parts.len() >= 3 => {
-            Notification::LayoutChange {
-                window_id: parts[1].to_string(),
-                layout: parts[2].to_string(),
-            }
-        }
-        Some("%window-add") if parts.len() >= 2 => {
-            Notification::WindowAdd { window_id: parts[1].to_string() }
-        }
-        Some("%exit") => Notification::Exit { reason: parts.get(1).map(|s| s.to_string()) },
-        _ => Notification::Other { line: line.to_string() },
+        Some("%window-close") if parts.len() >= 2 => Notification::WindowClose {
+            window_id: parts[1].to_string(),
+        },
+        Some("%session-closed") if parts.len() >= 2 => Notification::SessionClose {
+            session_id: parts[1].to_string(),
+        },
+        Some("%layout-change") if parts.len() >= 3 => Notification::LayoutChange {
+            window_id: parts[1].to_string(),
+            layout: parts[2].to_string(),
+        },
+        Some("%window-add") if parts.len() >= 2 => Notification::WindowAdd {
+            window_id: parts[1].to_string(),
+        },
+        Some("%exit") => Notification::Exit {
+            reason: parts.get(1).map(|s| s.to_string()),
+        },
+        _ => Notification::Other {
+            line: line.to_string(),
+        },
     }
 }
 
@@ -131,7 +133,10 @@ pub(crate) fn parse_output(line: &[u8]) -> Option<Notification> {
     let rest = line.strip_prefix(b"%output ")?;
     let space = rest.iter().position(|&b| b == b' ')?;
     let pane_id = String::from_utf8_lossy(&rest[..space]).into_owned();
-    Some(Notification::Output { pane_id, data: rest[space + 1..].to_vec() })
+    Some(Notification::Output {
+        pane_id,
+        data: rest[space + 1..].to_vec(),
+    })
 }
 
 #[cfg(test)]
@@ -180,13 +185,23 @@ mod tests {
     #[test]
     fn parse_window_close() {
         let n = parse_notification("%window-close @1");
-        assert_eq!(n, Notification::WindowClose { window_id: "@1".to_string() });
+        assert_eq!(
+            n,
+            Notification::WindowClose {
+                window_id: "@1".to_string()
+            }
+        );
     }
 
     #[test]
     fn parse_session_closed() {
         let n = parse_notification("%session-closed $0");
-        assert_eq!(n, Notification::SessionClose { session_id: "$0".to_string() });
+        assert_eq!(
+            n,
+            Notification::SessionClose {
+                session_id: "$0".to_string()
+            }
+        );
     }
 
     #[test]
@@ -198,13 +213,23 @@ mod tests {
     #[test]
     fn parse_exit_with_reason() {
         let n = parse_notification("%exit server-exited");
-        assert_eq!(n, Notification::Exit { reason: Some("server-exited".to_string()) });
+        assert_eq!(
+            n,
+            Notification::Exit {
+                reason: Some("server-exited".to_string())
+            }
+        );
     }
 
     #[test]
     fn parse_window_add() {
         let n = parse_notification("%window-add @5");
-        assert_eq!(n, Notification::WindowAdd { window_id: "@5".to_string() });
+        assert_eq!(
+            n,
+            Notification::WindowAdd {
+                window_id: "@5".to_string()
+            }
+        );
     }
 
     #[test]
@@ -288,7 +313,10 @@ mod tests {
         let mut block = None;
         parse_line("%begin 123 0", &mut block);
         let msg = parse_line("%output %0 data", &mut block).unwrap();
-        assert!(matches!(msg, ReaderMessage::Notification(Notification::Output { .. })));
+        assert!(matches!(
+            msg,
+            ReaderMessage::Notification(Notification::Output { .. })
+        ));
         // Block is still open
         assert!(block.is_some());
         let msg = parse_line("%end 123 0", &mut block).unwrap();
@@ -318,7 +346,10 @@ mod tests {
     fn parse_line_exit_notification() {
         let mut block = None;
         let msg = parse_line("%exit", &mut block).unwrap();
-        assert!(matches!(msg, ReaderMessage::Notification(Notification::Exit { reason: None })));
+        assert!(matches!(
+            msg,
+            ReaderMessage::Notification(Notification::Exit { reason: None })
+        ));
     }
 
     #[test]

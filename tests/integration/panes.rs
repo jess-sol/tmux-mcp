@@ -41,6 +41,19 @@ async fn debug_pane_shows_the_screen_of_an_idle_pane() {
 }
 
 #[tokio::test]
+async fn a_pane_that_shrinks_and_grows_back_shows_what_tmux_shows() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    h.run(&shell, "seq 40").await;
+
+    shell.resize(10);
+    shell.resize(25);
+
+    let (daemon, tmux) = h.screens(&shell).await;
+    assert_eq!(daemon, tmux);
+}
+
+#[tokio::test]
 async fn debug_pane_points_at_command_read_while_a_command_runs() {
     let h = Harness::new().await;
     let shell = h.shell().await;
@@ -48,7 +61,10 @@ async fn debug_pane_points_at_command_read_while_a_command_runs() {
 
     let screen = h.debug_pane(&shell).await;
 
-    assert!(screen.starts_with("[Command") && screen.contains("\"sleep 30\""), "{screen:?}");
+    assert!(
+        screen.starts_with("[Command") && screen.contains("\"sleep 30\""),
+        "{screen:?}"
+    );
     assert!(screen.contains("command_read"), "{screen:?}");
 }
 
@@ -77,5 +93,8 @@ async fn list_panes_answers_while_a_command_runs() {
     };
     let (_, waited) = tokio::join!(running, looking);
 
-    assert!(waited < Duration::from_secs(1), "list_panes waited {waited:?} behind command_run");
+    assert!(
+        waited < Duration::from_secs(1),
+        "list_panes waited {waited:?} behind command_run"
+    );
 }

@@ -16,7 +16,6 @@
 /// (delimiter between command echo and output). D consumes it. B clears
 /// it (new cycle). This captures output even when C is absent (subshells,
 /// shells without preexec support).
-
 use crate::pane::state::{Activity, TerminalState};
 
 // --- State Machine ---
@@ -123,11 +122,11 @@ impl Osc133Parser {
     /// needs to see the pending state to finalize the command.
     fn handle_a(&mut self, state: &mut TerminalState) {
         // If Executing without D, mark active command as abandoned.
-        if matches!(self.phase, Osc133Phase::Executing { .. }) {
-            if let Some(cmd) = state.active_command_mut() {
-                tracing::debug!("Abandoning in-flight command on A: {:?}", cmd.command);
-                cmd.completed = true; // exit_code stays None (abandoned)
-            }
+        if matches!(self.phase, Osc133Phase::Executing { .. })
+            && let Some(cmd) = state.active_command_mut()
+        {
+            tracing::debug!("Abandoning in-flight command on A: {:?}", cmd.command);
+            cmd.completed = true; // exit_code stays None (abandoned)
         }
         // NOTE: active command from D is NOT completed here.
         // D→A→B is the normal completion flow — B marks completed.
@@ -144,9 +143,7 @@ impl Osc133Parser {
         if let Some(cmd) = state.active_command_mut() {
             // If we're in Executing and got B without D (pre-exec failure),
             // set exit code 1.
-            if cmd.exit_code.is_none()
-                && matches!(self.phase, Osc133Phase::Executing { .. })
-            {
+            if cmd.exit_code.is_none() && matches!(self.phase, Osc133Phase::Executing { .. }) {
                 cmd.exit_code = Some(1);
             }
             cmd.completed = true;
@@ -165,7 +162,12 @@ impl Osc133Parser {
     /// `screen_input` is the command text read from the terminal grid by
     /// PaneProcessor — it handles all editing (backspace, cursor movement,
     /// etc.) correctly because it reads from the real terminal emulator.
-    fn handle_c(&mut self, param: Option<&str>, state: &mut TerminalState, screen_input: Option<&str>) {
+    fn handle_c(
+        &mut self,
+        param: Option<&str>,
+        state: &mut TerminalState,
+        screen_input: Option<&str>,
+    ) {
         if matches!(self.phase, Osc133Phase::Executing { .. }) {
             tracing::debug!("Duplicate OSC 133;C — ignoring");
             return;
@@ -286,32 +288,16 @@ impl Default for Osc133Parser {
 
 // --- Helpers ---
 
-/// Parse `cmdline_url=<percent-encoded>` from a C marker parameter string.
+/// Parse `cmdline_url=<percent-encoded>` from a C marker parameter string:
+/// a URL's encoding, where `+` is a plus.
 fn parse_cmdline_url(param: &str) -> Option<String> {
     let value = param.strip_prefix("cmdline_url=")?;
-    Some(percent_decode(value))
+    Some(
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8_lossy()
+            .into_owned(),
+    )
 }
-
-/// Percent-decode a URL-encoded string.
-fn percent_decode(input: &str) -> String {
-    let mut result = Vec::with_capacity(input.len());
-    let mut bytes = input.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let hi = bytes.next().and_then(|c| char::from(c).to_digit(16));
-            let lo = bytes.next().and_then(|c| char::from(c).to_digit(16));
-            if let (Some(h), Some(l)) = (hi, lo) {
-                result.push((h * 16 + l) as u8);
-            }
-        } else if b == b'+' {
-            result.push(b' ');
-        } else {
-            result.push(b);
-        }
-    }
-    String::from_utf8_lossy(&result).into_owned()
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -323,7 +309,12 @@ mod tests {
     }
 
     /// Shorthand for C marker with screen_input (simulating terminal grid read).
-    fn marker_c(parser: &mut Osc133Parser, param: Option<&str>, state: &mut TerminalState, screen_input: &str) {
+    fn marker_c(
+        parser: &mut Osc133Parser,
+        param: Option<&str>,
+        state: &mut TerminalState,
+        screen_input: &str,
+    ) {
         parser.handle_marker(b'C', param, state, Some(screen_input));
     }
 
@@ -417,7 +408,12 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         // C with cmdline_url parameter (URL-encoded)
-        marker(&mut p, b'C', Some("cmdline_url=echo%20hello%20world"), &mut s);
+        marker(
+            &mut p,
+            b'C',
+            Some("cmdline_url=echo%20hello%20world"),
+            &mut s,
+        );
 
         if let Osc133Phase::Executing { command } = &p.phase {
             assert_eq!(command, "echo hello world");
@@ -941,7 +937,10 @@ mod tests {
         assert!(!s.commands[0].completed, "D should not complete yet");
 
         marker(&mut p, b'A', None, &mut s);
-        assert!(!s.commands[0].completed, "A should not complete (that's B's job)");
+        assert!(
+            !s.commands[0].completed,
+            "A should not complete (that's B's job)"
+        );
 
         marker(&mut p, b'B', None, &mut s);
         assert!(s.commands[0].completed, "B should complete the command");
@@ -977,14 +976,21 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
 
-        assert_eq!(p.phase, Osc133Phase::Input, "should be in Input after D→A→B recovery");
+        assert_eq!(
+            p.phase,
+            Osc133Phase::Input,
+            "should be in Input after D→A→B recovery"
+        );
     }
 
     // --- Helpers ---
 
     #[test]
     fn parse_cmdline_url_basic() {
-        assert_eq!(parse_cmdline_url("cmdline_url=echo%20hello"), Some("echo hello".into()));
+        assert_eq!(
+            parse_cmdline_url("cmdline_url=echo%20hello"),
+            Some("echo hello".into())
+        );
     }
 
     #[test]
@@ -1000,9 +1006,14 @@ mod tests {
         assert_eq!(parse_cmdline_url("something_else=foo"), None);
     }
 
+    /// A URL's percent-encoding: `+` is a plus, and an escape that is not
+    /// two hex digits stays as written.
     #[test]
-    fn percent_decode_plus_as_space() {
-        assert_eq!(percent_decode("hello+world"), "hello world");
+    fn cmdline_url_keeps_a_plus_and_a_bad_escape() {
+        assert_eq!(
+            parse_cmdline_url("cmdline_url=tail%20+5%20a%zzb"),
+            Some("tail +5 a%zzb".into())
+        );
     }
 
     // --- Osc133Phase ---
@@ -1013,7 +1024,10 @@ mod tests {
         assert_eq!(Osc133Phase::Prompt.executing_command(), None);
         assert_eq!(Osc133Phase::Input.executing_command(), None);
         assert_eq!(
-            Osc133Phase::Executing { command: "ls".into() }.executing_command(),
+            Osc133Phase::Executing {
+                command: "ls".into()
+            }
+            .executing_command(),
             Some("ls"),
         );
     }
