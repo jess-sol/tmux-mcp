@@ -30,7 +30,7 @@ Targets **tmux + bash** specifically. Other shells or terminal multiplexers prob
                    └───────────────────────┘                 └───────────────────┘
 ```
 
-The **MCP server** is stateless — it spawns on demand and connects to a **background daemon** over a unix socket. The daemon attaches to tmux in control mode, maintaining a live model of every pane. It auto-spawns on first use and exits after 5 minutes when no clients are connected.
+The **MCP server** is stateless — it spawns on demand and connects to a **background daemon** over a unix socket. The daemon attaches to tmux in control mode, maintaining a live model of every pane. It auto-spawns on first use and exits after 5 minutes when no clients are connected. When builds meet, the newest daemon serves: a newer tmux-mcp replaces an older daemon, and an older one refuses a newer daemon and exits, naming both versions.
 
 ## Key Features
 
@@ -257,3 +257,7 @@ cargo build
   tmux  allow        cargo
   bash  deny         prefer-tmux: …
 ```
+
+## Versions
+
+The version in `Cargo.toml` decides which daemon serves a tmux session, so every merge to `main` bumps it, in its own commit before the merge: the minor version for a branch that adds features, the patch version for one that only fixes.

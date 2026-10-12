@@ -71,6 +71,7 @@ pub async fn dispatch(
         "inject_osc133" => handle_inject_osc133(params, state).await,
         "send_keys" => handle_send_keys(params, state).await,
         "request_approval" => handle_request_approval(params, state).await,
+        "version" => Ok(json!({ "version": crate::version::Version::current().to_string() })),
         _ => Err(RpcError::method_not_found(method)),
     }
 }

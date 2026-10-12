@@ -6,3 +6,4 @@ pub mod parse;
 pub mod policy;
 pub mod proc;
 pub mod tmux;
+pub mod version;
