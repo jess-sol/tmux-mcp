@@ -42,8 +42,8 @@ pub struct CompiledPolicy {
 pub struct PolicyEngine {
     compiled: RwLock<CompiledPolicy>,
     home_path: PathBuf,
-    home_mtime: RwLock<Option<SystemTime>>,
-    project_mtime: RwLock<Option<(PathBuf, SystemTime)>>,
+    home_stamp: RwLock<Option<Stamp>>,
+    project_stamp: RwLock<Option<Stamp>>,
     /// Counts reloads, so a pane can raise its *Pane version* on each.
     reloads: tokio::sync::watch::Sender<u64>,
 }
@@ -56,6 +56,11 @@ struct Source {
 
 type Compiled = (RuleSet, Grammars, Grammars, Vec<String>);
 
+/// A policy file as last loaded: the file its path resolves to, and that
+/// file's mtime. A relinked symlink resolves elsewhere even when the new file
+/// has the same mtime, as every Nix store path does.
+type Stamp = (PathBuf, SystemTime);
+
 const BUILTIN_TOML: &str = include_str!("../builtin_rules.toml");
 
 // --- PolicyEngine: manages compiled rules with live reload ---
@@ -65,17 +70,16 @@ impl PolicyEngine {
         let compiled = compile_config(project_cwd);
 
         let home_path = home_config_path();
-        let home_mtime = file_mtime(&home_path);
-        let project_mtime = project_cwd.and_then(project_config_path).and_then(|p| {
-            let m = file_mtime(&p)?;
-            Some((p, m))
-        });
+        let home_stamp = file_stamp(&home_path);
+        let project_stamp = project_cwd
+            .and_then(project_config_path)
+            .and_then(|p| file_stamp(&p));
 
         Self {
             compiled: RwLock::new(compiled),
             home_path,
-            home_mtime: RwLock::new(home_mtime),
-            project_mtime: RwLock::new(project_mtime),
+            home_stamp: RwLock::new(home_stamp),
+            project_stamp: RwLock::new(project_stamp),
             reloads: tokio::sync::watch::channel(0).0,
         }
     }
@@ -94,22 +98,14 @@ impl PolicyEngine {
     pub fn check_reload(&self, project_cwd: Option<&str>) {
         let mut changed = false;
 
-        let current_home_mtime = file_mtime(&self.home_path);
-        {
-            let prev = self.home_mtime.read().unwrap();
-            if current_home_mtime != *prev {
-                changed = true;
-            }
+        let current_home_stamp = file_stamp(&self.home_path);
+        if current_home_stamp != *self.home_stamp.read().unwrap() {
+            changed = true;
         }
 
-        let project = project_cwd.map(|cwd| {
-            project_config_path(cwd).and_then(|p| {
-                let m = file_mtime(&p)?;
-                Some((p, m))
-            })
-        });
+        let project = project_cwd.map(|cwd| project_config_path(cwd).and_then(|p| file_stamp(&p)));
         if let Some(current) = &project
-            && *self.project_mtime.read().unwrap() != *current
+            && *self.project_stamp.read().unwrap() != *current
         {
             changed = true;
         }
@@ -121,9 +117,9 @@ impl PolicyEngine {
         tracing::info!("Policy config changed, reloading...");
         let new = compile_config(project_cwd);
         *self.compiled.write().unwrap() = new;
-        *self.home_mtime.write().unwrap() = current_home_mtime;
+        *self.home_stamp.write().unwrap() = current_home_stamp;
         if let Some(current) = project {
-            *self.project_mtime.write().unwrap() = current;
+            *self.project_stamp.write().unwrap() = current;
         }
         self.reloads.send_modify(|count| *count += 1);
         tracing::info!("Policy config reloaded");
@@ -296,6 +292,8 @@ fn project_config_path(cwd: &str) -> Option<PathBuf> {
     project_root(cwd).map(|root| root.join(".claude").join("tmux-mcp.toml"))
 }
 
-fn file_mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+fn file_stamp(path: &Path) -> Option<Stamp> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let mtime = std::fs::metadata(&resolved).ok()?.modified().ok()?;
+    Some((resolved, mtime))
 }
