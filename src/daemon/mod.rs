@@ -7,12 +7,13 @@ pub mod rpc;
 pub mod server;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::TmuxSession;
-use crate::pane::registry::{PaneRegistry, SyncAction};
+use crate::pane::registry::{PaneMode, PaneRegistry, SyncAction};
 use crate::pane::snapshot::Fact;
 use crate::parse::escape::unescape_tmux_output;
 use crate::parse::layout::parse_layout;
@@ -62,6 +63,7 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
         approvals: Mutex::new(crate::policy::approval::ApprovalStore::new()),
         policy: policy.clone(),
         started_at: std::time::Instant::now(),
+        send_delay: send_delay(),
     });
 
     // Start file watcher for live policy reload
@@ -156,10 +158,7 @@ async fn event_loop(
                 };
                 handle.set_mode(Fact::Unknown).await;
                 let mode = state.conn.lock().await.query_pane_mode(&pane_id).await;
-                match mode {
-                    Ok(mode) => handle.set_mode(Fact::Known(mode)).await,
-                    Err(e) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
-                }
+                handle.set_mode(queried_mode(&pane_id, mode)).await;
             }
 
             Notification::Exit { .. } | Notification::SessionClose { .. } => {
@@ -172,6 +171,24 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+/// `$TMUX_MCP_SEND_DELAY_MS`, which tests set to change a pane between a
+/// decision and its write; none otherwise.
+fn send_delay() -> Duration {
+    let millis = std::env::var("TMUX_MCP_SEND_DELAY_MS").ok();
+    Duration::from_millis(millis.and_then(|ms| ms.parse().ok()).unwrap_or(0))
+}
+
+/// The mode tmux's answer gives; still Unknown when it gave none.
+fn queried_mode(pane_id: &str, mode: connection::Result<PaneMode>) -> Fact<PaneMode> {
+    match mode {
+        Ok(mode) => Fact::Known(mode),
+        Err(e) => {
+            tracing::warn!("Failed to query mode for {}: {}", pane_id, e);
+            Fact::Unknown
+        }
+    }
 }
 
 /// Execute sync actions (used during bootstrap and topology changes).
@@ -198,13 +215,9 @@ async fn execute_actions(
                     }
                 }
                 // Later changes arrive as %pane-mode-changed.
-                match (
-                    conn.query_pane_mode(pane_id).await,
-                    registry.get_handle(pane_id),
-                ) {
-                    (Ok(mode), Some(handle)) => handle.set_mode(Fact::Known(mode)).await,
-                    (Ok(_), None) => {}
-                    (Err(e), _) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
+                let mode = conn.query_pane_mode(pane_id).await;
+                if let Some(handle) = registry.get_handle(pane_id) {
+                    handle.set_mode(queried_mode(pane_id, mode)).await;
                 }
             }
             SyncAction::PaneRemoved { pane_id } => {

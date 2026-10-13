@@ -16,7 +16,7 @@ async fn a_shell_is_confirmed_once_a_command_runs_in_it() {
 }
 
 /// A shell that sends no markers takes no command until its integration is
-/// injected, and the pane keeps no memory of the failed probe.
+/// injected; the failed probe shows in `list_panes` until then.
 #[tokio::test]
 async fn a_shell_without_integration_takes_commands_once_injected() {
     let h = Harness::new().await;
@@ -28,7 +28,7 @@ async fn a_shell_without_integration_takes_commands_once_injected() {
     let ran = h.run(&shell, "seq 1").await;
 
     assert!(refused.contains("inject_osc133"), "{refused}");
-    assert!(!row.contains("failed"), "{row}");
+    assert!(row.contains("failed"), "{row}");
     assert!(injected.contains("active"), "{injected:?}");
     assert!(ran.ends_with("1\n\nExit code: 0"), "{ran:?}");
 }

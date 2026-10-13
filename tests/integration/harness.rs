@@ -130,16 +130,22 @@ const POLL: Duration = Duration::from_millis(10);
 
 impl Harness {
     pub async fn new() -> Harness {
-        Harness::launch(None).await
+        Harness::launch(None, None).await
     }
 
     /// A harness whose MCP server, and the daemon it starts, run as another
     /// build of `version`; hooks run as this build.
     pub async fn claiming(version: &str) -> Harness {
-        Harness::launch(Some(version)).await
+        Harness::launch(Some(version), None).await
     }
 
-    async fn launch(version: Option<&str>) -> Harness {
+    /// A harness whose daemon waits `delay` before each write to a pane, so a
+    /// test can change the pane between a decision and its write.
+    pub async fn delaying_sends(delay: Duration) -> Harness {
+        Harness::launch(None, Some(delay)).await
+    }
+
+    async fn launch(version: Option<&str>, send_delay: Option<Duration>) -> Harness {
         // Under /tmp, so the sockets inside stay within `sun_path`'s 108 bytes.
         let dir = tempfile::Builder::new()
             .prefix("tmux-mcp-harness-")
@@ -179,7 +185,7 @@ impl Harness {
             panic!("tmux gave ids {ids:?}")
         };
 
-        let env = vec![
+        let mut env = vec![
             (
                 "TMUX",
                 format!(
@@ -192,6 +198,9 @@ impl Harness {
             ("HOME", home.display().to_string()),
             ("XDG_RUNTIME_DIR", runtime.display().to_string()),
         ];
+        if let Some(delay) = send_delay {
+            env.push(("TMUX_MCP_SEND_DELAY_MS", delay.as_millis().to_string()));
+        }
         let session = Session::start(&env, version).await;
         Harness {
             session,

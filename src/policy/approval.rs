@@ -2,7 +2,8 @@
 //!
 //! When the hook calls `request_approval` and gets `Ask`, the daemon stores
 //! a PendingApproval. When `command_run` arrives, it verifies the approval
-//! is still valid (same command, same pane context, not expired).
+//! is still valid (same command, same pane context, not expired), and
+//! consumes it once the command is sent.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -41,12 +42,10 @@ impl ApprovalStore {
         );
     }
 
-    /// Verify a pending approval matches the current request and consume it.
-    ///
-    /// Checks: exists, not expired, command matches, pane context matches.
-    /// On success, the approval is consumed (removed) and cannot be reused.
-    pub fn verify_and_consume(
-        &mut self,
+    /// Whether a pending approval covers this request: it exists, has not
+    /// expired, and names this command in this pane context.
+    pub fn verify(
+        &self,
         origin: &str,
         pane_id: &str,
         command: &str,
@@ -56,7 +55,6 @@ impl ApprovalStore {
         let approval = self.pending.get(&key).ok_or("No pending approval")?;
 
         if approval.created_at.elapsed().as_secs() >= APPROVAL_TTL_SECS {
-            self.pending.remove(&key);
             return Err("Approval expired".into());
         }
         if approval.command != command {
@@ -65,9 +63,13 @@ impl ApprovalStore {
         if approval.ctx != *live_ctx {
             return Err("Pane context changed since approval".into());
         }
-
-        self.pending.remove(&key);
         Ok(())
+    }
+
+    /// Removes the pending approval, once the command it covers is sent.
+    pub fn consume(&mut self, origin: &str, pane_id: &str) {
+        self.pending
+            .remove(&(origin.to_string(), pane_id.to_string()));
     }
 
     fn cleanup(&mut self) {
@@ -93,7 +95,7 @@ mod tests {
         let mut store = ApprovalStore::new();
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
-        assert!(store.verify_and_consume("%0", "%1", "rm foo", &c).is_ok());
+        assert!(store.verify("%0", "%1", "rm foo", &c).is_ok());
     }
 
     #[test]
@@ -101,11 +103,10 @@ mod tests {
         let mut store = ApprovalStore::new();
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
-        assert!(store.verify_and_consume("%0", "%1", "rm foo", &c).is_ok());
+        assert!(store.verify("%0", "%1", "rm foo", &c).is_ok());
+        store.consume("%0", "%1");
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &c)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm foo", &c).unwrap_err(),
             "No pending approval"
         );
     }
@@ -116,9 +117,7 @@ mod tests {
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm bar", &c)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm bar", &c).unwrap_err(),
             "Command changed since approval"
         );
     }
@@ -129,9 +128,7 @@ mod tests {
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         assert_eq!(
-            store
-                .verify_and_consume("%99", "%1", "rm foo", &c)
-                .unwrap_err(),
+            store.verify("%99", "%1", "rm foo", &c).unwrap_err(),
             "No pending approval"
         );
     }
@@ -142,9 +139,7 @@ mod tests {
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%2", "rm foo", &c)
-                .unwrap_err(),
+            store.verify("%0", "%2", "rm foo", &c).unwrap_err(),
             "No pending approval"
         );
     }
@@ -157,9 +152,7 @@ mod tests {
         let mut drifted = c.clone();
         drifted.hostname = Some("prod-server".into());
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &drifted)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm foo", &drifted).unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -172,9 +165,7 @@ mod tests {
         let mut drifted = c.clone();
         drifted.cwd = Some("/etc".into());
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &drifted)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm foo", &drifted).unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -187,9 +178,7 @@ mod tests {
         let mut drifted = c.clone();
         drifted.user = Some("root".into());
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &drifted)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm foo", &drifted).unwrap_err(),
             "Pane context changed since approval"
         );
     }
@@ -202,23 +191,19 @@ mod tests {
         store.store("%0", "%1", "rm bar", &c);
         // Old command should be gone
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &c)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm foo", &c).unwrap_err(),
             "Command changed since approval"
         );
         // New command should work
-        assert!(store.verify_and_consume("%0", "%1", "rm bar", &c).is_ok());
+        assert!(store.verify("%0", "%1", "rm bar", &c).is_ok());
     }
 
     #[test]
     fn no_pending_approval() {
-        let mut store = ApprovalStore::new();
+        let store = ApprovalStore::new();
         let c = ctx();
         assert_eq!(
-            store
-                .verify_and_consume("%0", "%1", "rm foo", &c)
-                .unwrap_err(),
+            store.verify("%0", "%1", "rm foo", &c).unwrap_err(),
             "No pending approval"
         );
     }

@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, MutexGuard, watch};
 
+use crate::pane::osc::OscEvent;
+use crate::pane::osc133::Osc133Phase;
 use crate::pane::processor::PaneProcessor;
 use crate::pane::snapshot::{CommandSummary, Fact, PaneSnapshot};
 use crate::parse::layout::LayoutPane;
@@ -23,7 +25,13 @@ pub struct PaneState {
     pub processor: PaneProcessor,
     mode: Fact<PaneMode>,
     policy: u64,
+    phase: Fact<Osc133Phase>,
+    integration: Fact<bool>,
 }
+
+/// The pane is past the *Pane version* a write was decided at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stale;
 
 /// The tmux mode a pane is in, such as copy mode. While one is on, tmux hands
 /// typed keys to the mode instead of the program.
@@ -54,7 +62,6 @@ pub struct TrackedPane {
     state_tx: watch::Sender<u64>,
     /// The latest *Pane snapshot*.
     snapshot_tx: watch::Sender<Arc<PaneSnapshot>>,
-    run: Mutex<()>,
 }
 
 impl TrackedPane {
@@ -73,6 +80,8 @@ impl TrackedPane {
             processor: PaneProcessor::new(lines, columns),
             mode: Fact::Unknown,
             policy: 0,
+            phase: Fact::Unknown,
+            integration: Fact::Unknown,
         };
         let snapshot = state.snapshot(0);
         TrackedPane {
@@ -81,7 +90,6 @@ impl TrackedPane {
             state: Mutex::new(state),
             state_tx: watch::channel(0u64).0,
             snapshot_tx: watch::channel(Arc::new(snapshot)).0,
-            run: Mutex::new(()),
         }
     }
 
@@ -90,22 +98,50 @@ impl TrackedPane {
         self.state.lock().await
     }
 
-    /// Lock the pane for one command_run, from its busy check until the pane
-    /// reports the command started; a second command_run waits, then sees
-    /// the pane busy.
-    pub async fn lock_run(&self) -> MutexGuard<'_, ()> {
-        self.run.lock().await
-    }
-
     /// The latest *Pane snapshot*.
     pub fn snapshot(&self) -> Arc<PaneSnapshot> {
         self.snapshot_tx.borrow().clone()
     }
 
-    /// Feeds the pane's output to its emulator.
+    /// Feeds the pane's output to its emulator. An A, B, C or D marker sets
+    /// the phase, and shows that the shell sends markers.
     pub async fn apply_output(&self, bytes: &[u8]) {
         let mut state = self.lock().await;
-        state.processor.process_chunk(bytes);
+        let events = state.processor.process_chunk(bytes);
+        let marked = events.iter().any(|osc| {
+            matches!(
+                osc.event,
+                OscEvent::Osc133 {
+                    marker: b'A'..=b'D',
+                    ..
+                }
+            )
+        });
+        if marked {
+            state.phase = marked_phase(state.processor.osc133_phase());
+            state.integration = Fact::Known(true);
+        }
+        self.publish(&state);
+    }
+
+    /// Errs when the pane is past `version`; else the phase is Unknown until
+    /// a marker answers the command line about to be written. Both happen
+    /// under the pane lock, so a write decided at the old version is `Stale`.
+    pub async fn sending_command(&self, version: u64) -> Result<(), Stale> {
+        let mut state = self.lock().await;
+        if self.snapshot().version != version {
+            return Err(Stale);
+        }
+        state.phase = Fact::Unknown;
+        self.publish(&state);
+        Ok(())
+    }
+
+    /// Whether the shell sends markers: false once a command line of the
+    /// daemon's waited for one in vain. A marker makes it true again.
+    pub async fn set_integration(&self, integration: Fact<bool>) {
+        let mut state = self.lock().await;
+        state.integration = integration;
         self.publish(&state);
     }
 
@@ -157,7 +193,8 @@ impl PaneState {
             version,
             policy: self.policy,
             mode: self.mode.clone(),
-            phase: self.processor.osc133_phase().clone(),
+            phase: self.phase.clone(),
+            integration: self.integration.clone(),
             input: self.processor.read_input(),
             input_garbled: self.processor.input_looks_garbled(),
             cwd: terminal.cwd.clone().filter(|_| reported),
@@ -165,6 +202,15 @@ impl PaneState {
             user: terminal.user.clone().filter(|_| reported),
             commands: terminal.commands.iter().map(CommandSummary::from).collect(),
         }
+    }
+}
+
+/// The phase a marker leaves: Unknown after D and between A and B, where the
+/// markers do not say whether the shell takes a command.
+fn marked_phase(phase: &Osc133Phase) -> Fact<Osc133Phase> {
+    match phase {
+        Osc133Phase::Idle | Osc133Phase::Prompt => Fact::Unknown,
+        phase => Fact::Known(phase.clone()),
     }
 }
 
@@ -314,6 +360,7 @@ impl PaneRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::osc133::Osc133Phase;
 
     fn lp(pane_number: u32, width: usize, height: usize, x: usize, y: usize) -> LayoutPane {
         LayoutPane {
@@ -522,6 +569,54 @@ mod tests {
         assert_eq!(copy.mode, copy_mode());
         assert_eq!(same.version, copy.version, "nothing changed");
         assert!(reloaded.version > same.version);
+    }
+
+    #[tokio::test]
+    async fn a_command_line_holds_the_phase_unknown_until_a_marker_answers() {
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        let fresh = pane.snapshot();
+        pane.apply_output(b"\x1b]133;A\x1b\\$ ").await;
+        let drawing = pane.snapshot();
+        pane.apply_output(b"\x1b]133;B\x1b\\").await;
+        let prompt = pane.snapshot();
+
+        let stale = pane.sending_command(fresh.version).await;
+        let sent = pane.sending_command(prompt.version).await;
+        let sending = pane.snapshot();
+        pane.apply_output(b"ls\r\n\x1b]133;E;ls\x1b\\").await;
+        let after_e = pane.snapshot();
+        pane.apply_output(b"\x1b]133;C\x1b\\").await;
+        let running = pane.snapshot();
+
+        assert_eq!(fresh.phase, Fact::Unknown, "before any marker");
+        assert_eq!(drawing.phase, Fact::Unknown, "between A and B");
+        assert_eq!(prompt.phase, Fact::Known(Osc133Phase::Input));
+        assert_eq!(stale, Err(Stale));
+        assert_eq!(sent, Ok(()));
+        assert_eq!(sending.phase, Fact::Unknown);
+        assert!(sending.version > prompt.version);
+        assert_eq!(after_e.phase, Fact::Unknown, "E answers nothing");
+        assert_eq!(
+            running.phase,
+            Fact::Known(Osc133Phase::Executing {
+                command: "ls".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_marker_shows_the_shell_sends_markers_even_after_a_wait_in_vain() {
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        let fresh = pane.snapshot();
+        pane.set_integration(Fact::Known(false)).await;
+        let in_vain = pane.snapshot();
+        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
+            .await;
+        let marked = pane.snapshot();
+
+        assert_eq!(fresh.integration, Fact::Unknown);
+        assert_eq!(in_vain.integration, Fact::Known(false));
+        assert_eq!(marked.integration, Fact::Known(true));
     }
 
     #[tokio::test]

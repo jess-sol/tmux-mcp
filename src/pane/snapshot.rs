@@ -3,9 +3,10 @@
 use crate::pane::osc133::Osc133Phase;
 use crate::pane::registry::PaneMode;
 use crate::pane::state::CommandRecord;
+use crate::policy::PaneContext;
 
-/// A fact the stream can announce before its value: Unknown until the value
-/// arrives. A decision that needs an Unknown fact waits for it.
+/// A fact of a pane as far as the daemon knows it: Unknown from an event
+/// that changes it until the event that says to what.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fact<T> {
     Unknown,
@@ -20,9 +21,13 @@ pub struct PaneSnapshot {
     /// The count of policy reloads: every decision reads the policy.
     pub policy: u64,
     pub mode: Fact<PaneMode>,
-    /// Where the shell's OSC 133 markers have taken the pane. A shell that
-    /// sends markers brings it to a prompt, which is its shell integration.
-    pub phase: Osc133Phase,
+    /// Where the shell's OSC 133 markers have taken the pane: Known at
+    /// `Input` or `Executing`, Unknown from a command line of the daemon's
+    /// until a marker answers it.
+    pub phase: Fact<Osc133Phase>,
+    /// Whether the shell sends OSC 133 markers: true from any marker, false
+    /// when a command line of the daemon's waited for one in vain.
+    pub integration: Fact<bool>,
     /// The text after the prompt.
     pub input: String,
     pub input_garbled: bool,
@@ -33,6 +38,17 @@ pub struct PaneSnapshot {
     pub user: Option<String>,
     /// Newest first.
     pub commands: Vec<CommandSummary>,
+}
+
+/// What policy and approvals judge a command by: where the next command runs.
+impl From<&PaneSnapshot> for PaneContext {
+    fn from(snapshot: &PaneSnapshot) -> Self {
+        PaneContext {
+            hostname: snapshot.host.clone(),
+            cwd: snapshot.cwd.clone(),
+            user: snapshot.user.clone(),
+        }
+    }
 }
 
 /// A command as the *Pane snapshot* lists it; its output is read apart.

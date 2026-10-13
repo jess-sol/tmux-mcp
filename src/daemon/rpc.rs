@@ -4,9 +4,10 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::{Duration, Instant};
 
 use crate::pane::osc133::Osc133Phase;
-use crate::pane::registry::{PaneHandle, PaneMode, PaneRegistry};
+use crate::pane::registry::{PaneHandle, PaneMode, PaneRegistry, Stale};
 use crate::pane::snapshot::{Fact, PaneSnapshot};
 use crate::pane::state::CommandRecord;
 use crate::policy;
@@ -55,6 +56,60 @@ pub struct DaemonState {
     pub approvals: Mutex<ApprovalStore>,
     pub policy: std::sync::Arc<crate::policy::PolicyEngine>,
     pub started_at: std::time::Instant,
+    /// `$TMUX_MCP_SEND_DELAY_MS`: a wait before each write to a pane, so a
+    /// test can change the pane between a decision and its write.
+    pub send_delay: Duration,
+}
+
+impl DaemonState {
+    /// Types `line` and Enter into the pane while it is still at `version`.
+    /// The phase is Unknown from then until a marker answers. The tmux
+    /// connection stays locked from the check through the write, so no other
+    /// write comes between them.
+    pub async fn send_command(
+        &self,
+        pane_id: &str,
+        version: u64,
+        line: &str,
+    ) -> Result<(), RpcError> {
+        let pane = self.pane_to_write(pane_id).await?;
+        let mut conn = self.conn.lock().await;
+        pane.sending_command(version)
+            .await
+            .map_err(|Stale| stale(pane_id))?;
+        conn.send_command(pane_id, line)
+            .await
+            .map_err(|e| RpcError::internal(format!("Failed to send to {pane_id}: {e}")))
+    }
+
+    /// Sends tmux key names to the pane while it is still at `version`.
+    pub async fn send_keys(&self, pane_id: &str, version: u64, keys: &str) -> Result<(), RpcError> {
+        let pane = self.pane_to_write(pane_id).await?;
+        let mut conn = self.conn.lock().await;
+        if pane.snapshot().version != version {
+            return Err(stale(pane_id));
+        }
+        conn.send_raw_keys(pane_id, keys)
+            .await
+            .map_err(|e| RpcError::internal(format!("Failed to send to {pane_id}: {e}")))
+    }
+
+    /// The pane a write goes to, after the test delay before each write.
+    async fn pane_to_write(&self, pane_id: &str) -> Result<PaneHandle, RpcError> {
+        tokio::time::sleep(self.send_delay).await;
+        self.registry
+            .read()
+            .await
+            .get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {pane_id}")))
+    }
+}
+
+/// A write refused because the pane changed after the decision to write.
+fn stale(pane_id: &str) -> RpcError {
+    RpcError::internal(format!(
+        "Pane {pane_id} changed before the send; nothing was sent. Try again."
+    ))
 }
 
 /// Dispatch an RPC method call.
@@ -542,38 +597,39 @@ fn capture_screen(ps: &crate::pane::registry::PaneState, lines: usize) -> String
     all_lines[start..end].join("\n")
 }
 
-/// Probe OSC 133 by sending ` :`: true when the probe's own command record
-/// completes and the pane is back at a prompt within the deadline, the full
-/// cycle a shell with integration sends.
+/// How long a command line of the daemon's waits for the shell's markers: a
+/// shell with integration answers at once.
+const MARKER_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Probes OSC 133 by sending ` :` at the snapshot's *Pane version*. Returns
+/// the snapshot that answers it: at `Input` when the shell sends markers,
+/// with integration false when it sends none.
 async fn probe_osc133(
     pane_id: &str,
     pane_handle: &PaneHandle,
     state: &Arc<DaemonState>,
-    deadline_ms: u64,
-) -> Result<bool, RpcError> {
-    let newest = |snapshot: &PaneSnapshot| snapshot.commands.first().map_or(0, |c| c.id);
-    let before = newest(&pane_handle.snapshot());
+    snapshot: &PaneSnapshot,
+) -> Result<Arc<PaneSnapshot>, RpcError> {
+    let rx = pane_handle.subscribe_state();
+    state.send_command(pane_id, snapshot.version, " :").await?;
+    Ok(at_prompt(pane_handle, rx).await)
+}
 
-    {
-        let mut conn = state.conn.lock().await;
-        conn.send_command(pane_id, " :")
-            .await
-            .map_err(|e| RpcError::internal(format!("Failed to probe: {}", e)))?;
-    }
-
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(deadline_ms);
-    let mut rx = pane_handle.subscribe_state();
+/// The first snapshot at `Input`. A shell that brings none in time sends no
+/// markers, so the snapshot after the wait says integration is false.
+async fn at_prompt(
+    pane_handle: &PaneHandle,
+    mut rx: tokio::sync::watch::Receiver<u64>,
+) -> Arc<PaneSnapshot> {
+    let deadline = Instant::now() + MARKER_TIMEOUT;
     loop {
         let snapshot = pane_handle.snapshot();
-        let probe_done = snapshot
-            .commands
-            .first()
-            .is_some_and(|c| c.id > before && c.completed);
-        if probe_done && matches!(snapshot.phase, Osc133Phase::Input) {
-            return Ok(true);
+        if snapshot.phase == Fact::Known(Osc133Phase::Input) {
+            return snapshot;
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
+        if Instant::now() >= deadline {
+            pane_handle.set_integration(Fact::Known(false)).await;
+            return pane_handle.snapshot();
         }
         tokio::select! {
             _ = rx.changed() => {}
@@ -606,16 +662,26 @@ struct PaneEntry {
     mode: Option<String>,
     /// Seconds since last terminal data received, or null if never seen.
     last_data_secs: Option<f64>,
-    /// "confirmed" at a prompt the shell's markers brought, else "unknown".
+    /// "confirmed" once the shell sent a marker, "failed" when a command line
+    /// got none, else "unknown".
     osc133_status: String,
 }
 
 /// What the OSC 133 phase says the pane is doing: "Busy", "Idle" or "Unknown".
-fn activity(phase: &Osc133Phase) -> &'static str {
+fn activity(phase: &Fact<Osc133Phase>) -> &'static str {
     match phase {
-        Osc133Phase::Executing { .. } => "Busy",
-        Osc133Phase::Prompt | Osc133Phase::Input => "Idle",
-        Osc133Phase::Idle => "Unknown",
+        Fact::Known(Osc133Phase::Executing { .. }) => "Busy",
+        Fact::Known(Osc133Phase::Input) => "Idle",
+        _ => "Unknown",
+    }
+}
+
+/// Whether the shell sends OSC 133 markers.
+fn osc133_status(integration: &Fact<bool>) -> &'static str {
+    match integration {
+        Fact::Known(true) => "confirmed",
+        Fact::Known(false) => "failed",
+        Fact::Unknown => "unknown",
     }
 }
 
@@ -659,10 +725,6 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
             .last_data
             .map(|t: std::time::Instant| t.elapsed().as_secs_f64());
         let snapshot = handle.snapshot();
-        let osc133_status = match snapshot.phase {
-            Osc133Phase::Prompt | Osc133Phase::Input => "confirmed",
-            Osc133Phase::Idle | Osc133Phase::Executing { .. } => "unknown",
-        };
 
         entries.push(PaneEntry {
             pane_id: handle.pane_id.clone(),
@@ -685,10 +747,10 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
             activity: activity(&snapshot.phase).to_string(),
             mode: match &snapshot.mode {
                 Fact::Known(PaneMode::On(mode)) => Some(mode.clone()),
-                Fact::Known(PaneMode::Off) | Fact::Unknown => None,
+                _ => None,
             },
             last_data_secs,
-            osc133_status: osc133_status.to_string(),
+            osc133_status: osc133_status(&snapshot.integration).to_string(),
         });
     }
 
@@ -791,210 +853,29 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    // --- Policy check ---
-    {
-        let ctx = read_pane_context(state, pane_id).await?;
-        let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
-        match result.decision {
-            policy::Decision::Allow => { /* proceed */ }
-            policy::Decision::Deny => {
-                return Err(RpcError {
-                    code: -32001,
-                    message: result.reason(),
-                });
-            }
-            // *Passthrough* comes only from the Bash *Channel*.
-            policy::Decision::Ask | policy::Decision::Passthrough => {
-                let verify = state.approvals.lock().await.verify_and_consume(
-                    origin_pane,
-                    pane_id,
-                    command,
-                    &ctx,
-                );
-                if let Err(msg) = verify {
-                    return Err(RpcError {
-                        code: -32001,
-                        message: format!(
-                            "Policy: {} (rule: {}). Install the tmux-mcp policy hook \
-                             for interactive approval, or update the policy.",
-                            msg,
-                            result.reason()
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
-    // Held until the C marker shows the command started, so a concurrent
-    // command_run on this pane sees it busy instead of passing the same check.
-    let run_lock = pane_handle.lock_run().await;
-
-    // --- Pre-execution guards ---
-    // Check for conditions that would cause the OSC 133 probe to timeout
-    // with a misleading error. Catch them early with specific messages.
-    // Briefly wait for a busy pane to become idle (handles probe `:` in flight
-    // from a prior call completing within milliseconds).
-    {
-        let guard_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-        let mut rx = pane_handle.subscribe_state();
-        loop {
-            {
-                let tp = pane_handle.lock().await;
-
-                // A mode takes typed keys, so the command would never reach
-                // the shell. Unknown waits for tmux to say which mode.
-                match &pane_handle.snapshot().mode {
-                    Fact::Known(PaneMode::On(mode)) => {
-                        return Err(RpcError::internal(format!(
-                            "Pane {pane_id} is in {mode}, which takes typed keys instead of the \
-                             shell: the person may be scrolling back or selecting. Wait for them \
-                             to leave it, ask them, or use a different pane."
-                        )));
-                    }
-                    Fact::Unknown if tokio::time::Instant::now() >= guard_deadline => {
-                        return Err(RpcError::internal(format!(
-                            "Pane {pane_id} changed mode and tmux has not said to which; try again."
-                        )));
-                    }
-                    Fact::Unknown => {
-                        drop(tp);
-                        tokio::select! {
-                            _ = rx.changed() => {}
-                            _ = tokio::time::sleep_until(guard_deadline) => {}
-                        }
-                        continue;
-                    }
-                    Fact::Known(PaneMode::Off) => {}
-                }
-
-                let is_busy = tp.processor.state().active_command().is_some()
-                    || matches!(tp.processor.osc133_phase(), Osc133Phase::Executing { .. });
-
-                if !is_busy {
-                    // Guard 2: User is typing
-                    if tp.processor.has_input_content() {
-                        let screen = capture_screen(&tp, 20);
-                        let garbled = if tp.processor.input_looks_garbled() {
-                            "\nThe cursor sits outside that text, so it may be a garbled line rather \
-                             than typing. If the screen shows no command being typed, press_key C-c \
-                             clears the line.\n"
-                        } else {
-                            ""
-                        };
-                        return Err(RpcError::internal(format!(
-                            "User is typing in pane {}. Wait for them to finish or use a different pane.\n\
-                             Read as input: {:?}\n{}\nScreen:\n{}",
-                            pane_id,
-                            tp.processor.read_input(),
-                            garbled,
-                            screen
-                        )));
-                    }
-                    break;
-                }
-
-                if tokio::time::Instant::now() >= guard_deadline {
-                    let cmd_text = tp
-                        .processor
-                        .osc133_phase()
-                        .executing_command()
-                        .or_else(|| {
-                            tp.processor
-                                .state()
-                                .active_command()
-                                .map(|c| c.command.as_str())
-                        })
-                        .unwrap_or("(unknown command)");
-                    let screen = capture_screen(&tp, 20);
-                    return Err(RpcError::internal(format!(
-                        "Pane {} is busy running '{}'. Use command_read to check status or wait.\n\nScreen:\n{}",
-                        pane_id, cmd_text, screen
-                    )));
-                }
-            }
-
-            tokio::select! {
-                _ = rx.changed() => {}
-                _ = tokio::time::sleep_until(guard_deadline) => {}
-            }
-        }
-    }
-
-    // --- OSC 133 gating ---
-    // A shell that sends markers is at the prompt they brought; any other
-    // pane is probed, so its shell either brings one or is refused.
-    if !matches!(pane_handle.snapshot().phase, Osc133Phase::Input)
-        && !probe_osc133(pane_id, &pane_handle, state, 500).await?
-    {
-        let tp = pane_handle.lock().await;
-        let screen = capture_screen(&tp, 20);
-        return Err(RpcError::internal(format!(
-            "OSC 133 probe failed — no markers detected. Use inject_osc133 to enable shell integration.\n\nScreen:\n{}",
-            screen
-        )));
-    }
-
-    // Parse read params
     let read_params = ReadParams::from_json(params)?;
 
-    // --- Send the command ---
-    // Snapshot the front command ID so we can wait for a *new* record
-    let id_before = {
-        let tp = pane_handle.lock().await;
-        tp.processor
-            .state()
-            .commands
-            .front()
-            .map(|c| c.id)
-            .unwrap_or(0)
-    };
-
-    {
-        let mut conn = state.conn.lock().await;
-        conn.send_command(pane_id, command)
-            .await
-            .map_err(|e| RpcError::internal(format!("Failed to send command: {}", e)))?;
+    // The probe types into the pane, so the pane's checks guard it too.
+    let mut snapshot = pane_handle.snapshot();
+    check_pane(pane_id, &pane_handle, &snapshot).await?;
+    if snapshot.phase == Fact::Unknown {
+        snapshot = probe_osc133(pane_id, &pane_handle, state, &snapshot).await?;
+        check_pane(pane_id, &pane_handle, &snapshot).await?;
     }
+    let approved = check_policy(state, origin_pane, pane_id, command, &snapshot).await?;
 
-    // --- Phase 1: wait up to 500 ms for C marker to push a new command record ---
-    // If no new record appears, OSC 133 is broken — error out with screen capture.
-    let marker_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-    let completion_deadline =
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
-    let new_command_id = {
-        let mut rx = pane_handle.subscribe_state();
-        loop {
-            {
-                let tp = pane_handle.lock().await;
-                if let Some(cmd) = tp.processor.state().commands.front()
-                    && cmd.id > id_before
-                {
-                    break cmd.id;
-                }
-            }
-            if tokio::time::Instant::now() >= marker_deadline {
-                tracing::warn!(
-                    "OSC 133 markers not seen after sending command to pane {}",
-                    pane_id
-                );
-                let tp = pane_handle.lock().await;
-                let screen = capture_screen(&tp, 20);
-                return Err(RpcError::internal(format!(
-                    "Command was sent but no OSC 133 markers detected. Shell integration may have stopped working. \
-                     Use debug_pane to inspect pane state.\n\nScreen:\n{}",
-                    screen
-                )));
-            }
-            tokio::select! {
-                _ = rx.changed() => {}
-                _ = tokio::time::sleep_until(marker_deadline) => {}
-            }
-        }
-    };
-    drop(run_lock);
+    let newest = snapshot.commands.first().map_or(0, |c| c.id);
+    let rx = pane_handle.subscribe_state();
+    state
+        .send_command(pane_id, snapshot.version, command)
+        .await?;
+    if approved {
+        state.approvals.lock().await.consume(origin_pane, pane_id);
+    }
+    let completion_deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let new_command_id = started_command(pane_id, &pane_handle, newest, rx).await?;
 
-    // --- Phase 2: shared wait/read loop ---
+    // --- Wait and read ---
     // Returns when the command completes, when next/head (± search) is satisfied,
     // or when the completion deadline elapses (status: "running").
     // Bare reads wait for completion (unlike command_read, which returns immediately).
@@ -1006,6 +887,135 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
         BareReadPolicy::WaitForCompletion,
     )
     .await
+}
+
+/// Refuses a pane where a command line would not reach a shell at its
+/// prompt. An Unknown phase passes only while integration is Unknown too:
+/// the probe makes both known.
+async fn check_pane(
+    pane_id: &str,
+    pane_handle: &PaneHandle,
+    snapshot: &PaneSnapshot,
+) -> Result<(), RpcError> {
+    check_mode(pane_id, snapshot)?;
+    let input = &snapshot.input;
+    let refusal = match (&snapshot.phase, &snapshot.integration) {
+        (Fact::Known(Osc133Phase::Executing { command }), _) => format!(
+            "Pane {pane_id} is busy running '{command}'. Use command_read to check status or wait."
+        ),
+        (Fact::Unknown, Fact::Known(true)) => {
+            format!("Pane {pane_id} is busy: a command line is on its way to its shell. Try again.")
+        }
+        (Fact::Unknown, Fact::Known(false)) => format!(
+            "Pane {pane_id} sent no OSC 133 marker for the last command line. Its shell may \
+             have no integration (inject_osc133 adds it), or the line may be unfinished, such \
+             as an open quote (press_key C-c clears it)."
+        ),
+        (Fact::Unknown, Fact::Unknown) => return Ok(()),
+        _ if !input.is_empty() => {
+            let garbled = if snapshot.input_garbled {
+                "\nThe cursor sits outside that text, so it may be a garbled line rather \
+                 than typing. If the screen shows no command being typed, press_key C-c \
+                 clears the line.\n"
+            } else {
+                ""
+            };
+            format!(
+                "User is typing in pane {pane_id}. Wait for them to finish or use a different \
+                 pane.\nRead as input: {input:?}\n{garbled}"
+            )
+        }
+        _ => return Ok(()),
+    };
+    let screen = capture_screen(&*pane_handle.lock().await, 20);
+    Err(RpcError::internal(format!("{refusal}\nScreen:\n{screen}")))
+}
+
+/// Refuses a pane in a mode: a mode takes typed keys, so they would never
+/// reach the shell.
+fn check_mode(pane_id: &str, snapshot: &PaneSnapshot) -> Result<(), RpcError> {
+    let refusal = match &snapshot.mode {
+        Fact::Known(PaneMode::Off) => return Ok(()),
+        Fact::Known(PaneMode::On(mode)) => format!(
+            "Pane {pane_id} is in {mode}, which takes typed keys instead of the shell: the \
+             person may be scrolling back or selecting. Wait for them to leave it, ask them, \
+             or use a different pane."
+        ),
+        Fact::Unknown => {
+            format!("Pane {pane_id} changed mode and tmux has not said to which; try again.")
+        }
+    };
+    Err(RpcError::internal(refusal))
+}
+
+/// Judges `command` where the snapshot says it runs. True when it runs on
+/// the person's approval, which the caller consumes once the command is sent.
+async fn check_policy(
+    state: &Arc<DaemonState>,
+    origin_pane: &str,
+    pane_id: &str,
+    command: &str,
+    snapshot: &PaneSnapshot,
+) -> Result<bool, RpcError> {
+    let ctx = policy::PaneContext::from(snapshot);
+    let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
+    match result.decision {
+        policy::Decision::Allow => Ok(false),
+        policy::Decision::Deny => Err(RpcError {
+            code: -32001,
+            message: result.reason(),
+        }),
+        // *Passthrough* comes only from the Bash *Channel*.
+        policy::Decision::Ask | policy::Decision::Passthrough => {
+            let verified = state
+                .approvals
+                .lock()
+                .await
+                .verify(origin_pane, pane_id, command, &ctx);
+            verified.map(|()| true).map_err(|msg| RpcError {
+                code: -32001,
+                message: format!(
+                    "Policy: {} (rule: {}). Install the tmux-mcp policy hook for interactive \
+                     approval, or update the policy.",
+                    msg,
+                    result.reason()
+                ),
+            })
+        }
+    }
+}
+
+/// The id of the command the pane started after `newest`: its C marker
+/// pushes a record. A shell that sends none in time sends no markers, so
+/// integration becomes false.
+async fn started_command(
+    pane_id: &str,
+    pane_handle: &PaneHandle,
+    newest: u64,
+    mut rx: tokio::sync::watch::Receiver<u64>,
+) -> Result<u64, RpcError> {
+    let deadline = Instant::now() + MARKER_TIMEOUT;
+    loop {
+        let snapshot = pane_handle.snapshot();
+        if let Some(command) = snapshot.commands.first()
+            && command.id > newest
+        {
+            return Ok(command.id);
+        }
+        if Instant::now() >= deadline {
+            pane_handle.set_integration(Fact::Known(false)).await;
+            let screen = capture_screen(&*pane_handle.lock().await, 20);
+            return Err(RpcError::internal(format!(
+                "Command was sent to pane {pane_id} but no OSC 133 markers came back. Shell \
+                 integration may have stopped working. Use debug_pane to inspect pane \
+                 state.\n\nScreen:\n{screen}"
+            )));
+        }
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
 }
 
 async fn handle_capture_pane(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
@@ -1065,26 +1075,33 @@ async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Resul
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    // --- Probe first: maybe markers already work ---
-    if probe_osc133(pane_id, &pane_handle, state, 500).await? {
+    let mut snapshot = pane_handle.snapshot();
+    check_mode(pane_id, &snapshot)?;
+    if snapshot.phase == Fact::Known(Osc133Phase::Input) {
         return Ok(json!({ "status": "already_active" }));
     }
-
-    // --- Inject the script ---
-    for line in OSC133_INJECT_LINES {
-        {
-            let mut conn = state.conn.lock().await;
-            conn.send_command(pane_id, line)
-                .await
-                .map_err(|e| RpcError::internal(format!("Failed to send injection: {}", e)))?;
+    if snapshot.phase == Fact::Unknown && snapshot.integration == Fact::Known(true) {
+        return Err(RpcError::internal(format!(
+            "Pane {pane_id} is busy: a command line is on its way to its shell. Try again."
+        )));
+    }
+    // A pane running a program is probed too: it may be a shell over ssh.
+    if snapshot.integration != Fact::Known(false) {
+        snapshot = probe_osc133(pane_id, &pane_handle, state, &snapshot).await?;
+        if snapshot.phase == Fact::Known(Osc133Phase::Input) {
+            return Ok(json!({ "status": "already_active" }));
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
-    // --- Post-inject probe ---
-    let inject_ok = probe_osc133(pane_id, &pane_handle, state, 500).await?;
+    // One line: each line of its own would bring markers, and so a new *Pane
+    // version*, before the next.
+    let rx = pane_handle.subscribe_state();
+    state
+        .send_command(pane_id, snapshot.version, &OSC133_INJECT_LINES.join(";"))
+        .await?;
 
-    if inject_ok {
+    let answered = at_prompt(&pane_handle, rx).await;
+    if answered.phase == Fact::Known(Osc133Phase::Input) {
         Ok(json!({ "status": "active" }))
     } else {
         let tp = pane_handle.lock().await;
@@ -1137,14 +1154,10 @@ async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Va
 
     // Subscribed before the snapshot, so no change between them goes unseen.
     let mut rx = pane_handle.subscribe_state();
+    let version = pane_handle.snapshot().version;
     let before = pane_view(&*pane_handle.lock().await);
 
-    {
-        let mut conn = state.conn.lock().await;
-        conn.send_raw_keys(pane_id, keys)
-            .await
-            .map_err(|e| RpcError::internal(format!("Failed to send keys: {}", e)))?;
-    }
+    state.send_keys(pane_id, version, keys).await?;
 
     // The screen is returned once the pane responds to the key, or after a
     // second for a key that changes nothing.
@@ -1171,29 +1184,6 @@ fn pane_view(ps: &crate::pane::registry::PaneState) -> ((usize, usize), Vec<Stri
 
 // --- Policy ---
 
-/// Read the current pane context for policy evaluation.
-async fn read_pane_context(
-    state: &Arc<DaemonState>,
-    pane_id: &str,
-) -> Result<policy::PaneContext, RpcError> {
-    let handle = {
-        let registry = state.registry.read().await;
-        registry
-            .get_handle(pane_id)
-            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
-    };
-    let tp = handle.lock().await;
-    let term_state = tp.processor.state();
-    // Only a report since the running command started tells where the next
-    // command runs.
-    let reported = term_state.osc7_since_command;
-    Ok(policy::PaneContext {
-        hostname: term_state.hostname.clone().filter(|_| reported),
-        cwd: term_state.cwd.clone().filter(|_| reported),
-        user: term_state.user.clone().filter(|_| reported),
-    })
-}
-
 /// The name of the pane's foreground process, from `/proc`, for display.
 async fn foreground_process(state: &Arc<DaemonState>, pane_id: &str) -> Option<String> {
     let handle = state.registry.read().await.get_handle(pane_id)?;
@@ -1213,17 +1203,21 @@ async fn handle_request_approval(
         .ok_or_else(|| RpcError::invalid_params("command is required"))?;
 
     // Window scoping still applies
-    let origin_pane = {
+    let (origin_pane, pane_handle) = {
         let registry = state.registry.read().await;
         let caller_window = resolve_caller_window(&registry, params)?;
         validate_pane_access(&registry, pane_id, &caller_window)?;
-        params["origin_pane"]
+        let origin_pane = params["origin_pane"]
             .as_str()
             .ok_or_else(|| RpcError::invalid_params("origin_pane is required"))?
-            .to_string()
+            .to_string();
+        let pane_handle = registry
+            .get_handle(pane_id)
+            .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?;
+        (origin_pane, pane_handle)
     };
 
-    let ctx = read_pane_context(state, pane_id).await?;
+    let ctx = policy::PaneContext::from(&*pane_handle.snapshot());
     let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
 
     let ctx_json = json!({

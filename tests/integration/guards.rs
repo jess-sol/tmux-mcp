@@ -1,5 +1,7 @@
 //! When `command_run` refuses to touch a pane.
 
+use std::time::Duration;
+
 use crate::harness::{Harness, SETTLE};
 
 #[tokio::test]
@@ -70,12 +72,17 @@ async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
         h.run(&shell, "sleep 1; seq 2")
     );
 
+    // Whichever reads the pane after the other's send sees it busy; one that
+    // read it before finds it changed at its own send.
     let replies = [&first, &second];
     let ran = replies
         .iter()
         .filter(|r| r.contains("Exit code: 0"))
         .count();
-    let refused = replies.iter().filter(|r| r.contains("busy")).count();
+    let refused = replies
+        .iter()
+        .filter(|r| r.contains("busy") || r.contains("changed before the send"))
+        .count();
     assert_eq!((ran, refused), (1, 1), "{first:?}\n{second:?}");
 }
 
@@ -97,6 +104,23 @@ async fn a_pane_in_copy_mode_says_so_and_refuses_commands_until_it_leaves() {
     assert!(refused.contains("copy-mode"), "{refused}");
     assert!(row.contains("copy-mode"), "{row}");
     assert!(ran.ends_with("Exit code: 0"), "{ran}");
+    assert!(!history.contains("seq 1"), "{history}");
+}
+
+/// A command goes out only at the *Pane version* its checks read: keys the
+/// person types between the checks and the write stop it.
+#[tokio::test]
+async fn a_pane_that_changes_before_the_send_runs_nothing() {
+    let h = Harness::delaying_sends(Duration::from_millis(1000)).await;
+    let shell = h.shell().await;
+
+    let (reply, ()) = tokio::join!(h.run(&shell, "seq 1"), async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        shell.type_text("x");
+    });
+    let history = h.history(&shell).await;
+
+    assert!(reply.contains("changed before"), "{reply}");
     assert!(!history.contains("seq 1"), "{history}");
 }
 
