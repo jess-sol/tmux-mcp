@@ -461,7 +461,9 @@ async fn the_builtin_policy_decides_common_lines() {
         "ssh prod ls" => (Ask, _),
         "ssh prod 'eval x'" => (Deny, _),
         "ssh -o ProxyCommand=x prod ls" => (Ask, _),
-        "cat ~/notes" => (Allow, _),
+        // Tilde paths remain Unknown to path analysis, so the tmux-only
+        // outside-project guard asks; native Bash leaves this to its host.
+        "cat ~/notes" => (Ask, Pass),
         // A cd moves the rest of its && chain; after ;, || or a newline it may have failed
         "cd src" => (Allow, _),
         "cd /etc" => (Ask, _),

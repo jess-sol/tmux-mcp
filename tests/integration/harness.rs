@@ -220,17 +220,34 @@ impl Harness {
     /// prompt shows and `list_panes` lists it. Each call halves the harness's
     /// pane, so a test makes one.
     pub async fn shell(&self) -> Shell {
-        self.open_shell("exec bash --noprofile -i").await
+        self.pane_shell(&format!("exec {} --noprofile -i", modern_bash()), |s| {
+            s.lines().any(|row| row == "$")
+        })
+        .await
     }
 
     /// A `shell` whose bash skips the `.bashrc`, so it sends no OSC 133
     /// markers until `inject_osc133`.
     pub async fn shell_without_integration(&self) -> Shell {
-        self.open_shell("PS1='$ ' exec bash --noprofile --norc -i")
-            .await
+        self.pane_shell("PS1='$ ' exec bash --noprofile --norc -i", |s| {
+            s.lines().any(|row| row == "$")
+        })
+        .await
     }
 
-    async fn open_shell(&self, program: &str) -> Shell {
+    /// A fish pane beside the harness's own, as `shell` is a bash one. No
+    /// config is read: the built-in prompt keeps the test's prompt — and, on
+    /// fish 4.x, its native OSC 133 markers — deterministic.
+    pub async fn fish(&self, fish: &str) -> Shell {
+        self.pane_shell(&format!("exec {fish} --no-config"), |s| {
+            s.lines().any(|row| row.trim_end().ends_with('>'))
+        })
+        .await
+    }
+
+    /// A pane running `exec_command`, up once the prompt predicate matches the
+    /// tmux screen and `list_panes` lists the pane.
+    async fn pane_shell(&self, exec_command: &str, prompt: impl Fn(&str) -> bool) -> Shell {
         let cwd = self.dir().to_str().expect("a UTF-8 temp dir");
         let split = [
             "split-window",
@@ -240,7 +257,7 @@ impl Harness {
             "#{pane_id}",
             "-c",
             cwd,
-            program,
+            exec_command,
         ];
         let pane = run(tmux(&self.socket).args(split)).trim().to_string();
         let shell = Shell {
@@ -248,9 +265,7 @@ impl Harness {
             pane,
         };
 
-        shell
-            .wait_until(SETTLE, |s| s.lines().any(|row| row == "$"))
-            .expect("a prompt");
+        shell.wait_until(SETTLE, prompt).expect("a prompt");
         let deadline = Instant::now() + SETTLE;
         while self.list_panes().await.find(&shell).is_none() {
             assert!(
@@ -379,6 +394,52 @@ impl Harness {
     /// daemon, which the next `command_run` of that command consumes.
     pub fn decision(&self, shell: &Shell, command: &str) -> Decision {
         self.hook(shell, command).0
+    }
+
+    /// The raw stdout of `policy-check` on `input`, with `extra_env` on top of
+    /// the harness's environment — for the Pi contract, which is no Claude
+    /// envelope.
+    pub fn hook_raw(&self, extra_env: &[(&'static str, String)], input: Value) -> String {
+        let env: Vec<(&'static str, String)> = self
+            .env
+            .iter()
+            .cloned()
+            .chain(extra_env.iter().cloned())
+            .collect();
+        let mut hook = tmux_mcp(&env)
+            .arg("policy-check")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the tmux-mcp policy-check hook");
+        hook.stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(input.to_string().as_bytes())
+            .expect("hook input");
+        let output = hook.wait_with_output().expect("the hook's answer");
+        assert!(
+            output.status.success(),
+            "hook failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("UTF-8 output")
+    }
+
+    /// `tmux-mcp ensure-target` in the harness's session, as the Pi extension
+    /// runs it: the parsed JSON object, or the stderr of a refusal.
+    pub fn ensure_target(&self, args: &[&str]) -> Result<Value, String> {
+        let output = tmux_mcp(&self.env)
+            .arg("ensure-target")
+            .args(args)
+            .output()
+            .expect("the tmux-mcp ensure-target command");
+        if output.status.success() {
+            Ok(serde_json::from_slice(&output.stdout).expect("ensure-target's JSON"))
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
     }
 
     /// The hook's decision and its reason, which a deny shows to Claude.
@@ -687,6 +748,11 @@ impl Session {
 }
 
 impl Shell {
+    /// This pane's tmux id (e.g. "%1").
+    pub fn id(&self) -> &str {
+        &self.pane
+    }
+
     /// The tool arguments that name this pane.
     fn target(&self) -> Map<String, Value> {
         Map::from_iter([("pane_id".to_string(), json!(self.pane))])
@@ -722,6 +788,42 @@ impl Read {
     }
 }
 
+/// The bash the test panes run, preferring a modern one.
+///
+/// On bash 4.4+ the OSC 133 `C` marker is emitted from `PS0`, which bash fires
+/// for every command form including `( ... )` subshells. bash 3.2 (the macOS
+/// default) has no `PS0` and its `DEBUG` trap does not run inside subshells, so
+/// subshell commands would not be tracked. Preferring an installed bash >= 4.4
+/// keeps the suite deterministic; `bash` from `PATH` is the fallback.
+fn modern_bash() -> String {
+    const CANDIDATES: &[&str] = &[
+        "/opt/homebrew/bin/bash",
+        "/usr/local/bin/bash",
+        "/run/current-system/sw/bin/bash",
+        "bash",
+        "/bin/bash",
+    ];
+    for candidate in CANDIDATES {
+        let Ok(out) = Command::new(candidate).arg("--version").output() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        // e.g. "GNU bash, version 5.2.37(1)-release (aarch64-apple-darwin24.5.0)"
+        if let Some(rest) = text.split("version ").nth(1) {
+            let mut parts = rest.split(['.', '(', ' ', ')']);
+            let major: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if major > 4 || (major == 4 && minor >= 4) {
+                return candidate.to_string();
+            }
+        }
+    }
+    "bash".to_string()
+}
+
 /// A tmux client of the harness's server. Every tmux call is built here, so
 /// the isolation cannot be forgotten at one call site.
 fn tmux(socket: &Path) -> Command {
@@ -751,11 +853,20 @@ fn judgement(row: &Value) -> (Decision, String) {
 }
 
 /// The tmux-mcp binary in `env`, with the developer's `TMUX` and `TMUX_PANE`
-/// gone.
+/// gone — and the harness-detection variables too, so `policy-check` answers
+/// with the default (Claude Code) contract no matter which agent host runs
+/// the tests.
 fn tmux_mcp(env: &[(&'static str, String)]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tmux-mcp"));
     cmd.env_remove("TMUX")
         .env_remove("TMUX_PANE")
+        .env_remove("TMUX_MCP_HARNESS")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("PI_MODEL")
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("PI_AGENT_DIR")
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
         .envs(env.iter().map(|(name, value)| (name, value)));
     cmd
 }

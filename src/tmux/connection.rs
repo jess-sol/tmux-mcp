@@ -34,13 +34,28 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// How long to wait for a control-mode command response before giving up.
+///
+/// tmux answers every command with a `%begin/%end` block; a wait longer than
+/// this means the response was lost or the connection is unhealthy, so we
+/// surface an error rather than block the daemon forever. Override with
+/// `TMUX_MCP_EXEC_TIMEOUT_MS` (default 15000).
+fn exec_timeout() -> std::time::Duration {
+    let millis = std::env::var("TMUX_MCP_EXEC_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(15_000);
+    std::time::Duration::from_millis(millis)
+}
+
 // --- Split connection types ---
 
 /// Command-sending half of the tmux connection.
 /// Send commands, keys, enable/disable output. Goes behind `Arc<Mutex<>>`.
 pub struct TmuxCommands {
     stdin: ChildStdin,
-    cmd_tx: mpsc::Sender<reader::CommandRegistration>,
+    cmd_tx: mpsc::Sender<reader::ReaderCommand>,
     _child: Child,
     _reader_handle: tokio::task::JoinHandle<()>,
     session: String,
@@ -70,15 +85,46 @@ pub async fn connect(session: &TmuxSession) -> Result<(TmuxCommands, TmuxNotific
 
     let mut child = cmd.spawn().context(SpawnSnafu)?;
 
-    let stdin = child.stdin.take().expect("stdin was piped");
+    let mut stdin = child.stdin.take().expect("stdin was piped");
     let stdout = child.stdout.take().expect("stdout was piped");
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<reader::CommandRegistration>(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<reader::ReaderCommand>(32);
     let (notification_tx, notification_rx) = mpsc::channel::<Notification>(4096);
 
-    let reader_handle = reader::spawn_reader(stdout, cmd_rx, notification_tx);
+    // Priming: drain the unsolicited attach `%begin/%end` block before routing
+    // real commands, so the response FIFO starts aligned (see `reader::spawn_reader`).
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let prime_marker = format!("TMUX_MCP_PRIME_{}", std::process::id());
+    let reader_handle = reader::spawn_reader(
+        stdout,
+        cmd_rx,
+        notification_tx,
+        ready_tx,
+        prime_marker.clone(),
+    );
 
-    let mut commands = TmuxCommands {
+    // Send the marker command directly (unregistered): its response is the
+    // boundary between pre-prime noise and aligned command routing. The marker
+    // must stay on a single line: control mode treats every newline as a
+    // command separator, so a newline inside the quoted argument becomes a
+    // stray command that answers with an extra %error block and desyncs the
+    // response FIFO for the first registered command.
+    stdin
+        .write_all(format!("display-message -p '{}'\n", prime_marker).as_bytes())
+        .await
+        .context(WriteSnafu)?;
+    stdin.flush().await.context(WriteSnafu)?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await {
+        Ok(Ok(())) => tracing::debug!("tmux control mode primed"),
+        Ok(Err(_)) => tracing::warn!("Reader closed before priming completed"),
+        Err(_) => {
+            tracing::warn!("Priming timed out; routing responses anyway");
+            let _ = cmd_tx.send(reader::ReaderCommand::StopPriming).await;
+        }
+    }
+
+    let commands = TmuxCommands {
         stdin,
         cmd_tx,
         _child: child,
@@ -89,12 +135,6 @@ pub async fn connect(session: &TmuxSession) -> Result<(TmuxCommands, TmuxNotific
     let notifications = TmuxNotifications {
         rx: notification_rx,
     };
-
-    // Consume initial attach response. tmux -C implicitly runs attach,
-    // which sends a response block we need to drain.
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    let init = commands.execute("display-message").await;
-    tracing::debug!("Initial display-message result: {:?}", init);
 
     Ok((commands, notifications))
 }
@@ -107,12 +147,21 @@ impl TmuxCommands {
     }
 
     /// Execute a tmux control mode command and wait for the response.
+    ///
+    /// The wait is bounded by [`exec_timeout`]: if tmux does not answer (a slow
+    /// or lost `%begin/%end` block), this returns an error instead of awaiting
+    /// forever. Without this bound a single unanswered command could hold the
+    /// connection lock (and, in the event loop, the registry lock) for the
+    /// lifetime of the daemon, wedging every subsequent RPC.
     pub async fn execute(&mut self, command: &str) -> Result<String> {
         let (response_tx, response_rx) = oneshot::channel();
 
         // Register the command with the reader BEFORE writing to stdin.
         self.cmd_tx
-            .send((command.to_string(), response_tx))
+            .send(reader::ReaderCommand::Register {
+                command: command.to_string(),
+                response_tx,
+            })
             .await
             .map_err(|_| Error::ConnectionClosed)?;
 
@@ -126,8 +175,22 @@ impl TmuxCommands {
             .context(WriteSnafu)?;
         self.stdin.flush().await.context(WriteSnafu)?;
 
-        // Wait for response
-        let response = response_rx.await.map_err(|_| Error::ConnectionClosed)?;
+        // Wait for response, but never indefinitely. A late response still
+        // pairs with this (now abandoned) registration, so the reader's FIFO
+        // stays in sync and the next command is routed correctly.
+        let timeout = exec_timeout();
+        let response = match tokio::time::timeout(timeout, response_rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => return Err(Error::ConnectionClosed),
+            Err(_) => {
+                return Err(Error::CommandFailed {
+                    message: format!(
+                        "timed out after {:?} waiting for tmux response to `{}`",
+                        timeout, command
+                    ),
+                });
+            }
+        };
 
         if response.is_error {
             Err(Error::CommandFailed {
@@ -213,6 +276,21 @@ impl TmuxCommands {
             .map_err(|_| Error::CommandFailed {
                 message: format!("invalid pane_pid: {}", output.trim()),
             })
+    }
+
+    /// Query the foreground command name of a pane (tmux's own view).
+    ///
+    /// This is the *effective* shell/command, which can differ from `pane_pid`
+    /// when tmux runs a login shell that then spawns another shell (e.g.
+    /// `default-shell fish` with `bash` as a child).
+    pub async fn query_pane_command(&mut self, pane_id: &str) -> Result<String> {
+        let output = self
+            .execute(&format!(
+                "display-message -t {} -p '#{{pane_current_command}}'",
+                pane_id
+            ))
+            .await?;
+        Ok(output.trim().to_string())
     }
 }
 

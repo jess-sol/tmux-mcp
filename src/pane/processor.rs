@@ -146,16 +146,16 @@ impl PaneProcessor {
     /// across wrapped lines. Returns empty string if no input_start is set or
     /// no content has been typed.
     pub fn read_input(&self) -> String {
-        let Some((start_line, start_col)) = self.state.input_start else {
+        let Some((start_abs, start_col)) = self.state.input_start else {
             return String::new();
         };
 
         let mut text = String::new();
-        for line_idx in start_line..self.screen_lines() {
-            let line_text = self.screen_line_text(line_idx);
-            if line_idx == start_line {
+        for abs in start_abs..self.buffer_end_abs() {
+            let line_text = self.abs_line_text(abs);
+            if abs == start_abs {
                 // First line: skip prompt (everything before start_col).
-                // chars().skip() works here because screen_line_text() returns one char
+                // chars().skip() works here because abs_line_text() returns one char
                 // per terminal column (wide char spacer cells become ' ').
                 let input: String = line_text.chars().skip(start_col).collect();
                 text.push_str(&input);
@@ -163,7 +163,16 @@ impl PaneProcessor {
                 if line_text.is_empty() {
                     break;
                 }
-                text.push_str(&line_text);
+                // A line starting with the secondary prompt is a continuation
+                // (heredoc, unclosed quote): strip the prompt and join with a
+                // newline, as the shell reads it. A wrapped long line has no
+                // prompt and joins directly.
+                if let Some(cont) = line_text.strip_prefix("> ") {
+                    text.push('\n');
+                    text.push_str(cont);
+                } else {
+                    text.push_str(&line_text);
+                }
             }
         }
         text.trim().to_string()
@@ -179,50 +188,78 @@ impl PaneProcessor {
     /// Whether the text after the prompt looks garbled rather than typed:
     /// typing, editing included, keeps the cursor within its line.
     pub fn input_looks_garbled(&self) -> bool {
-        let Some(end_line) = self.input_end_line() else {
+        let Some(end_abs) = self.input_end_line() else {
             return false;
         };
-        !self.has_input_before_cursor() || self.cursor_position().0 > end_line
+        !self.has_input_before_cursor() || self.cursor_abs_position().0 > end_abs
     }
 
     /// The line the cursor stands on after typing the input's last
     /// character: the next one when that character fills the right edge.
-    fn input_end_line(&self) -> Option<usize> {
-        let (start_line, start_col) = self.state.input_start?;
+    /// Absolute, like `input_start`.
+    fn input_end_line(&self) -> Option<i64> {
+        let (start_abs, start_col) = self.state.input_start?;
         let mut end = None;
         // The lines `read_input` reads, one char per column.
-        for line in start_line..self.screen_lines() {
-            let from = if line == start_line { start_col } else { 0 };
-            let width = self.screen_line_text(line).chars().count();
+        for abs in start_abs..self.buffer_end_abs() {
+            let from = if abs == start_abs { start_col } else { 0 };
+            let width = self.abs_line_text(abs).chars().count();
             if width > from {
-                end = Some((line, width));
-            } else if line != start_line {
+                end = Some((abs, width));
+            } else if abs != start_abs {
                 break;
             }
         }
-        end.map(|(line, width)| line + usize::from(width >= self.columns()))
+        end.map(|(abs, width)| abs + i64::from(width >= self.columns()))
     }
 
     /// Whether any cell from the end of the prompt to the cursor holds text.
     fn has_input_before_cursor(&self) -> bool {
-        let Some((start_line, start_col)) = self.state.input_start else {
+        let Some((start_abs, start_col)) = self.state.input_start else {
             return false;
         };
-        let (cursor_line, cursor_col) = self.cursor_position();
-        (start_line..=cursor_line).any(|line| {
-            let from = if line == start_line { start_col } else { 0 };
-            let to = if line == cursor_line {
+        let (cursor_abs, cursor_col) = self.cursor_abs_position();
+        (start_abs..=cursor_abs).any(|abs| {
+            let from = if abs == start_abs { start_col } else { 0 };
+            let to = if abs == cursor_abs {
                 cursor_col
             } else {
                 usize::MAX
             };
             // One char per column, as in `read_input`.
-            let text = self.screen_line_text(line);
+            let text = self.abs_line_text(abs);
             text.chars()
                 .skip(from)
                 .take(to.saturating_sub(from))
                 .any(|c| !c.is_whitespace())
         })
+    }
+
+    /// The cursor as (absolute line, column); see `input_start`.
+    fn cursor_abs_position(&self) -> (i64, usize) {
+        let (line, col) = self.cursor_position();
+        (self.term.grid().history_size() as i64 + line as i64, col)
+    }
+
+    /// One past the buffer's last line, as an absolute line.
+    fn buffer_end_abs(&self) -> i64 {
+        self.term.grid().total_lines() as i64
+    }
+
+    /// Read a line by absolute line number (history lines included), one char
+    /// per column, trailing blanks trimmed. Out-of-range lines read as empty.
+    fn abs_line_text(&self, abs: i64) -> String {
+        let grid = self.term.grid();
+        let line = abs - grid.history_size() as i64;
+        if line < -(grid.history_size() as i64) || line >= grid.screen_lines() as i64 {
+            return String::new();
+        }
+        let row = &grid[alacritty_terminal::index::Line(line as i32)];
+        let mut text = String::new();
+        for cell in row {
+            text.push(cell.c);
+        }
+        text.trim_end().to_string()
     }
 
     /// Resize the headless terminal to new dimensions.
@@ -306,9 +343,10 @@ impl PaneProcessor {
                 );
 
                 // Snapshot cursor position at B marker — marks the start of
-                // user input (right after the prompt).
+                // user input (right after the prompt). Stored as an absolute
+                // line so a later screen scroll does not invalidate it.
                 if *marker == b'B' {
-                    self.state.input_start = Some(self.cursor_position());
+                    self.state.input_start = Some(self.cursor_abs_position());
                 }
 
                 // Clear input_start when leaving Input phase (command started

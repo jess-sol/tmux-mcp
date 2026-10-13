@@ -10,4 +10,6 @@ mod guards;
 mod harness_contract;
 mod keys;
 mod panes;
+mod pi;
+mod pi_bash;
 mod policy;

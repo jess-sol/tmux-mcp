@@ -44,10 +44,10 @@ pub struct TerminalState {
     seq_counter: u64,
     /// When the most recent terminal data (%output) was received.
     pub last_data: Option<Instant>,
-    /// Cursor position (line, col) at B marker time — the start of user input,
-    /// right after the prompt. Used by PaneProcessor to read typed input from
-    /// the terminal grid.
-    pub input_start: Option<(usize, usize)>,
+    /// Cursor position at B marker time — the start of user input, right
+    /// after the prompt — as (absolute line, column). Absolute lines keep the
+    /// input anchored when output scrolls the terminal grid.
+    pub input_start: Option<(i64, usize)>,
 }
 
 impl TerminalState {

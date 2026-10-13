@@ -46,7 +46,9 @@ The daemon tracks the full command lifecycle through [OSC 133 semantic prompts](
 A (prompt shown) → B (input submitted) → C (execution started) → D (command finished)
 ```
 
-Each transition is tracked as a state machine with graceful recovery — if markers arrive out of order or a subshell swallows them, the daemon recovers without corrupting state. For SSH sessions where the remote shell lacks integration, `inject_osc133` installs markers into a running bash session on the fly.
+Each transition is tracked as a state machine with graceful recovery — if markers arrive out of order or a subshell swallows them, the daemon recovers without corrupting state. For SSH sessions where the remote shell lacks integration, `inject_osc133` installs markers into a running **bash** or **fish** session on the fly (other shells are reported by name rather than instrumented).
+
+**Bash version note:** on bash 4.4+ the `C` (execution started) marker is emitted from `PS0`, which covers every command form including `( ... )` subshells. Bash 3.2 (the macOS default at `/bin/bash`) predates `PS0` and falls back to a `DEBUG` trap, which bash 3.2 does not fire inside subshells — those commands are not tracked until the next prompt. Use bash 4.4+ (e.g. Homebrew or nix bash) or fish for full coverage.
 
 [OSC 7](https://codeberg.org/dnkl/foot/wiki/OSC7) sequences are used to track the current working directory, hostname, and user for each pane. The policy engine uses this context to scope rules — e.g., allowing `cargo` only under certain paths, or blocking commands on production hosts.
 
@@ -107,7 +109,8 @@ When the policy engine returns "ask" and a human approves, that approval is boun
 | `command_history` | List recent commands and their exit codes |
 | `press_key` | Send control keys (C-c, C-d, Enter, etc.) |
 | `debug_pane` | The pane's visible screen, for a pane in an unusual state |
-| `inject_osc133` | Inject shell integration into bash panes (needed for SSH sessions) |
+| `inject_osc133` | Inject shell integration into bash or fish panes (needed for SSH sessions) |
+| `ensure_pane` | Return a safe pane to target — picks an existing non-origin pane, or creates a scratch pane when the agent's pane is the only one |
 
 ## Setup
 
@@ -230,8 +233,10 @@ Policy files hold command grammars and CEL rules. Rules from all three sources c
 | Source | Path | Purpose |
 |--------|------|---------|
 | Built-in | (compiled into binary) | Built-in grammars, rules and lints |
-| User | `~/.claude/tmux-mcp.toml` | Personal rules across all projects |
-| Project | `.claude/tmux-mcp.toml` | Project-specific rules |
+| User | `~/.pi/agent/tmux-mcp.toml` (Pi) or `~/.claude/tmux-mcp.toml` (Claude Code) | Personal rules across all projects |
+| Project | `.pi/tmux-mcp.toml` (Pi) or `.claude/tmux-mcp.toml` (Claude Code) | Project-specific rules |
+
+The user and project files' Pi and Claude locations are interchangeable: the harness-preferred path is tried first, then the other, and whichever exists wins.
 
 A reason starts with the id of the rule that decided. `(could not be ruled out)` means the rule fired on something unknown, usually an option the command's grammar doesn't declare. To loosen a built-in rule in one project, exempt its id:
 
@@ -244,7 +249,7 @@ action = "allow"
 exempts = ["git-push-force"]
 ```
 
-Use `/tmux-policy` to write rules, or edit the files directly. To see what the policy decides, and why, without running anything:
+Use `/tmux-policy` (Claude Code) or `/skill:tmux-policy` (Pi) to write rules, or edit the files directly. To see what the policy decides, and why, without running anything:
 
 ```sh
 tmux-mcp policy-eval 'kill -9 1234' 'cargo build'
@@ -257,6 +262,24 @@ cargo build
   tmux  allow        cargo
   bash  deny         prefer-tmux: …
 ```
+
+## Pi integration
+
+The `pi/` directory is a self-contained [Pi package](https://pi.dev/packages) that leaves the Claude Code setup above untouched. It wraps the same binary and daemon:
+
+- Adds a Pi extension that gates `command_run`, always confirms `press_key`, replaces Pi's built-in `bash` tool with tmux `command_run` when inside tmux, ensures a safe target pane (creating a scratch pane when Pi's pane is the only one), and publishes a footer status line for `pi-open-tui`.
+- Checks Pi's native `bash` tool through the shared Bash-channel policy even outside tmux, using the execution cwd and no daemon; outside tmux there is no tool replacement or pane creation.
+- Works with `pi-mcp-adapter` (via its tool-approval broker event) or Pi's built-in MCP (via `tool_call`).
+- Refuses `command_run` on the origin pane (the one hosting the agent) at the daemon level, and supports bash and fish shell integration.
+- Ships an up-to-date Pi policy skill at `pi/skills/tmux-policy/SKILL.md` for command grammars, channel-specific rules, exemptions, load-error diagnosis, and `policy-eval` verification; plus an `mcp.json` example at `pi/mcp.example.json`.
+
+Install and configure it with the instructions in [`pi/README.md`](pi/README.md):
+
+```sh
+pi install ./pi
+```
+
+`tmux-mcp policy-check` detects the calling host from the environment (`TMUX_MCP_HARNESS`, then `PI_*`, then `CLAUDECODE`) and emits either the Claude `PreToolUse` envelope or the neutral Pi decision object. `--claude` and `--pi` force a specific contract; neither is required for normal use.
 
 ## Workflow
 

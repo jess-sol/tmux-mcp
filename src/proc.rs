@@ -45,6 +45,37 @@ fn read_comm(pid: u32) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Best-effort executable name (basename) for a PID.
+///
+/// Prefers `/proc` on Linux and falls back to `ps -o comm=` on macOS/BSD,
+/// where `/proc` does not exist. Returns `None` if the process name can't be
+/// determined.
+pub fn process_name(pid: u32) -> Option<String> {
+    if let Some(name) = read_comm(pid) {
+        return Some(name);
+    }
+    process_name_via_ps(pid)
+}
+
+fn process_name_via_ps(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // macOS `ps -o comm=` usually returns a full path; take the basename and
+    // strip the leading `-` some systems use to mark a login shell.
+    let base = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    Some(base.trim_start_matches('-').to_string())
+}
+
 /// Read `/proc/{pid}/cwd` — symlink to the current working directory.
 fn read_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
