@@ -3,9 +3,10 @@
 tmux-mcp lets an AI agent work in a person's real tmux panes: it runs
 commands, reads their output and screens as the person would see them,
 and asks the person before anything risky. Each subsystem serves one of
-four aims: report exactly what was received, know when a command starts
-and finishes, steer the agent with guardrails rather than sandbox it, and
-prove behavior by driving the shipped binary.
+five aims: report exactly what was received, know when a command starts
+and finishes, write to a pane only in the state a decision read, steer
+the agent with guardrails rather than sandbox it, and prove behavior by
+driving the shipped binary.
 
 ## Daemon
 
@@ -26,7 +27,9 @@ out per-request cancellation.
 
 One per agent session. It shares one daemon connection; the client routes
 each reply to its request by id, so tool calls overlap. A tool error shows
-the daemon's message only.
+the daemon's message only. It keeps the session's place in each command's
+output, as the offset each read reply returns, so the daemon keeps no
+state for a read and two sessions never take lines from each other.
 
 ## Pane tracking
 
@@ -40,11 +43,26 @@ source, because it can run ahead of what was processed.
 OSC 133 markers give each command its life: C starts it, D finishes it
 with an exit code, B marks the prompt back. "Finished" is D, or B when no
 D comes; the busy guard frees a pane only at B, since a command can be
-sent only to a prompt. `command_run` holds the pane's run lock from its
-busy check until the C marker, so two calls cannot both pass the check.
-A pane's foreground process is the terminal's foreground process group
-(`tpgid`), not a walk down child processes, so a background job never
-masquerades as the foreground.
+sent only to a prompt. A pane's foreground process is the terminal's
+foreground process group (`tpgid`), not a walk down child processes, so a
+background job never masquerades as the foreground; it is for display,
+and no decision reads it.
+
+**Versions.** Every fact comes from the control-mode stream, through
+`TrackedPane`, which publishes a *Pane snapshot* at each *Pane version*.
+A reader takes a snapshot, one command's output (outside versions), or a
+screen rendered with its snapshot. A decision reads one snapshot, and its
+write goes out only at that version; our command line makes the phase
+Unknown until a marker answers, which is what makes a second writer see
+the pane busy. A fact is Unknown or Known: the phase and the mode are
+stored facts, and whether the shell sends markers is one too, false once
+our command line waited in vain, so no tool probes such a pane again.
+This rules out locks held across a decision and retry loops. Accepted
+gaps: our write to tmux running it; the late echo of keys, the person's
+or `press_key`'s; a prompt redraw whose marker answers our command line
+early; and the daemon's view lagging tmux by the stream's backlog, which
+tmux offers no way to close. The screen is not versioned: a TUI that
+repaints keeps its version.
 
 Typing detection is strict: any text on the input line refuses a
 command, because a person editing mid-line must still read as typing.
@@ -122,7 +140,9 @@ point.
 
 An escape hatch for TUIs that a person approves call by call: listed key
 names, or text of three characters at most, sent quoted with control
-characters refused. It is not a security boundary.
+characters refused. It is not a security boundary. It takes the *Pane
+version* the model read, which every screen shown to the model carries,
+and refuses a pane that changed since.
 
 ## Tests
 

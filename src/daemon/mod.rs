@@ -7,12 +7,14 @@ pub mod rpc;
 pub mod server;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::TmuxSession;
 use crate::pane::registry::{PaneMode, PaneRegistry, SyncAction};
+use crate::pane::snapshot::Fact;
 use crate::parse::escape::unescape_tmux_output;
 use crate::parse::layout::parse_layout;
 use crate::tmux::connection::{self, TmuxCommands, TmuxNotifications};
@@ -48,7 +50,9 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
 
     // Set PIDs from the same query
     for bp in &panes {
-        registry.set_pid(&bp.pane_id, bp.pid).await;
+        if let Some(handle) = registry.get_handle(&bp.pane_id) {
+            handle.set_pid(bp.pid).await;
+        }
     }
 
     tracing::info!("Monitoring {} panes", registry.len());
@@ -61,6 +65,7 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
         approvals: Mutex::new(crate::policy::approval::ApprovalStore::new()),
         policy: policy.clone(),
         started_at: std::time::Instant::now(),
+        send_delay: send_delay(),
     });
 
     // Start file watcher for live policy reload
@@ -93,9 +98,18 @@ async fn event_loop(
     state: Arc<DaemonState>,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reloads = state.policy.reloads();
     loop {
         let notification = tokio::select! {
             notif = notifications.recv() => notif,
+            Ok(()) = reloads.changed() => {
+                let count = *reloads.borrow_and_update();
+                let handles = state.registry.read().await.snapshot_handles();
+                for handle in handles {
+                    handle.set_policy(count).await;
+                }
+                continue;
+            }
             _ = cancel.cancelled() => {
                 tracing::info!("Daemon cancelled");
                 break;
@@ -132,12 +146,7 @@ async fn event_loop(
                 let Some(handle) = handle else {
                     continue;
                 };
-                {
-                    let mut tp = handle.lock().await;
-                    let bytes = unescape_tmux_output(&data);
-                    tp.processor.process_chunk(&bytes);
-                } // lock released before notify
-                handle.notify_state_changed();
+                handle.apply_output(&unescape_tmux_output(&data)).await;
             }
 
             // The notification names no mode: Unknown until tmux says which.
@@ -149,12 +158,9 @@ async fn event_loop(
                 let Some(handle) = handle else {
                     continue;
                 };
-                handle.set_mode(PaneMode::Unknown).await;
+                handle.set_mode(Fact::Unknown).await;
                 let mode = state.conn.lock().await.query_pane_mode(&pane_id).await;
-                match mode {
-                    Ok(mode) => handle.set_mode(mode).await,
-                    Err(e) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
-                }
+                handle.set_mode(queried_mode(&pane_id, mode)).await;
             }
 
             Notification::Exit { .. } | Notification::SessionClose { .. } => {
@@ -167,6 +173,24 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+/// `$TMUX_MCP_SEND_DELAY_MS`, which tests set to change a pane between a
+/// decision and its write; none otherwise.
+fn send_delay() -> Duration {
+    let millis = std::env::var("TMUX_MCP_SEND_DELAY_MS").ok();
+    Duration::from_millis(millis.and_then(|ms| ms.parse().ok()).unwrap_or(0))
+}
+
+/// The mode tmux's answer gives; still Unknown when it gave none.
+fn queried_mode(pane_id: &str, mode: connection::Result<PaneMode>) -> Fact<PaneMode> {
+    match mode {
+        Ok(mode) => Fact::Known(mode),
+        Err(e) => {
+            tracing::warn!("Failed to query mode for {}: {}", pane_id, e);
+            Fact::Unknown
+        }
+    }
 }
 
 /// Execute sync actions (used during bootstrap and topology changes).
@@ -186,20 +210,18 @@ async fn execute_actions(
                 match conn.query_pane_pid(pane_id).await {
                     Ok(pid) => {
                         tracing::debug!("Pane {} pid={}", pane_id, pid);
-                        registry.set_pid(pane_id, pid).await;
+                        if let Some(handle) = registry.get_handle(pane_id) {
+                            handle.set_pid(pid).await;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to query pid for {}: {}", pane_id, e);
                     }
                 }
                 // Later changes arrive as %pane-mode-changed.
-                match (
-                    conn.query_pane_mode(pane_id).await,
-                    registry.get_handle(pane_id),
-                ) {
-                    (Ok(mode), Some(handle)) => handle.set_mode(mode).await,
-                    (Ok(_), None) => {}
-                    (Err(e), _) => tracing::warn!("Failed to query mode for {}: {}", pane_id, e),
+                let mode = conn.query_pane_mode(pane_id).await;
+                if let Some(handle) = registry.get_handle(pane_id) {
+                    handle.set_mode(queried_mode(pane_id, mode)).await;
                 }
             }
             SyncAction::PaneRemoved { pane_id } => {

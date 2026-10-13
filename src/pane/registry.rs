@@ -8,29 +8,53 @@
 /// The registry itself is wrapped in an RwLock by the daemon.
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use tokio::sync::{Mutex, MutexGuard, watch};
+use tokio::sync::{Mutex, watch};
 
+use crate::pane::osc::OscEvent;
+use crate::pane::osc133::Osc133Phase;
 use crate::pane::processor::PaneProcessor;
+use crate::pane::snapshot::{Fact, PaneSnapshot};
 use crate::parse::layout::LayoutPane;
 
 /// Mutable pane state — behind a per-pane Mutex.
-pub struct PaneState {
-    pub pid: Option<u32>,
+struct PaneState {
+    pid: Option<u32>,
+    x: usize,
+    y: usize,
+    processor: PaneProcessor,
+    mode: Fact<PaneMode>,
+    policy: u64,
+    phase: Fact<Osc133Phase>,
+    integration: Fact<bool>,
+}
+
+/// A pane's screen as the emulator renders it, with the *Pane snapshot* of
+/// the same moment.
+#[derive(Debug)]
+pub struct Screen {
+    pub snapshot: Arc<PaneSnapshot>,
+    /// One string per row, one char per column, trailing blanks trimmed.
+    pub rows: Vec<String>,
+    /// (row, column)
+    pub cursor: (usize, usize),
     pub x: usize,
     pub y: usize,
-    pub processor: PaneProcessor,
-    pub mode: PaneMode,
+    pub width: usize,
+    pub height: usize,
+    /// When the pane last wrote output.
+    pub last_output: Option<Instant>,
 }
+
+/// The pane is past the *Pane version* a write was decided at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stale;
 
 /// The tmux mode a pane is in, such as copy mode. While one is on, tmux hands
 /// typed keys to the mode instead of the program.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneMode {
-    /// tmux announced a change and has not yet said to what, or was never
-    /// asked.
-    #[default]
-    Unknown,
     Off,
     /// The mode's name, as tmux's `pane_mode` gives it (`copy-mode`).
     On(String),
@@ -51,41 +75,216 @@ pub struct TrackedPane {
     pub pane_id: String,
     pub window_id: String,
     state: Mutex<PaneState>,
-    /// Bumped after every `process_chunk()` — handlers `subscribe_state()`
-    /// and `select!` on `changed()` instead of polling with sleep.
+    /// Bumped after every change, output included — handlers
+    /// `subscribe_state()` and `select!` on `changed()` instead of polling.
     state_tx: watch::Sender<u64>,
-    run: Mutex<()>,
+    /// The latest *Pane snapshot*.
+    snapshot_tx: watch::Sender<Arc<PaneSnapshot>>,
 }
 
 impl TrackedPane {
-    /// Lock the mutable pane state.
-    pub async fn lock(&self) -> MutexGuard<'_, PaneState> {
-        self.state.lock().await
+    pub fn new(
+        pane_id: &str,
+        window_id: &str,
+        lines: usize,
+        columns: usize,
+        x: usize,
+        y: usize,
+    ) -> TrackedPane {
+        let state = PaneState {
+            pid: None,
+            x,
+            y,
+            processor: PaneProcessor::new(lines, columns),
+            mode: Fact::Unknown,
+            policy: 0,
+            phase: Fact::Unknown,
+            integration: Fact::Unknown,
+        };
+        let snapshot = state.snapshot(0);
+        TrackedPane {
+            pane_id: pane_id.to_string(),
+            window_id: window_id.to_string(),
+            state: Mutex::new(state),
+            state_tx: watch::channel(0u64).0,
+            snapshot_tx: watch::channel(Arc::new(snapshot)).0,
+        }
     }
 
-    /// Lock the pane for one command_run, from its busy check until the pane
-    /// reports the command started; a second command_run waits, then sees
-    /// the pane busy.
-    pub async fn lock_run(&self) -> MutexGuard<'_, ()> {
-        self.run.lock().await
+    /// The latest *Pane snapshot*.
+    pub fn snapshot(&self) -> Arc<PaneSnapshot> {
+        self.snapshot_tx.borrow().clone()
     }
 
-    /// Records the pane's `mode` and wakes whatever waits on the pane.
-    pub async fn set_mode(&self, mode: PaneMode) {
-        self.lock().await.mode = mode;
+    /// The screen, rendered under the pane lock with the snapshot it shows.
+    pub async fn screen(&self) -> Screen {
+        let state = self.state.lock().await;
+        Screen {
+            snapshot: self.snapshot(),
+            rows: state.processor.screen_text(),
+            cursor: state.processor.cursor_position(),
+            x: state.x,
+            y: state.y,
+            width: state.processor.columns(),
+            height: state.processor.screen_lines(),
+            last_output: state.processor.state().last_data,
+        }
+    }
+
+    /// The output of the command `command_id` so far, while its record is
+    /// kept. Output stands outside versions: it grows without a new one.
+    pub async fn output(&self, command_id: u64) -> Option<String> {
+        let state = self.state.lock().await;
+        state
+            .processor
+            .state()
+            .output(command_id)
+            .map(str::to_string)
+    }
+
+    /// Feeds the pane's output to its emulator. An A, B, C or D marker sets
+    /// the phase, and shows that the shell sends markers.
+    pub async fn apply_output(&self, bytes: &[u8]) {
+        let mut state = self.state.lock().await;
+        let events = state.processor.process_chunk(bytes);
+        let marked = events.iter().any(|osc| {
+            matches!(
+                osc.event,
+                OscEvent::Osc133 {
+                    marker: b'A'..=b'D',
+                    ..
+                }
+            )
+        });
+        if marked {
+            state.phase = marked_phase(state.processor.osc133_phase());
+            state.integration = Fact::Known(true);
+        }
+        self.publish(&state);
+    }
+
+    /// Errs when the pane is past `version`; else the phase is Unknown until
+    /// a marker answers the command line about to be written. Both happen
+    /// under the pane lock, so a write decided at the old version is `Stale`.
+    pub async fn sending_command(&self, version: u64) -> Result<(), Stale> {
+        let mut state = self.state.lock().await;
+        if self.snapshot().version != version {
+            return Err(Stale);
+        }
+        state.phase = Fact::Unknown;
+        self.publish(&state);
+        Ok(())
+    }
+
+    /// Whether the shell sends markers: false once a command line of the
+    /// daemon's waited for one in vain. A marker makes it true again.
+    pub async fn set_integration(&self, integration: Fact<bool>) {
+        let mut state = self.state.lock().await;
+        state.integration = integration;
+        self.publish(&state);
+    }
+
+    /// The pane's mode: Unknown when tmux announces a change without saying
+    /// which, known once tmux says.
+    pub async fn set_mode(&self, mode: Fact<PaneMode>) {
+        let mut state = self.state.lock().await;
+        state.mode = mode;
+        self.publish(&state);
+    }
+
+    /// The count of policy reloads.
+    pub async fn set_policy(&self, reloads: u64) {
+        let mut state = self.state.lock().await;
+        state.policy = reloads;
+        self.publish(&state);
+    }
+
+    /// The shell's process, as tmux gives it.
+    pub async fn set_pid(&self, pid: u32) {
+        let mut state = self.state.lock().await;
+        state.pid = Some(pid);
+        self.publish(&state);
+    }
+
+    /// Moves and resizes the pane as tmux's layout places it; true when its
+    /// size changed.
+    pub async fn place(&self, x: usize, y: usize, width: usize, height: usize) -> bool {
+        let mut state = self.state.lock().await;
+        state.x = x;
+        state.y = y;
+        let size = (state.processor.columns(), state.processor.screen_lines());
+        let resized = size != (width, height);
+        if resized {
+            state.processor.resize(height, width);
+        }
+        self.publish(&state);
+        resized
+    }
+
+    /// Subscribe to state changes. Use `receiver.changed().await` to wake
+    /// when the pane changes.
+    pub fn subscribe_state(&self) -> watch::Receiver<u64> {
+        self.state_tx.subscribe()
+    }
+
+    /// Publishes the *Pane snapshot* of `state` at the next *Pane version*
+    /// when it differs from the last one, and wakes whatever waits on the pane.
+    fn publish(&self, state: &PaneState) {
+        let last = self.snapshot();
+        let mut next = state.snapshot(last.version);
+        if next != *last {
+            next.version += 1;
+            self.snapshot_tx.send_replace(Arc::new(next));
+        }
         self.notify_state_changed();
     }
 
     /// Signal that pane state has changed (new output, completion, etc.).
-    /// Call AFTER releasing the pane Mutex so waiters can acquire it immediately.
-    pub fn notify_state_changed(&self) {
+    fn notify_state_changed(&self) {
         self.state_tx.send_modify(|v| *v += 1);
     }
+}
 
-    /// Subscribe to state changes. Use `receiver.changed().await` to wake
-    /// when `notify_state_changed()` is called.
-    pub fn subscribe_state(&self) -> watch::Receiver<u64> {
-        self.state_tx.subscribe()
+impl PaneState {
+    /// The facts a decision reads, labelled `version`.
+    fn snapshot(&self, version: u64) -> PaneSnapshot {
+        let terminal = self.processor.state();
+        let reported = terminal.osc7_since_command;
+        PaneSnapshot {
+            version,
+            policy: self.policy,
+            mode: self.mode.clone(),
+            phase: self.phase.clone(),
+            integration: self.integration.clone(),
+            input: self.processor.read_input(),
+            input_garbled: self.processor.input_looks_garbled(),
+            cwd: terminal.cwd.clone().filter(|_| reported),
+            host: terminal.hostname.clone().filter(|_| reported),
+            user: terminal.user.clone().filter(|_| reported),
+            pid: self.pid,
+            commands: terminal.commands.iter().cloned().collect(),
+        }
+    }
+}
+
+impl Screen {
+    /// The last `n` rows above the blank ones below them, joined.
+    pub fn last_rows(&self, n: usize) -> String {
+        let end = self
+            .rows
+            .iter()
+            .rposition(|row| !row.is_empty())
+            .map_or(0, |i| i + 1);
+        self.rows[end.saturating_sub(n)..end].join("\n")
+    }
+}
+
+/// The phase a marker leaves: Unknown after D and between A and B, where the
+/// markers do not say whether the shell takes a command.
+fn marked_phase(phase: &Osc133Phase) -> Fact<Osc133Phase> {
+    match phase {
+        Osc133Phase::Idle | Osc133Phase::Prompt => Fact::Unknown,
+        phase => Fact::Known(phase.clone()),
     }
 }
 
@@ -121,8 +320,8 @@ impl PaneRegistry {
 
     // --- Public lookup API (called under read lock) ---
 
-    /// Get a handle to a tracked pane. The Arc clone is cheap; caller
-    /// accesses identity fields directly and locks state via `handle.lock()`.
+    /// Get a handle to a tracked pane. The Arc clone is cheap; the caller
+    /// reads its snapshot, a command's output or its screen.
     pub fn get_handle(&self, pane_id: &str) -> Option<PaneHandle> {
         self.panes.get(pane_id).cloned()
     }
@@ -181,14 +380,7 @@ impl PaneRegistry {
         // Add new panes, update existing
         for (pane_id, lp) in &layout_ids {
             if let Some(handle) = self.panes.get(pane_id) {
-                let mut state = handle.lock().await;
-                state.x = lp.x;
-                state.y = lp.y;
-
-                let cur_w = state.processor.columns();
-                let cur_h = state.processor.screen_lines();
-                if lp.width != cur_w || lp.height != cur_h {
-                    state.processor.resize(lp.height, lp.width);
+                if handle.place(lp.x, lp.y, lp.width, lp.height).await {
                     actions.push(SyncAction::Resized {
                         pane_id: pane_id.clone(),
                         width: lp.width,
@@ -196,21 +388,7 @@ impl PaneRegistry {
                     });
                 }
             } else {
-                let processor = PaneProcessor::new(lp.height, lp.width);
-                let (state_tx, _) = watch::channel(0u64);
-                let tracked = TrackedPane {
-                    pane_id: pane_id.clone(),
-                    window_id: window_id.to_string(),
-                    state: Mutex::new(PaneState {
-                        pid: None,
-                        x: lp.x,
-                        y: lp.y,
-                        processor,
-                        mode: PaneMode::Unknown,
-                    }),
-                    state_tx,
-                    run: Mutex::new(()),
-                };
+                let tracked = TrackedPane::new(pane_id, window_id, lp.height, lp.width, lp.x, lp.y);
                 self.panes.insert(pane_id.clone(), Arc::new(tracked));
                 actions.push(SyncAction::PaneAdded {
                     pane_id: pane_id.clone(),
@@ -219,13 +397,6 @@ impl PaneRegistry {
         }
 
         actions
-    }
-
-    /// Set the shell PID for a pane.
-    pub async fn set_pid(&mut self, pane_id: &str, pid: u32) {
-        if let Some(handle) = self.panes.get(pane_id) {
-            handle.lock().await.pid = Some(pid);
-        }
     }
 
     /// Remove all panes in a window. Returns `PaneRemoved` actions.
@@ -249,6 +420,7 @@ impl PaneRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::osc133::Osc133Phase;
 
     fn lp(pane_number: u32, width: usize, height: usize, x: usize, y: usize) -> LayoutPane {
         LayoutPane {
@@ -318,10 +490,8 @@ mod tests {
             }
         ));
 
-        let handle = reg.get_handle("%1").unwrap();
-        let state = handle.lock().await;
-        assert_eq!(state.processor.columns(), 120);
-        assert_eq!(state.processor.screen_lines(), 40);
+        let screen = reg.get_handle("%1").unwrap().screen().await;
+        assert_eq!((screen.width, screen.height), (120, 40));
     }
 
     #[tokio::test]
@@ -337,13 +507,11 @@ mod tests {
     async fn updates_position() {
         let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
-        assert_eq!(reg.get_handle("%1").unwrap().lock().await.x, 0);
+        assert_eq!(reg.get_handle("%1").unwrap().screen().await.x, 0);
 
         reg.apply_layout("@1", &[lp(1, 80, 24, 50, 10)]).await;
-        let handle = reg.get_handle("%1").unwrap();
-        let state = handle.lock().await;
-        assert_eq!(state.x, 50);
-        assert_eq!(state.y, 10);
+        let screen = reg.get_handle("%1").unwrap().screen().await;
+        assert_eq!((screen.x, screen.y), (50, 10));
     }
 
     #[tokio::test]
@@ -379,52 +547,146 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_pid_stores_value() {
-        let mut reg = PaneRegistry::new();
-        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
-
-        assert!(reg.get_handle("%1").unwrap().lock().await.pid.is_none());
-        reg.set_pid("%1", 12345).await;
-        assert_eq!(reg.get_handle("%1").unwrap().lock().await.pid, Some(12345));
-    }
-
-    #[tokio::test]
-    async fn set_pid_unknown_pane_is_noop() {
-        let mut reg = PaneRegistry::new();
-        reg.set_pid("%99", 12345).await;
-    }
-
-    #[tokio::test]
     async fn processor_state_survives_layout_update() {
         let mut reg = PaneRegistry::new();
         reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
-
-        reg.get_handle("%1")
-            .unwrap()
-            .lock()
-            .await
-            .processor
-            .process_chunk(b"hello world");
-        assert_eq!(
-            reg.get_handle("%1")
-                .unwrap()
-                .lock()
-                .await
-                .processor
-                .screen_line_text(0),
-            "hello world"
-        );
+        let pane = reg.get_handle("%1").unwrap();
+        pane.apply_output(b"hello world").await;
 
         reg.apply_layout("@1", &[lp(1, 120, 24, 0, 0)]).await;
+
+        assert_eq!(pane.screen().await.rows[0], "hello world");
+    }
+
+    #[tokio::test]
+    async fn a_pane_version_rises_only_with_a_decision_fact() {
+        let copy_mode = || Fact::Known(PaneMode::On("copy-mode".into()));
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        pane.set_mode(Fact::Known(PaneMode::Off)).await; // as a new pane's query does
+        let start = pane.snapshot().version;
+
+        pane.apply_output(b"\r\n\r\n\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
+            .await;
+        let prompt = pane.snapshot();
+        // A redraw on the top line, two lines above the prompt.
+        pane.apply_output(b"\x1b7\x1b[1;1Hclock 12:01\x1b8").await;
+        let unchanged = pane.snapshot();
+        pane.set_mode(Fact::Unknown).await;
+        let changing = pane.snapshot();
+        pane.set_mode(copy_mode()).await;
+        let copy = pane.snapshot();
+        pane.set_mode(copy_mode()).await;
+        let same = pane.snapshot();
+        pane.set_policy(1).await;
+        let reloaded = pane.snapshot();
+
+        assert!(prompt.version > start, "{prompt:?}");
+        assert_eq!(unchanged.version, prompt.version);
+        assert!(changing.version > prompt.version);
+        assert_eq!(changing.mode, Fact::Unknown);
+        assert!(copy.version > changing.version, "an Unknown became known");
+        assert_eq!(copy.mode, copy_mode());
+        assert_eq!(same.version, copy.version, "nothing changed");
+        assert!(reloaded.version > same.version);
+    }
+
+    #[tokio::test]
+    async fn a_command_line_holds_the_phase_unknown_until_a_marker_answers() {
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        let fresh = pane.snapshot();
+        pane.apply_output(b"\x1b]133;A\x1b\\$ ").await;
+        let drawing = pane.snapshot();
+        pane.apply_output(b"\x1b]133;B\x1b\\").await;
+        let prompt = pane.snapshot();
+
+        let stale = pane.sending_command(fresh.version).await;
+        let sent = pane.sending_command(prompt.version).await;
+        let sending = pane.snapshot();
+        pane.apply_output(b"ls\r\n\x1b]133;E;ls\x1b\\").await;
+        let after_e = pane.snapshot();
+        pane.apply_output(b"\x1b]133;C\x1b\\").await;
+        let running = pane.snapshot();
+
+        assert_eq!(fresh.phase, Fact::Unknown, "before any marker");
+        assert_eq!(drawing.phase, Fact::Unknown, "between A and B");
+        assert_eq!(prompt.phase, Fact::Known(Osc133Phase::Input));
+        assert_eq!(stale, Err(Stale));
+        assert_eq!(sent, Ok(()));
+        assert_eq!(sending.phase, Fact::Unknown);
+        assert!(sending.version > prompt.version);
+        assert_eq!(after_e.phase, Fact::Unknown, "E answers nothing");
         assert_eq!(
-            reg.get_handle("%1")
-                .unwrap()
-                .lock()
-                .await
-                .processor
-                .screen_line_text(0),
-            "hello world"
+            running.phase,
+            Fact::Known(Osc133Phase::Executing {
+                command: "ls".into()
+            })
         );
+    }
+
+    #[tokio::test]
+    async fn a_marker_shows_the_shell_sends_markers_even_after_a_wait_in_vain() {
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        let fresh = pane.snapshot();
+        pane.set_integration(Fact::Known(false)).await;
+        let in_vain = pane.snapshot();
+        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
+            .await;
+        let marked = pane.snapshot();
+
+        assert_eq!(fresh.integration, Fact::Unknown);
+        assert_eq!(in_vain.integration, Fact::Known(false));
+        assert_eq!(marked.integration, Fact::Known(true));
+    }
+
+    #[tokio::test]
+    async fn a_screen_comes_with_the_snapshot_it_was_rendered_at() {
+        let pane = TrackedPane::new("%1", "@1", 5, 20, 3, 4);
+        pane.set_pid(42).await;
+        pane.apply_output(
+            b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\ls\r\n\x1b]133;C\x1b\\a\r\nb\r\n\x1b]133;D;0\x1b\\",
+        )
+        .await;
+
+        let resized = pane.place(3, 4, 30, 5).await;
+        let moved = pane.place(0, 0, 30, 5).await;
+        let screen = pane.screen().await;
+        let id = screen.snapshot.commands[0].id;
+
+        assert_eq!(screen.snapshot, pane.snapshot());
+        assert_eq!(screen.snapshot.pid, Some(42));
+        assert_eq!(screen.last_rows(3), "$ ls\na\nb");
+        assert_eq!(screen.cursor, (3, 0));
+        assert_eq!(
+            (screen.x, screen.y, screen.width, screen.height),
+            (0, 0, 30, 5)
+        );
+        assert!(screen.last_output.is_some());
+        assert!(resized && !moved, "only a new size counts as resized");
+        assert_eq!(pane.output(id).await.as_deref(), Some("a\r\nb\r\n"));
+        assert_eq!(pane.output(id + 1).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_lists_commands_newest_first() {
+        let pane = TrackedPane::new("%1", "@1", 24, 80, 0, 0);
+        let cycle = |command: &str| {
+            format!(
+                "\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\{command}\r\n\x1b]133;C\x1b\\\x1b]133;D;0\x1b\\"
+            )
+        };
+
+        pane.apply_output(cycle("ls").as_bytes()).await;
+        pane.apply_output(cycle("pwd").as_bytes()).await;
+        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
+            .await;
+
+        let snapshot = pane.snapshot();
+        let commands: Vec<&str> = snapshot
+            .commands
+            .iter()
+            .map(|c| c.command.as_str())
+            .collect();
+        assert_eq!(commands, ["pwd", "ls"]);
     }
 
     #[test]

@@ -10,12 +10,13 @@ async fn read_parameters_shape_a_finished_commands_output() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     let corpus = [
-        // The first command in a Shell is id 2; the integration probe is id 1.
+        // A Shell starts at a prompt its markers brought, so no probe runs and
+        // the first command is id 1.
         (
             "seq 10",
             Read::default().tail(3),
             "$ seq 10\n<7 lines not shown>\n8\n9\n10\n\nExit code: 0\n\
-             [Output filtered (10 lines total). Use command_read(command_id=2) with head, tail, \
+             [Output filtered (10 lines total). Use command_read(command_id=1) with head, tail, \
              or search for different views of the same command output.]",
         ),
         // Search filters first, so the window counts matches: the last ten
@@ -24,7 +25,7 @@ async fn read_parameters_shape_a_finished_commands_output() {
             "seq 20",
             Read::default().tail(10).search("1"),
             "$ seq 20\n<1 lines not shown>\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n\nExit code: 0\n\
-             [11 matches in 20 lines.]\n[Output filtered (20 lines total). Use command_read(command_id=3) \
+             [11 matches in 20 lines.]\n[Output filtered (20 lines total). Use command_read(command_id=2) \
              with head, tail, or search for different views of the same command output.]",
         ),
         (
@@ -94,6 +95,28 @@ async fn a_window_on_a_finished_command_reports_its_exit_code() {
             "{command:?}: {reply:?}"
         );
     }
+}
+
+/// Each MCP server keeps its own place in a command's output, and a place in
+/// one command never carries over to a newer one.
+#[tokio::test]
+async fn each_mcp_server_reads_from_its_own_place() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    h.run_with(&shell, "seq 4", Read::default().head(1)).await;
+    let other = h.another_session().await;
+
+    let mine = h.read(&shell, Read::default().next(2)).await;
+    let theirs = other.read(&shell, Read::default().next(2)).await;
+    h.run_with(&shell, "seq 3", Read::default().head(1)).await;
+    let newer = h.read(&shell, Read::default().next(2)).await;
+
+    assert!(mine.starts_with("1\n2\n"), "{mine:?}");
+    assert!(theirs.starts_with("1\n2\n"), "{theirs:?}");
+    assert!(
+        newer.starts_with("1\n2\n") && !newer.contains("already read"),
+        "{newer:?}"
+    );
 }
 
 #[tokio::test]

@@ -180,6 +180,31 @@ fn the_project_root_is_the_nearest_directory_with_a_policy() {
     assert_eq!(project_root(dir.path().to_str().unwrap()), None);
 }
 
+#[test]
+fn a_changed_policy_file_announces_its_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(".claude/tmux-mcp.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "").unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let engine = PolicyEngine::new(Some(cwd));
+    let reloads = engine.reloads();
+
+    engine.check_reload(Some(cwd));
+    let unchanged = reloads.has_changed().unwrap();
+    std::fs::write(&file, "default = \"ask\"\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1))
+        .unwrap();
+    engine.check_reload(Some(cwd));
+
+    assert!(!unchanged);
+    assert!(reloads.has_changed().unwrap());
+}
+
 // --- Dependency contract: toml and serde ---
 
 #[test]

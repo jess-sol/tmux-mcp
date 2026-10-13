@@ -1,19 +1,18 @@
 /// Structured pane state — the queryable output of the parsing pipeline.
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// Maximum commands retained in history per pane.
 const MAX_COMMAND_HISTORY: usize = 100;
 
-/// A command with its output — may be in-progress or completed.
-#[derive(Debug, Clone)]
+/// A command — may be in-progress or completed. Its output is read apart,
+/// through `TerminalState::output`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRecord {
     /// Monotonic ID for addressing (higher = newer).
     pub id: u64,
     /// The command text as typed by the user.
     pub command: String,
-    /// Command output — accumulates live during execution, persists after completion.
-    pub output: String,
     /// Exit code from D marker. None if still running or unknown.
     pub exit_code: Option<i32>,
     /// Whether the D marker has been received (output is done).
@@ -21,22 +20,6 @@ pub struct CommandRecord {
     pub output_done: bool,
     /// Whether the command has completed (B marker finalized).
     pub completed: bool,
-    /// Read cursor — line offset into output. Only `next` advances this.
-    pub read_cursor: usize,
-    /// When this record was created.
-    pub timestamp: Instant,
-}
-
-/// Activity state of a pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Activity {
-    /// Shell is at a prompt, ready for input.
-    Idle,
-    /// A command is executing.
-    Busy,
-    /// State unknown (no markers seen yet, or after recovery).
-    #[default]
-    Unknown,
 }
 
 /// Structured state for a pane, maintained by the mode parser.
@@ -44,8 +27,9 @@ pub enum Activity {
 pub struct TerminalState {
     /// Completed commands, most recent first.
     pub commands: VecDeque<CommandRecord>,
-    /// Current activity.
-    pub activity: Activity,
+    /// Each command's output by id: it accumulates live during execution and
+    /// persists after completion, as long as its record.
+    outputs: HashMap<u64, String>,
     /// Current working directory (from OSC 7).
     pub cwd: Option<String>,
     /// Username (from OSC 7 userinfo, e.g. file://user@host/path).
@@ -58,71 +42,26 @@ pub struct TerminalState {
     pub osc7_since_command: bool,
     /// Next sequence number.
     seq_counter: u64,
-    /// Incremented on every D marker (command completion signal).
-    /// Used by command_run to detect completion even when the command
-    /// isn't recorded in history (e.g., no C marker, empty command).
-    pub completion_seq: u64,
-    /// Exit code from the most recent D marker.
-    pub last_exit_code: Option<i32>,
-    /// When the most recent OSC 133 marker was received.
-    /// Used to determine if shell integration is active.
-    pub last_osc133_marker: Option<Instant>,
     /// When the most recent terminal data (%output) was received.
     pub last_data: Option<Instant>,
-    /// LRU cache of leaf PIDs → OSC 133 confirmed (true) or failed (false).
-    /// Bounded to 5 entries. Used by command_run to gate on marker availability.
-    pub osc133_cache: VecDeque<(u32, bool)>,
     /// Cursor position (line, col) at B marker time — the start of user input,
     /// right after the prompt. Used by PaneProcessor to read typed input from
     /// the terminal grid.
     pub input_start: Option<(usize, usize)>,
 }
 
-const MAX_OSC133_CACHE: usize = 5;
-
 impl TerminalState {
     pub fn new() -> Self {
         Self {
             commands: VecDeque::new(),
-            activity: Activity::Unknown,
+            outputs: HashMap::new(),
             cwd: None,
             user: None,
             hostname: None,
             osc7_since_command: false,
             seq_counter: 0,
-            completion_seq: 0,
-            last_exit_code: None,
-            last_osc133_marker: None,
             last_data: None,
-            osc133_cache: VecDeque::new(),
             input_start: None,
-        }
-    }
-
-    /// Look up a leaf PID in the OSC 133 cache.
-    /// Returns Some(true) if confirmed, Some(false) if failed, None if unknown.
-    pub fn osc133_lookup(&self, pid: u32) -> Option<bool> {
-        self.osc133_cache
-            .iter()
-            .find(|(p, _)| *p == pid)
-            .map(|(_, v)| *v)
-    }
-
-    /// Mark a leaf PID as having working OSC 133.
-    pub fn osc133_confirm(&mut self, pid: u32) {
-        self.osc133_upsert(pid, true);
-    }
-
-    /// Mark a leaf PID as not having working OSC 133.
-    pub fn osc133_fail(&mut self, pid: u32) {
-        self.osc133_upsert(pid, false);
-    }
-
-    fn osc133_upsert(&mut self, pid: u32, confirmed: bool) {
-        self.osc133_cache.retain(|(p, _)| *p != pid);
-        self.osc133_cache.push_front((pid, confirmed));
-        while self.osc133_cache.len() > MAX_OSC133_CACHE {
-            self.osc133_cache.pop_back();
         }
     }
 
@@ -133,31 +72,22 @@ impl TerminalState {
         self.commands.push_front(CommandRecord {
             id,
             command,
-            output: String::new(),
             exit_code: None,
             output_done: false,
             completed: false,
-            read_cursor: 0,
-            timestamp: Instant::now(),
         });
+        self.outputs.insert(id, String::new());
         while self.commands.len() > MAX_COMMAND_HISTORY {
-            self.commands.pop_back();
+            if let Some(oldest) = self.commands.pop_back() {
+                self.outputs.remove(&oldest.id);
+            }
         }
         id
     }
 
-    /// The command whose prompt has not returned yet (no B marker), if any. A
-    /// pane takes the next command only once this is `None`.
-    pub fn active_command(&self) -> Option<&CommandRecord> {
-        self.commands.front().filter(|c| !c.completed)
-    }
-
-    /// The command still running, if any: it ends at its D marker, or at its B
-    /// marker when no D arrives.
-    pub fn running_command(&self) -> Option<&CommandRecord> {
-        self.commands
-            .front()
-            .filter(|c| !c.completed && !c.output_done)
+    /// The output of the command `command_id`, while its record is kept.
+    pub fn output(&self, command_id: u64) -> Option<&str> {
+        self.outputs.get(&command_id).map(String::as_str)
     }
 
     /// Get a mutable ref to the active command.
@@ -169,22 +99,12 @@ impl TerminalState {
     /// Stops accumulating after D marker (output_done), remaining text before B
     /// is prompt content.
     pub fn append_active_output(&mut self, text: &str) {
-        if let Some(cmd) = self.commands.front_mut()
+        if let Some(cmd) = self.commands.front()
             && !cmd.completed
             && !cmd.output_done
         {
-            cmd.output.push_str(text);
+            self.outputs.entry(cmd.id).or_default().push_str(text);
         }
-    }
-
-    /// Find a command by ID.
-    pub fn command_by_id(&self, id: u64) -> Option<&CommandRecord> {
-        self.commands.iter().find(|c| c.id == id)
-    }
-
-    /// Find a command by ID (mutable).
-    pub fn command_by_id_mut(&mut self, id: u64) -> Option<&mut CommandRecord> {
-        self.commands.iter_mut().find(|c| c.id == id)
     }
 
     /// Get the most recent N commands (newest first).
@@ -241,7 +161,6 @@ mod tests {
     fn new_state_is_empty() {
         let s = TerminalState::new();
         assert!(s.commands.is_empty());
-        assert_eq!(s.activity, Activity::Unknown);
         assert!(s.cwd.is_none());
         assert!(s.user.is_none());
         assert!(s.hostname.is_none());
@@ -250,15 +169,15 @@ mod tests {
     #[test]
     fn push_and_retrieve_commands() {
         let mut s = TerminalState::new();
-        let id1 = s.push_command_start("ls".into());
-        let cmd = s.command_by_id_mut(id1).unwrap();
-        cmd.output = "file1\nfile2".into();
+        s.push_command_start("ls".into());
+        s.append_active_output("file1\nfile2");
+        let cmd = s.commands.front_mut().unwrap();
         cmd.exit_code = Some(0);
         cmd.completed = true;
 
-        let id2 = s.push_command_start("pwd".into());
-        let cmd = s.command_by_id_mut(id2).unwrap();
-        cmd.output = "/home/user".into();
+        s.push_command_start("pwd".into());
+        s.append_active_output("/home/user");
+        let cmd = s.commands.front_mut().unwrap();
         cmd.exit_code = Some(0);
         cmd.completed = true;
 
@@ -273,9 +192,8 @@ mod tests {
     fn command_history_capped() {
         let mut s = TerminalState::new();
         for i in 0..150 {
-            let id = s.push_command_start(format!("cmd{}", i));
-            let cmd = s.command_by_id_mut(id).unwrap();
-            cmd.completed = true;
+            s.push_command_start(format!("cmd{}", i));
+            s.commands.front_mut().unwrap().completed = true;
         }
         assert_eq!(s.commands.len(), MAX_COMMAND_HISTORY);
         assert_eq!(s.commands.front().unwrap().command, "cmd149");
@@ -436,69 +354,5 @@ mod tests {
         // Next OSC 7 without user should clear it
         s.update_cwd_from_osc7("file://myhost/tmp");
         assert!(s.user.is_none());
-    }
-
-    // --- OSC 133 cache ---
-
-    #[test]
-    fn osc133_cache_lookup_empty() {
-        let s = TerminalState::new();
-        assert_eq!(s.osc133_lookup(100), None);
-    }
-
-    #[test]
-    fn osc133_cache_confirm_and_lookup() {
-        let mut s = TerminalState::new();
-        s.osc133_confirm(100);
-        assert_eq!(s.osc133_lookup(100), Some(true));
-        assert_eq!(s.osc133_lookup(200), None);
-    }
-
-    #[test]
-    fn osc133_cache_fail_and_lookup() {
-        let mut s = TerminalState::new();
-        s.osc133_fail(100);
-        assert_eq!(s.osc133_lookup(100), Some(false));
-    }
-
-    #[test]
-    fn osc133_cache_confirm_overrides_fail() {
-        let mut s = TerminalState::new();
-        s.osc133_fail(100);
-        assert_eq!(s.osc133_lookup(100), Some(false));
-        s.osc133_confirm(100);
-        assert_eq!(s.osc133_lookup(100), Some(true));
-    }
-
-    #[test]
-    fn osc133_cache_fail_overrides_confirm() {
-        let mut s = TerminalState::new();
-        s.osc133_confirm(100);
-        s.osc133_fail(100);
-        assert_eq!(s.osc133_lookup(100), Some(false));
-    }
-
-    #[test]
-    fn osc133_cache_separate_pids() {
-        let mut s = TerminalState::new();
-        s.osc133_confirm(100);
-        s.osc133_fail(200);
-        assert_eq!(s.osc133_lookup(100), Some(true));
-        assert_eq!(s.osc133_lookup(200), Some(false));
-        assert_eq!(s.osc133_lookup(300), None);
-    }
-
-    #[test]
-    fn osc133_cache_bounded_at_5() {
-        let mut s = TerminalState::new();
-        for pid in 1..=6 {
-            s.osc133_confirm(pid);
-        }
-        // PID 1 should have been evicted
-        assert_eq!(s.osc133_lookup(1), None);
-        // PIDs 2-6 should be present
-        for pid in 2..=6 {
-            assert_eq!(s.osc133_lookup(pid), Some(true));
-        }
     }
 }

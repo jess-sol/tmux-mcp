@@ -9,4 +9,6 @@
   `marks.command` or `marks.shell`, or the words of find's `-exec`. The policy judges it on its own,
   and the line takes the strictest decision. Rejected synonyms: wrapped command, child (the old
   `CommandInfo.parent` model), subcommand (a level of a grammar).
+- *Pane snapshot* - The facts of a pane that a decision reads, at one *Pane version*, published by its `TrackedPane` on every change and read whole. Rejected synonyms: view, observation, facts.
+- *Pane version* - The number of a pane's *Pane snapshot*: it rises each time the snapshot changes, so one version names one snapshot, and a write goes out only while the pane is still at the version its decision read. Rejected synonyms: resource version, generation, offset, sequence number.
 - *Passthrough* - The decision for a command on the Bash *Channel* that no rule matches: the hook prints nothing, and Claude Code's own permissions decide. It ranks between allow and ask, so a line is allowed only when every command is explicitly allowed. Rejected synonyms: pass, defer, abstain, no opinion, default (the `default` key decides a tmux line with no match).

@@ -15,6 +15,24 @@ async fn a_shell_is_confirmed_once_a_command_runs_in_it() {
     assert!(row.contains("confirmed"), "{row}");
 }
 
+/// A shell that sends no markers takes no command until its integration is
+/// injected; the failed probe shows in `list_panes` until then.
+#[tokio::test]
+async fn a_shell_without_integration_takes_commands_once_injected() {
+    let h = Harness::new().await;
+    let shell = h.shell_without_integration().await;
+
+    let refused = h.run(&shell, "seq 1").await;
+    let row = h.list_panes().await.row(&shell);
+    let injected = h.inject_osc133(&shell).await;
+    let ran = h.run(&shell, "seq 1").await;
+
+    assert!(refused.contains("inject_osc133"), "{refused}");
+    assert!(row.contains("failed"), "{row}");
+    assert!(injected.contains("active"), "{injected:?}");
+    assert!(ran.ends_with("1\n\nExit code: 0"), "{ran:?}");
+}
+
 #[tokio::test]
 async fn inject_osc133_leaves_an_integrated_shell_alone() {
     let h = Harness::new().await;

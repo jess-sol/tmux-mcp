@@ -34,7 +34,6 @@ pub use config::PolicyEngine;
 pub struct PaneContext {
     pub hostname: Option<String>,
     pub cwd: Option<String>,
-    pub foreground: Option<String>,
     pub user: Option<String>,
 }
 
@@ -259,7 +258,6 @@ mod tests {
         let ctx = PaneContext {
             hostname: None,
             cwd: Some("/home/user/project".into()),
-            foreground: Some("bash".into()),
             user: Some("user".into()),
         };
         evaluate(command, &ctx, via, &engine)

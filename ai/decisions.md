@@ -3,6 +3,141 @@
 Settled choices, newest first. Each title is the sentence the ledger and
 roadmap Journals cite.
 
+## Every write to a pane requires the Pane version its decision read
+
+2026-10-12 · active
+
+A handler decides from one *Pane snapshot*: policy, approval, and the
+mode, busy and typing checks all read it. `send_command` and `send_keys`
+write only while the pane is still at that snapshot's *Pane version*, and
+hold the tmux connection from the check through the write; a command line
+also makes the phase Unknown under the pane lock, so any other writer
+holding the old version is refused. A refused write reaches the model as
+"changed before the send; nothing was sent". No handler retries.
+
+**Why:** the user wanted optimistic concurrency on one counter per pane,
+in the manner of a Kubernetes object version, closing the gap between a
+decision and its write to about a millisecond. The version is the whole
+precondition, so no narrower check and no retry belong beside it.
+
+**Alternatives considered:**
+- `lock_run` held to the C marker: a lock doing a fact's job.
+- A phase precondition on command lines: narrower than the version, and special-cased `ssh`.
+- A `Step`/cycle framework or a result type per tool: a framework where calls with a version suffice.
+- Retry until a deadline: existed only because Unknown was treated as stale.
+- `state_tx` (every output chunk) or compare-by-value as the precondition.
+
+**Revisit when:** the model should pass back a version on `command_run`; replies would first need to report the version at the next prompt.
+
+## The Pane version rises whenever the Pane snapshot changes
+
+2026-10-11 · active
+
+`TrackedPane` publishes a new snapshot when it differs from the last
+(plain `Eq`), and only then raises the version. Output stands outside
+versions: it grows without one, and the input stays empty while a
+command runs, so streaming output leaves the version alone.
+
+**Why:** the user chose a version that rises on any change, compared by
+plain equality, over rules for which changes count.
+
+**Alternatives considered:**
+- A `Versioning` enum or a `contradicts` relation choosing which changes count: concepts with no meaning in the model.
+- Backfilling an Unknown fact without a new version: a version would name two snapshots.
+
+## A pane fact is Unknown or Known, and a missed answer is a fact of its own
+
+2026-10-12 · active
+
+`Fact` has two values. The phase is stored like the mode: an A–D marker
+sets it (`Idle` and `Prompt` read Unknown), and our command line makes
+it Unknown. Whether the shell sends markers is `integration`: a marker
+makes it true; a wait for our command line's marker that times out makes
+it false, set by the waiter as the event loop sets the mode from its
+query. `command_run` probes only when phase and integration are both
+Unknown; integration false refuses with the inject hint, and
+`list_panes` shows it as "failed".
+
+**Why:** the user wanted a missed answer recorded in the snapshot, and
+rejected failure as a value of a fact: a fact the daemon does not know is
+Unknown.
+
+**Alternatives considered:**
+- `Fact::Failed`: what failed is our write, not the fact.
+- Timers in the pane (`Answer`, `echo_due`, `expire`): bookkeeping for a value that should not exist.
+- The phase returning to its last marker value at a deadline: hid the failure.
+- Integration as a cache keyed by process: state outside the stream.
+
+## Read cursors live in the MCP server
+
+2026-10-11 · active
+
+The daemon keeps no state for a read. Each reply returns an `offset`
+(`command_id`, `line`); the MCP server keeps the newest 100 per pane and
+sends the offset back with its next read. An offset applies only to the
+command it names; any other reads from line 0. A `command_read` without
+`command_id` reads the pane's newest command.
+
+**Why:** the user placed the cursor with the reader, the MCP server,
+carried over the socket rather than kept per connection, and had a read
+without an id default to the pane's newest command.
+
+**Alternatives considered:**
+- One cursor per `CommandRecord`: two sessions took lines from each other.
+- Cursors per daemon connection: state the daemon would keep.
+- Requiring `command_id` on every read: makes the model repeat itself.
+
+## press_key takes the version the model read; the screen is not versioned
+
+2026-10-12 · active
+
+`press_key` requires `version`, and every screen a model can act on shows
+it ("Screen at version N:", `list_panes`' Version column, a running
+command's hints). The version covers facts, not the rows: a TUI that
+repaints while a command runs keeps its version.
+
+**Why:** the user had tools show versions and take them. The screen
+stays unversioned by choice: versioning rows would raise the version on
+every output chunk and stale every write while output streams.
+
+**Alternatives considered:**
+- `press_key` reading its own version: catches only changes in that instant.
+- A screen revision as a second precondition: deferred.
+
+## Typing detection stays strict; a line the cursor sits outside earns a Ctrl-C hint
+
+2026-10-11 · active
+
+Any text on the input line refuses `command_run`. When the cursor sits
+outside that text, with nothing typed before it or below the line the
+last character would leave it on, the refusal adds that the line may be
+garbled and `press_key C-c` clears it. The refusal quotes what it read as
+input and shows the screen.
+
+**Why:** the user judged typing detection not fixable, since prompts get
+garbled, and chose a hint instead. Typing, editing included, keeps the
+cursor within its line, and a background job's output ending in a newline
+left the cursor below its text.
+
+**Alternatives considered:**
+- Only an empty span before the cursor as the trigger: missed that background-job case.
+- Count only text before the cursor as typing: misses Ctrl-A editing.
+
+## A policy rule never passes through
+
+2026-10-12 · active
+
+A rule's action is allow, ask or deny. *Passthrough* is only what a Bash
+line gets when no rule matches it.
+
+**Why:** the user weighed a `pass` action and left it out: rules had been
+better without it, and as with ACL systems, less expressivity can make
+better rules.
+
+**Alternatives considered:**
+- A `pass` action on Bash rules: it would loosen without an *Exemption*.
+- Self-contained policy files decided bottom-up, so that `pass` stays local: the same question holds for asks.
+
 ## The policy hook judges Bash calls in its own process
 
 2026-10-11 · active
@@ -432,7 +567,7 @@ nested shells).
 
 ## Typing detection stays strict; a garbled line earns a Ctrl-C hint
 
-2026-10-08 · active
+2026-10-08 · superseded-by: Typing detection stays strict; a line the cursor sits outside earns a Ctrl-C hint
 
 Any text on the input line refuses `command_run`. When no text sits
 between the prompt and the cursor, the refusal adds that the line may be

@@ -44,6 +44,8 @@ pub struct PolicyEngine {
     home_path: PathBuf,
     home_mtime: RwLock<Option<SystemTime>>,
     project_mtime: RwLock<Option<(PathBuf, SystemTime)>>,
+    /// Counts reloads, so a pane can raise its *Pane version* on each.
+    reloads: tokio::sync::watch::Sender<u64>,
 }
 
 /// One loaded source; a project source applies only on this machine.
@@ -74,7 +76,13 @@ impl PolicyEngine {
             home_path,
             home_mtime: RwLock::new(home_mtime),
             project_mtime: RwLock::new(project_mtime),
+            reloads: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    /// Changes each time the policy reloads.
+    pub fn reloads(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.reloads.subscribe()
     }
 
     /// Get a read reference to the compiled policy.
@@ -117,6 +125,7 @@ impl PolicyEngine {
         if let Some(current) = project {
             *self.project_mtime.write().unwrap() = current;
         }
+        self.reloads.send_modify(|count| *count += 1);
         tracing::info!("Policy config reloaded");
     }
 

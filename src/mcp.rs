@@ -3,8 +3,11 @@
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
@@ -12,15 +15,55 @@ use crate::client::DaemonClient;
 pub struct TmuxMcp {
     client: DaemonClient,
     origin_pane: String,
+    offsets: Offsets,
     tool_router: ToolRouter<Self>,
 }
+
+/// Where this session stands in each command's output, by pane and command:
+/// the reader keeps its own place, and the daemon keeps none.
+#[derive(Clone, Default)]
+struct Offsets(Arc<Mutex<HashMap<String, BTreeMap<u64, u64>>>>);
+
+/// As many commands per pane as the daemon keeps.
+const OFFSETS_PER_PANE: usize = 100;
 
 impl TmuxMcp {
     pub fn new(client: DaemonClient, origin_pane: String) -> Self {
         Self {
             client,
             origin_pane,
+            offsets: Offsets::default(),
             tool_router: Self::tool_router(),
+        }
+    }
+}
+
+impl Offsets {
+    /// The offset to send for a read of `command_id`, or of the newest command
+    /// this session knows on the pane. The daemon applies it only to the
+    /// command it names.
+    fn for_read(&self, pane_id: &str, command_id: Option<u64>) -> Option<Value> {
+        let panes = self.0.lock().expect("offsets lock");
+        let commands = panes.get(pane_id)?;
+        let (id, line) = match command_id {
+            Some(id) => (id, *commands.get(&id)?),
+            None => commands.last_key_value().map(|(id, line)| (*id, *line))?,
+        };
+        Some(json!({ "command_id": id, "line": line }))
+    }
+
+    /// Keeps the offset a read's reply returned.
+    fn record(&self, pane_id: &str, reply: &Value) {
+        let offset = &reply["offset"];
+        let (Some(id), Some(line)) = (offset["command_id"].as_u64(), offset["line"].as_u64())
+        else {
+            return;
+        };
+        let mut panes = self.0.lock().expect("offsets lock");
+        let commands = panes.entry(pane_id.to_string()).or_default();
+        commands.insert(id, line);
+        while commands.len() > OFFSETS_PER_PANE {
+            commands.pop_first();
         }
     }
 }
@@ -132,6 +175,10 @@ pub struct PressKeyParams {
         description = "Key to press: a tmux key name (Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace), or up to 3 characters of text such as q, y or :wq."
     )]
     pub keys: String,
+    #[schemars(
+        description = "The pane version you last read: list_panes, debug_pane and command results show it. A pane that changed since refuses the key."
+    )]
+    pub version: u64,
 }
 
 // --- Response formatting ---
@@ -159,6 +206,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
 
     let header = [
         "ID",
+        "Version",
         "Geometry",
         "State",
         "Integration",
@@ -167,7 +215,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
         "Cwd",
     ]
     .map(String::from);
-    let rows: Vec<[String; 7]> = panes
+    let rows: Vec<[String; 8]> = panes
         .iter()
         .map(|p| {
             let pane_id = p["pane_id"].as_str().unwrap_or("?");
@@ -178,6 +226,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
                 } else {
                     pane_id.to_string()
                 },
+                p["version"].as_u64().unwrap_or(0).to_string(),
                 format!(
                     "{}x{}{:+}{:+}",
                     p["width"].as_u64().unwrap_or(0),
@@ -201,7 +250,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
         })
         .collect();
 
-    let mut widths = [0; 7];
+    let mut widths = [0; 8];
     for row in std::iter::once(&header).chain(&rows) {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = (*w).max(cell.chars().count());
@@ -323,7 +372,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     let lines_skipped = result["lines_skipped"].as_u64().unwrap_or(0);
     let search_matches = result["search_matches"].as_u64();
-    let read_cursor = result["read_cursor"].as_u64().unwrap_or(0);
+    let offset = result["offset"]["line"].as_u64().unwrap_or(0);
 
     let mut text = String::new();
 
@@ -334,8 +383,8 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     // Skipped lines hint — split into already-read vs not-shown portions
     if lines_skipped > 0 {
-        let already_read = if read_cursor > 0 {
-            read_cursor.min(lines_skipped)
+        let already_read = if offset > 0 {
+            offset.min(lines_skipped)
         } else {
             0
         };
@@ -395,10 +444,11 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
             }
         }
         "running" => {
+            let version = result["version"].as_u64().unwrap_or(0);
             if let Some(id) = command_id {
                 if output.is_empty() {
                     text.push_str(&format!(
-                        "\n[No new output. Command still running (id={id}). Use command_read(command_id={id}) to keep waiting, or press_key C-c to cancel.]"
+                        "\n[No new output. Command still running (id={id}). Use command_read(command_id={id}) to keep waiting, or press_key C-c (version={version}) to cancel.]"
                     ));
                 } else {
                     let lines_shown = output.lines().count();
@@ -410,8 +460,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                         hint.push_str(&format!(" {} search matches.", matches));
                     }
                     hint.push_str(&format!(
-                        " Use command_read(command_id={}, next=200) to continue reading, or press_key C-c to cancel.]",
-                        id
+                        " Use command_read(command_id={id}, next=200) to continue reading, or press_key C-c (version={version}) to cancel.]"
                     ));
                     text.push_str(&hint);
                 }
@@ -455,7 +504,7 @@ impl TmuxMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut rpc_params = json!({
             "origin_pane": self.origin_pane,
-            "pane_id": params.pane_id,
+            "pane_id": &params.pane_id,
             "command": params.command,
             "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
@@ -483,6 +532,7 @@ impl TmuxMcp {
             .request("command_run", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        self.offsets.record(&params.pane_id, &result);
 
         let text = format_command_result(&result, true);
         let is_error = result["exit_code"].as_i64().is_some_and(|c| c != 0);
@@ -500,12 +550,13 @@ impl TmuxMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut rpc_params = json!({
             "origin_pane": self.origin_pane,
-            "pane_id": params.pane_id,
+            "pane_id": &params.pane_id,
             "timeout_secs": params.timeout_secs.unwrap_or(5),
         });
         if let Some(id) = params.command_id {
             rpc_params["command_id"] = json!(id);
         }
+        let command_id = params.command_id.and_then(|id| u64::try_from(id).ok());
         if let Some(n) = params.next {
             rpc_params["next"] = json!(n);
         }
@@ -524,12 +575,16 @@ impl TmuxMcp {
         if let Some(n) = params.after {
             rpc_params["after"] = json!(n);
         }
+        if let Some(offset) = self.offsets.for_read(&params.pane_id, command_id) {
+            rpc_params["offset"] = offset;
+        }
 
         let result = self
             .client
             .request("command_read", rpc_params)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        self.offsets.record(&params.pane_id, &result);
 
         let text = format_command_result(&result, false);
         let is_error = result["exit_code"].as_i64().is_some_and(|c| c != 0);
@@ -571,6 +626,10 @@ impl TmuxMcp {
             ));
         }
 
+        text.push_str(&format!(
+            "Screen at version {}:\n",
+            result["version"].as_u64().unwrap_or(0)
+        ));
         text.push_str(result["text"].as_str().unwrap_or(""));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -607,7 +666,7 @@ impl TmuxMcp {
                     format!("OSC 133 injection status: {} — {}", status, msg)
                 } else {
                     format!(
-                        "OSC 133 injection status: {} — {}\n\nScreen:\n{}",
+                        "OSC 133 injection status: {} — {}\n\n{}",
                         status, msg, screen
                     )
                 }
@@ -635,6 +694,7 @@ impl TmuxMcp {
                     "origin_pane": self.origin_pane,
                     "pane_id": params.pane_id,
                     "keys": params.keys,
+                    "version": params.version,
                 }),
             )
             .await
@@ -718,7 +778,9 @@ impl ServerHandler for TmuxMcp {
                  to understand (typing, busy), a garbled prompt, a TUI. Command output \
                  comes from command_read.\n\n\
                  press_key: For control sequences only (C-c, C-d, Enter, Escape). \
-                 NOT for running commands — use command_run instead."
+                 NOT for running commands — use command_run instead. It takes the pane \
+                 version you last read (list_panes, debug_pane, a command result or a \
+                 refusal's screen), and refuses when the pane changed since."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

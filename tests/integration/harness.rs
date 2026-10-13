@@ -26,14 +26,20 @@ use tmux_mcp::daemon::rpc::OSC133_INJECT_LINES;
 pub const SETTLE: Duration = Duration::from_secs(10);
 
 pub struct Harness {
-    client: RunningService<RoleClient, ()>,
-    /// The MCP server process, killed when the harness drops.
-    _server: tokio::process::Child,
+    session: Session,
     /// What every tmux-mcp process gets: this server, this pane, this HOME.
     env: Vec<(&'static str, String)>,
     socket: PathBuf,
     /// Held for its `Drop`: everything the harness makes lives in it.
     dir: TempDir,
+}
+
+/// One MCP server: a tmux-mcp process, talked to as one Claude Code session
+/// talks to it.
+pub struct Session {
+    client: RunningService<RoleClient, ()>,
+    /// The MCP server process, killed when the session drops.
+    _server: tokio::process::Child,
 }
 
 pub struct Shell {
@@ -124,16 +130,22 @@ const POLL: Duration = Duration::from_millis(10);
 
 impl Harness {
     pub async fn new() -> Harness {
-        Harness::launch(None).await
+        Harness::launch(None, None).await
     }
 
     /// A harness whose MCP server, and the daemon it starts, run as another
     /// build of `version`; hooks run as this build.
     pub async fn claiming(version: &str) -> Harness {
-        Harness::launch(Some(version)).await
+        Harness::launch(Some(version), None).await
     }
 
-    async fn launch(version: Option<&str>) -> Harness {
+    /// A harness whose daemon waits `delay` before each write to a pane, so a
+    /// test can change the pane between a decision and its write.
+    pub async fn delaying_sends(delay: Duration) -> Harness {
+        Harness::launch(None, Some(delay)).await
+    }
+
+    async fn launch(version: Option<&str>, send_delay: Option<Duration>) -> Harness {
         // Under /tmp, so the sockets inside stay within `sun_path`'s 108 bytes.
         let dir = tempfile::Builder::new()
             .prefix("tmux-mcp-harness-")
@@ -173,7 +185,7 @@ impl Harness {
             panic!("tmux gave ids {ids:?}")
         };
 
-        let env = vec![
+        let mut env = vec![
             (
                 "TMUX",
                 format!(
@@ -186,34 +198,39 @@ impl Harness {
             ("HOME", home.display().to_string()),
             ("XDG_RUNTIME_DIR", runtime.display().to_string()),
         ];
-        let mut server = tokio::process::Command::from(tmux_mcp(&env));
-        if let Some(version) = version {
-            server.env("TMUX_MCP_VERSION", version);
+        if let Some(delay) = send_delay {
+            env.push(("TMUX_MCP_SEND_DELAY_MS", delay.as_millis().to_string()));
         }
-        server
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut server = server.spawn().expect("the tmux-mcp binary");
-        let pipes = (
-            server.stdout.take().expect("piped stdout"),
-            server.stdin.take().expect("piped stdin"),
-        );
-        let client = ().serve(pipes).await.expect("an MCP session with tmux-mcp");
+        let session = Session::start(&env, version).await;
         Harness {
-            client,
-            _server: server,
+            session,
             env,
             socket,
             dir,
         }
     }
 
+    /// A second MCP server on the same daemon, as a second Claude Code session
+    /// in the same window would be.
+    pub async fn another_session(&self) -> Session {
+        Session::start(&self.env, None).await
+    }
+
     /// A pane beside the harness's own, started in `dir()`. Returns once its
     /// prompt shows and `list_panes` lists it. Each call halves the harness's
     /// pane, so a test makes one.
     pub async fn shell(&self) -> Shell {
+        self.open_shell("exec bash --noprofile -i").await
+    }
+
+    /// A `shell` whose bash skips the `.bashrc`, so it sends no OSC 133
+    /// markers until `inject_osc133`.
+    pub async fn shell_without_integration(&self) -> Shell {
+        self.open_shell("PS1='$ ' exec bash --noprofile --norc -i")
+            .await
+    }
+
+    async fn open_shell(&self, program: &str) -> Shell {
         let cwd = self.dir().to_str().expect("a UTF-8 temp dir");
         let split = [
             "split-window",
@@ -223,7 +240,7 @@ impl Harness {
             "#{pane_id}",
             "-c",
             cwd,
-            "exec bash --noprofile -i",
+            program,
         ];
         let pane = run(tmux(&self.socket).args(split)).trim().to_string();
         let shell = Shell {
@@ -296,7 +313,11 @@ impl Harness {
     pub async fn screens(&self, shell: &Shell) -> (String, String) {
         let deadline = Instant::now() + SETTLE;
         loop {
-            let daemon = self.debug_pane(shell).await;
+            let reply = self.debug_pane(shell).await;
+            let daemon = reply
+                .split_once(":\n")
+                .map_or(reply.as_str(), |(_, screen)| screen)
+                .to_string();
             let tmux = shell.screen().trim_end().to_string();
             if daemon == tmux || Instant::now() >= deadline {
                 return (daemon, tmux);
@@ -309,11 +330,26 @@ impl Harness {
         self.call("inject_osc133", shell.target()).await
     }
 
-    /// The press_key tool: the reply is the screen it returns.
+    /// The press_key tool at the version `list_panes` shows once the daemon
+    /// has caught up with the screen, as a model reads it: the reply is the
+    /// screen it returns.
     pub async fn press_key(&self, shell: &Shell, key: &str) -> String {
+        self.screens(shell).await;
+        let version = self.version(shell).await;
+        self.press_key_at(shell, key, version).await
+    }
+
+    /// The press_key tool at `version`.
+    pub async fn press_key_at(&self, shell: &Shell, key: &str, version: u64) -> String {
         let mut arguments = shell.target();
         arguments.insert("keys".into(), json!(key));
+        arguments.insert("version".into(), json!(version));
         self.call("press_key", arguments).await
+    }
+
+    /// The *Pane version* `list_panes` shows for `shell`.
+    pub async fn version(&self, shell: &Shell) -> u64 {
+        self.list_panes().await.version(shell)
     }
 
     pub async fn list_panes(&self) -> PaneTable {
@@ -548,6 +584,15 @@ impl PaneTable {
             .unwrap_or_else(|| panic!("no row for {} in\n{}", shell.pane, self.text));
         row.to_string()
     }
+
+    /// The Version column, second after ID.
+    pub fn version(&self, shell: &Shell) -> u64 {
+        let row = self.row(shell);
+        let version = row.split_whitespace().nth(1);
+        version
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no version in {row:?}"))
+    }
 }
 
 impl Read {
@@ -580,9 +625,45 @@ impl Read {
     }
 }
 
+impl Session {
+    /// `command_read` of the pane's latest command, from this session.
+    pub async fn read(&self, shell: &Shell, read: Read) -> String {
+        self.call("command_read", read.set("pane_id", shell.pane.as_str()).0)
+            .await
+    }
+}
+
 // --- Internal ---
 
 impl Harness {
+    async fn call(&self, tool: &str, arguments: Map<String, Value>) -> String {
+        self.session.call(tool, arguments).await
+    }
+}
+
+impl Session {
+    async fn start(env: &[(&'static str, String)], version: Option<&str>) -> Session {
+        let mut server = tokio::process::Command::from(tmux_mcp(env));
+        if let Some(version) = version {
+            server.env("TMUX_MCP_VERSION", version);
+        }
+        server
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut server = server.spawn().expect("the tmux-mcp binary");
+        let pipes = (
+            server.stdout.take().expect("piped stdout"),
+            server.stdin.take().expect("piped stdin"),
+        );
+        let client = ().serve(pipes).await.expect("an MCP session with tmux-mcp");
+        Session {
+            client,
+            _server: server,
+        }
+    }
+
     async fn call(&self, tool: &str, arguments: Map<String, Value>) -> String {
         let request = CallToolRequestParam {
             name: tool.to_string().into(),
@@ -611,7 +692,8 @@ impl Shell {
         Map::from_iter([("pane_id".to_string(), json!(self.pane))])
     }
 
-    fn screen(&self) -> String {
+    /// The screen as tmux shows it.
+    pub fn screen(&self) -> String {
         let screen = run(tmux(&self.socket).args(["capture-pane", "-p", "-t", &self.pane]));
         screen
             .lines()
