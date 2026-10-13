@@ -1,19 +1,18 @@
 /// Structured pane state — the queryable output of the parsing pipeline.
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// Maximum commands retained in history per pane.
 const MAX_COMMAND_HISTORY: usize = 100;
 
-/// A command with its output — may be in-progress or completed.
-#[derive(Debug, Clone)]
+/// A command — may be in-progress or completed. Its output is read apart,
+/// through `TerminalState::output`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRecord {
     /// Monotonic ID for addressing (higher = newer).
     pub id: u64,
     /// The command text as typed by the user.
     pub command: String,
-    /// Command output — accumulates live during execution, persists after completion.
-    pub output: String,
     /// Exit code from D marker. None if still running or unknown.
     pub exit_code: Option<i32>,
     /// Whether the D marker has been received (output is done).
@@ -28,6 +27,9 @@ pub struct CommandRecord {
 pub struct TerminalState {
     /// Completed commands, most recent first.
     pub commands: VecDeque<CommandRecord>,
+    /// Each command's output by id: it accumulates live during execution and
+    /// persists after completion, as long as its record.
+    outputs: HashMap<u64, String>,
     /// Current working directory (from OSC 7).
     pub cwd: Option<String>,
     /// Username (from OSC 7 userinfo, e.g. file://user@host/path).
@@ -52,6 +54,7 @@ impl TerminalState {
     pub fn new() -> Self {
         Self {
             commands: VecDeque::new(),
+            outputs: HashMap::new(),
             cwd: None,
             user: None,
             hostname: None,
@@ -69,29 +72,22 @@ impl TerminalState {
         self.commands.push_front(CommandRecord {
             id,
             command,
-            output: String::new(),
             exit_code: None,
             output_done: false,
             completed: false,
         });
+        self.outputs.insert(id, String::new());
         while self.commands.len() > MAX_COMMAND_HISTORY {
-            self.commands.pop_back();
+            if let Some(oldest) = self.commands.pop_back() {
+                self.outputs.remove(&oldest.id);
+            }
         }
         id
     }
 
-    /// The command whose prompt has not returned yet (no B marker), if any. A
-    /// pane takes the next command only once this is `None`.
-    pub fn active_command(&self) -> Option<&CommandRecord> {
-        self.commands.front().filter(|c| !c.completed)
-    }
-
-    /// The command still running, if any: it ends at its D marker, or at its B
-    /// marker when no D arrives.
-    pub fn running_command(&self) -> Option<&CommandRecord> {
-        self.commands
-            .front()
-            .filter(|c| !c.completed && !c.output_done)
+    /// The output of the command `command_id`, while its record is kept.
+    pub fn output(&self, command_id: u64) -> Option<&str> {
+        self.outputs.get(&command_id).map(String::as_str)
     }
 
     /// Get a mutable ref to the active command.
@@ -103,17 +99,12 @@ impl TerminalState {
     /// Stops accumulating after D marker (output_done), remaining text before B
     /// is prompt content.
     pub fn append_active_output(&mut self, text: &str) {
-        if let Some(cmd) = self.commands.front_mut()
+        if let Some(cmd) = self.commands.front()
             && !cmd.completed
             && !cmd.output_done
         {
-            cmd.output.push_str(text);
+            self.outputs.entry(cmd.id).or_default().push_str(text);
         }
-    }
-
-    /// Find a command by ID.
-    pub fn command_by_id(&self, id: u64) -> Option<&CommandRecord> {
-        self.commands.iter().find(|c| c.id == id)
     }
 
     /// Get the most recent N commands (newest first).
@@ -179,14 +170,14 @@ mod tests {
     fn push_and_retrieve_commands() {
         let mut s = TerminalState::new();
         s.push_command_start("ls".into());
+        s.append_active_output("file1\nfile2");
         let cmd = s.commands.front_mut().unwrap();
-        cmd.output = "file1\nfile2".into();
         cmd.exit_code = Some(0);
         cmd.completed = true;
 
         s.push_command_start("pwd".into());
+        s.append_active_output("/home/user");
         let cmd = s.commands.front_mut().unwrap();
-        cmd.output = "/home/user".into();
         cmd.exit_code = Some(0);
         cmd.completed = true;
 

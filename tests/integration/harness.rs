@@ -313,7 +313,11 @@ impl Harness {
     pub async fn screens(&self, shell: &Shell) -> (String, String) {
         let deadline = Instant::now() + SETTLE;
         loop {
-            let daemon = self.debug_pane(shell).await;
+            let reply = self.debug_pane(shell).await;
+            let daemon = reply
+                .split_once(":\n")
+                .map_or(reply.as_str(), |(_, screen)| screen)
+                .to_string();
             let tmux = shell.screen().trim_end().to_string();
             if daemon == tmux || Instant::now() >= deadline {
                 return (daemon, tmux);
@@ -326,11 +330,26 @@ impl Harness {
         self.call("inject_osc133", shell.target()).await
     }
 
-    /// The press_key tool: the reply is the screen it returns.
+    /// The press_key tool at the version `list_panes` shows once the daemon
+    /// has caught up with the screen, as a model reads it: the reply is the
+    /// screen it returns.
     pub async fn press_key(&self, shell: &Shell, key: &str) -> String {
+        self.screens(shell).await;
+        let version = self.version(shell).await;
+        self.press_key_at(shell, key, version).await
+    }
+
+    /// The press_key tool at `version`.
+    pub async fn press_key_at(&self, shell: &Shell, key: &str, version: u64) -> String {
         let mut arguments = shell.target();
         arguments.insert("keys".into(), json!(key));
+        arguments.insert("version".into(), json!(version));
         self.call("press_key", arguments).await
+    }
+
+    /// The *Pane version* `list_panes` shows for `shell`.
+    pub async fn version(&self, shell: &Shell) -> u64 {
+        self.list_panes().await.version(shell)
     }
 
     pub async fn list_panes(&self) -> PaneTable {
@@ -565,6 +584,15 @@ impl PaneTable {
             .unwrap_or_else(|| panic!("no row for {} in\n{}", shell.pane, self.text));
         row.to_string()
     }
+
+    /// The Version column, second after ID.
+    pub fn version(&self, shell: &Shell) -> u64 {
+        let row = self.row(shell);
+        let version = row.split_whitespace().nth(1);
+        version
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no version in {row:?}"))
+    }
 }
 
 impl Read {
@@ -664,7 +692,8 @@ impl Shell {
         Map::from_iter([("pane_id".to_string(), json!(self.pane))])
     }
 
-    fn screen(&self) -> String {
+    /// The screen as tmux shows it.
+    pub fn screen(&self) -> String {
         let screen = run(tmux(&self.socket).args(["capture-pane", "-p", "-t", &self.pane]));
         screen
             .lines()

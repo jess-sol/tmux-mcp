@@ -504,7 +504,7 @@ mod tests {
         let cmds = p.state().recent_commands(10);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "echo hi");
-        assert!(cmds[0].output.contains("hi"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("hi"));
     }
 
     /// A command start makes the reported place stale until OSC 7 reports again.
@@ -554,7 +554,7 @@ mod tests {
 
         let cmds = p.state().recent_commands(10);
         assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].output.contains("sub output"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("sub output"));
         assert_eq!(cmds[0].exit_code, Some(0));
     }
 
@@ -596,8 +596,8 @@ mod tests {
 
         let cmds = p.state().recent_commands(10);
         assert_eq!(cmds[0].command, "cd /tmp && ls");
-        assert!(cmds[0].output.contains("file1"));
-        assert!(cmds[0].output.contains("file2"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("file1"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("file2"));
         assert_eq!(p.state().cwd.as_deref(), Some("/tmp"));
     }
 
@@ -619,8 +619,8 @@ mod tests {
         p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
 
         let cmds = p.state().recent_commands(10);
-        assert!(cmds[0].output.contains("1\r\n"));
-        assert!(cmds[0].output.contains("100\r\n"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("1\r\n"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("100\r\n"));
     }
 
     /// Non-133 OSC (like OSC 9 notification) in output doesn't corrupt capture.
@@ -637,8 +637,8 @@ mod tests {
         p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
 
         let cmds = p.state().recent_commands(10);
-        assert!(cmds[0].output.contains("before"));
-        assert!(cmds[0].output.contains("after"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("before"));
+        assert!(p.state().output(cmds[0].id).unwrap().contains("after"));
     }
 
     #[test]

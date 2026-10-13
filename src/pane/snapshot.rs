@@ -36,8 +36,10 @@ pub struct PaneSnapshot {
     pub cwd: Option<String>,
     pub host: Option<String>,
     pub user: Option<String>,
-    /// Newest first.
-    pub commands: Vec<CommandSummary>,
+    /// The shell's process, once tmux has said.
+    pub pid: Option<u32>,
+    /// Newest first; each command's output is read apart.
+    pub commands: Vec<CommandRecord>,
 }
 
 /// What policy and approvals judge a command by: where the next command runs.
@@ -47,28 +49,6 @@ impl From<&PaneSnapshot> for PaneContext {
             hostname: snapshot.host.clone(),
             cwd: snapshot.cwd.clone(),
             user: snapshot.user.clone(),
-        }
-    }
-}
-
-/// A command as the *Pane snapshot* lists it; its output is read apart.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommandSummary {
-    pub id: u64,
-    pub command: String,
-    pub exit_code: Option<i32>,
-    pub output_done: bool,
-    pub completed: bool,
-}
-
-impl From<&CommandRecord> for CommandSummary {
-    fn from(record: &CommandRecord) -> Self {
-        CommandSummary {
-            id: record.id,
-            command: record.command.clone(),
-            exit_code: record.exit_code,
-            output_done: record.output_done,
-            completed: record.completed,
         }
     }
 }

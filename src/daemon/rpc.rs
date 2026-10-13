@@ -500,11 +500,10 @@ async fn wait_and_read(
 
     loop {
         {
-            let tp = pane_handle.lock().await;
-            let pane_state = tp.processor.state();
+            let snapshot = pane_handle.snapshot();
             let cmd = match command_id {
-                Some(id) => pane_state.command_by_id(id),
-                None => pane_state.commands.front(),
+                Some(id) => snapshot.commands.iter().find(|c| c.id == id),
+                None => snapshot.commands.first(),
             };
             let Some(cmd) = cmd else {
                 return Err(match command_id {
@@ -512,18 +511,24 @@ async fn wait_and_read(
                     None => RpcError::invalid_params("No commands in history"),
                 });
             };
+            // Read after the snapshot, so a command it shows done has all its
+            // output here.
+            let output = pane_handle.output(cmd.id).await.unwrap_or_default();
             let start = read_params.start(cmd.id);
+            let reply = |status, result: &ReadResult, offset| {
+                read_reply(cmd, snapshot.version, status, result, offset)
+            };
 
             // D ends the output and carries the exit code; B follows only
             // once the next prompt is drawn.
             if cmd.completed || cmd.output_done {
                 let mut offset = start;
-                let result = apply_read_params(&cmd.output, true, &mut offset, read_params);
-                return Ok(read_reply(cmd, "completed", &result, offset));
+                let result = apply_read_params(&output, true, &mut offset, read_params);
+                return Ok(reply("completed", &result, offset));
             }
 
             let mut offset = start;
-            let peeked = apply_read_params(&cmd.output, false, &mut offset, read_params);
+            let peeked = apply_read_params(&output, false, &mut offset, read_params);
 
             let has_enough = if let Some(n) = required_lines {
                 // When search is active, count matches (not output lines
@@ -543,15 +548,15 @@ async fn wait_and_read(
                 && (required_lines.is_none()
                     || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
             {
-                return Ok(read_reply(cmd, "running", &peeked, offset));
+                return Ok(reply("running", &peeked, offset));
             }
 
             // Timeout: tail returns nothing, the others what there is.
             if now >= deadline {
                 if is_tail {
-                    return Ok(read_reply(cmd, "running", &ReadResult::default(), start));
+                    return Ok(reply("running", &ReadResult::default(), start));
                 }
-                return Ok(read_reply(cmd, "running", &peeked, offset));
+                return Ok(reply("running", &peeked, offset));
             }
         }
 
@@ -563,13 +568,20 @@ async fn wait_and_read(
     }
 }
 
-/// The reply to a read of `cmd`: its window of output, and the `offset` the
-/// reader's next read of `cmd` starts from. The reader keeps the offset; the
-/// daemon keeps nothing.
-fn read_reply(cmd: &CommandRecord, status: &str, result: &ReadResult, offset: usize) -> Value {
+/// The reply to a read of `cmd` at `version`: its window of output, and the
+/// `offset` the reader's next read of `cmd` starts from. The reader keeps the
+/// offset; the daemon keeps nothing.
+fn read_reply(
+    cmd: &CommandRecord,
+    version: u64,
+    status: &str,
+    result: &ReadResult,
+    offset: usize,
+) -> Value {
     json!({
         "command_id": cmd.id,
         "command": cmd.command,
+        "version": version,
         "status": status,
         "exit_code": cmd.exit_code,
         "output": result.lines.join("\n"),
@@ -584,17 +596,15 @@ fn read_reply(cmd: &CommandRecord, status: &str, result: &ReadResult, offset: us
 /// command that ends at once reports its exit code instead of "running".
 const WINDOW_SETTLE: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 
-/// Capture the last N lines of visible screen content from locked pane state,
-/// ignoring the blank rows below it.
-fn capture_screen(ps: &crate::pane::registry::PaneState, lines: usize) -> String {
-    let all_lines = ps.processor.screen_text();
-    let end = all_lines
-        .iter()
-        .rposition(|l| !l.is_empty())
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let start = end.saturating_sub(lines);
-    all_lines[start..end].join("\n")
+/// The pane's last 20 rows, headed by the *Pane version* they show, which a
+/// `press_key` after them takes.
+async fn shown_screen(pane_handle: &PaneHandle) -> String {
+    let screen = pane_handle.screen().await;
+    format!(
+        "Screen at version {}:\n{}",
+        screen.snapshot.version,
+        screen.last_rows(20)
+    )
 }
 
 /// How long a command line of the daemon's waits for the shell's markers: a
@@ -643,6 +653,8 @@ async fn at_prompt(
 #[derive(Serialize)]
 struct PaneEntry {
     pane_id: String,
+    /// The *Pane version* a `press_key` takes.
+    version: u64,
     pid: Option<u32>,
     width: usize,
     height: usize,
@@ -650,7 +662,8 @@ struct PaneEntry {
     y: usize,
     /// CWD from /proc (local process).
     process_cwd: Option<String>,
-    /// CWD from OSC 7 (works across SSH).
+    /// CWD from OSC 7 (works across SSH), while it says where the next
+    /// command runs.
     osc_cwd: Option<String>,
     /// Username from OSC 7 userinfo (null if never received).
     osc_user: Option<String>,
@@ -706,9 +719,10 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
 
     let mut entries = Vec::new();
     for handle in &handles {
-        let ps = handle.lock().await;
+        let screen = handle.screen().await;
+        let snapshot = &screen.snapshot;
 
-        let (process_cwd, foreground) = if let Some(pid) = ps.pid {
+        let (process_cwd, foreground) = if let Some(pid) = snapshot.pid {
             let info = proc::proc_info(pid);
             (
                 info.as_ref()
@@ -720,36 +734,25 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
             (None, None)
         };
 
-        let term_state = ps.processor.state();
-        let last_data_secs = term_state
-            .last_data
-            .map(|t: std::time::Instant| t.elapsed().as_secs_f64());
-        let snapshot = handle.snapshot();
-
         entries.push(PaneEntry {
             pane_id: handle.pane_id.clone(),
-            pid: ps.pid,
-            width: ps.processor.columns(),
-            height: ps.processor.screen_lines(),
-            x: ps.x,
-            y: ps.y,
+            version: snapshot.version,
+            pid: snapshot.pid,
+            width: screen.width,
+            height: screen.height,
+            x: screen.x,
+            y: screen.y,
             process_cwd,
-            osc_cwd: term_state.cwd.clone(),
-            osc_user: term_state.user.clone(),
-            osc_hostname: term_state.hostname.as_ref().and_then(|h: &String| {
-                if h == &local_hostname {
-                    None
-                } else {
-                    Some(h.clone())
-                }
-            }),
+            osc_cwd: snapshot.cwd.clone(),
+            osc_user: snapshot.user.clone(),
+            osc_hostname: snapshot.host.clone().filter(|host| *host != local_hostname),
             foreground,
             activity: activity(&snapshot.phase).to_string(),
             mode: match &snapshot.mode {
                 Fact::Known(PaneMode::On(mode)) => Some(mode.clone()),
                 _ => None,
             },
-            last_data_secs,
+            last_data_secs: screen.last_output.map(|t| t.elapsed().as_secs_f64()),
             osc133_status: osc133_status(&snapshot.integration).to_string(),
         });
     }
@@ -779,25 +782,18 @@ async fn handle_command_history(
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    let tp = pane_handle.lock().await;
-    let cmds = tp.processor.state().recent_commands(count);
-    let entries: Vec<Value> = cmds
-        .iter()
-        .map(|cmd| {
-            let line_count = cmd
-                .output
-                .strip_suffix('\n')
-                .unwrap_or(&cmd.output)
-                .lines()
-                .count();
-            json!({
-                "command_id": cmd.id,
-                "command": cmd.command,
-                "exit_code": cmd.exit_code,
-                "output_lines": line_count,
-            })
-        })
-        .collect();
+    let snapshot = pane_handle.snapshot();
+    let mut entries = Vec::new();
+    for cmd in snapshot.commands.iter().take(count) {
+        let output = pane_handle.output(cmd.id).await.unwrap_or_default();
+        let line_count = output.strip_suffix('\n').unwrap_or(&output).lines().count();
+        entries.push(json!({
+            "command_id": cmd.id,
+            "command": cmd.command,
+            "exit_code": cmd.exit_code,
+            "output_lines": line_count,
+        }));
+    }
 
     Ok(json!(entries))
 }
@@ -927,8 +923,8 @@ async fn check_pane(
         }
         _ => return Ok(()),
     };
-    let screen = capture_screen(&*pane_handle.lock().await, 20);
-    Err(RpcError::internal(format!("{refusal}\nScreen:\n{screen}")))
+    let screen = shown_screen(pane_handle).await;
+    Err(RpcError::internal(format!("{refusal}\n{screen}")))
 }
 
 /// Refuses a pane in a mode: a mode takes typed keys, so they would never
@@ -1004,11 +1000,11 @@ async fn started_command(
         }
         if Instant::now() >= deadline {
             pane_handle.set_integration(Fact::Known(false)).await;
-            let screen = capture_screen(&*pane_handle.lock().await, 20);
+            let screen = shown_screen(pane_handle).await;
             return Err(RpcError::internal(format!(
                 "Command was sent to pane {pane_id} but no OSC 133 markers came back. Shell \
                  integration may have stopped working. Use debug_pane to inspect pane \
-                 state.\n\nScreen:\n{screen}"
+                 state.\n\n{screen}"
             )));
         }
         tokio::select! {
@@ -1034,12 +1030,15 @@ async fn handle_capture_pane(params: &Value, state: &Arc<DaemonState>) -> Result
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    // Read from alacritty screen model
-    let tp = pane_handle.lock().await;
-    let text = capture_screen(&tp, lines);
+    let screen = pane_handle.screen().await;
 
     // Include active command metadata so MCP layer can steer LLMs toward command_read
-    let active_cmd = tp.processor.state().running_command().map(|cmd| {
+    let running = screen
+        .snapshot
+        .commands
+        .first()
+        .filter(|cmd| !cmd.completed && !cmd.output_done);
+    let active_cmd = running.map(|cmd| {
         json!({
             "command_id": cmd.id,
             "command": cmd.command,
@@ -1047,7 +1046,8 @@ async fn handle_capture_pane(params: &Value, state: &Arc<DaemonState>) -> Result
     });
 
     Ok(json!({
-        "text": text,
+        "text": screen.last_rows(lines),
+        "version": screen.snapshot.version,
         "active_command": active_cmd,
     }))
 }
@@ -1104,12 +1104,10 @@ async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Resul
     if answered.phase == Fact::Known(Osc133Phase::Input) {
         Ok(json!({ "status": "active" }))
     } else {
-        let tp = pane_handle.lock().await;
-        let screen = capture_screen(&tp, 20);
         Ok(json!({
             "status": "failed",
             "message": "Injection sent but no markers detected. Shell may not be bash.",
-            "screen": screen,
+            "screen": shown_screen(&pane_handle).await,
         }))
     }
 }
@@ -1126,6 +1124,12 @@ async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Va
     let keys = params["keys"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("keys is required"))?;
+    let version = params["version"].as_u64().ok_or_else(|| {
+        RpcError::invalid_params(
+            "version is required: the pane version that list_panes, debug_pane or a command \
+             result shows",
+        )
+    })?;
 
     // An escape hatch: key names pass, and other text stays short enough that
     // commands go through command_run.
@@ -1152,17 +1156,20 @@ async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Va
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    // Subscribed before the snapshot, so no change between them goes unseen.
+    // Subscribed before the screen, so no change between them goes unseen.
     let mut rx = pane_handle.subscribe_state();
-    let version = pane_handle.snapshot().version;
-    let before = pane_view(&*pane_handle.lock().await);
+    let before = pane_handle.screen().await;
 
     state.send_keys(pane_id, version, keys).await?;
 
     // The screen is returned once the pane responds to the key, or after a
     // second for a key that changes nothing.
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-    while pane_view(&*pane_handle.lock().await) == before {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let after = pane_handle.screen().await;
+        if (after.cursor, &after.rows) != (before.cursor, &before.rows) {
+            break;
+        }
         if !matches!(
             tokio::time::timeout_at(deadline, rx.changed()).await,
             Ok(Ok(()))
@@ -1171,15 +1178,7 @@ async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Va
         }
     }
 
-    let tp = pane_handle.lock().await;
-    let screen = capture_screen(&tp, 20);
-    Ok(json!({ "screen": screen }))
-}
-
-/// The emulator's view of a pane: its cursor and its rows, exactly as far as
-/// the daemon has processed the pane's output.
-fn pane_view(ps: &crate::pane::registry::PaneState) -> ((usize, usize), Vec<String>) {
-    (ps.processor.cursor_position(), ps.processor.screen_text())
+    Ok(json!({ "screen": shown_screen(&pane_handle).await }))
 }
 
 // --- Policy ---
@@ -1187,7 +1186,7 @@ fn pane_view(ps: &crate::pane::registry::PaneState) -> ((usize, usize), Vec<Stri
 /// The name of the pane's foreground process, from `/proc`, for display.
 async fn foreground_process(state: &Arc<DaemonState>, pane_id: &str) -> Option<String> {
     let handle = state.registry.read().await.get_handle(pane_id)?;
-    let pid = handle.lock().await.pid?;
+    let pid = handle.snapshot().pid?;
     proc::proc_info(pid).and_then(|info| info.foreground.map(|f| f.comm))
 }
 

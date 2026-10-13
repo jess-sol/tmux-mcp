@@ -175,6 +175,10 @@ pub struct PressKeyParams {
         description = "Key to press: a tmux key name (Enter, C-c, C-z, C-d, Escape, Tab, Space, Up, Down, Left, Right, BSpace), or up to 3 characters of text such as q, y or :wq."
     )]
     pub keys: String,
+    #[schemars(
+        description = "The pane version you last read: list_panes, debug_pane and command results show it. A pane that changed since refuses the key."
+    )]
+    pub version: u64,
 }
 
 // --- Response formatting ---
@@ -202,6 +206,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
 
     let header = [
         "ID",
+        "Version",
         "Geometry",
         "State",
         "Integration",
@@ -210,7 +215,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
         "Cwd",
     ]
     .map(String::from);
-    let rows: Vec<[String; 7]> = panes
+    let rows: Vec<[String; 8]> = panes
         .iter()
         .map(|p| {
             let pane_id = p["pane_id"].as_str().unwrap_or("?");
@@ -221,6 +226,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
                 } else {
                     pane_id.to_string()
                 },
+                p["version"].as_u64().unwrap_or(0).to_string(),
                 format!(
                     "{}x{}{:+}{:+}",
                     p["width"].as_u64().unwrap_or(0),
@@ -244,7 +250,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
         })
         .collect();
 
-    let mut widths = [0; 7];
+    let mut widths = [0; 8];
     for row in std::iter::once(&header).chain(&rows) {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = (*w).max(cell.chars().count());
@@ -438,10 +444,11 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
             }
         }
         "running" => {
+            let version = result["version"].as_u64().unwrap_or(0);
             if let Some(id) = command_id {
                 if output.is_empty() {
                     text.push_str(&format!(
-                        "\n[No new output. Command still running (id={id}). Use command_read(command_id={id}) to keep waiting, or press_key C-c to cancel.]"
+                        "\n[No new output. Command still running (id={id}). Use command_read(command_id={id}) to keep waiting, or press_key C-c (version={version}) to cancel.]"
                     ));
                 } else {
                     let lines_shown = output.lines().count();
@@ -453,8 +460,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                         hint.push_str(&format!(" {} search matches.", matches));
                     }
                     hint.push_str(&format!(
-                        " Use command_read(command_id={}, next=200) to continue reading, or press_key C-c to cancel.]",
-                        id
+                        " Use command_read(command_id={id}, next=200) to continue reading, or press_key C-c (version={version}) to cancel.]"
                     ));
                     text.push_str(&hint);
                 }
@@ -620,6 +626,10 @@ impl TmuxMcp {
             ));
         }
 
+        text.push_str(&format!(
+            "Screen at version {}:\n",
+            result["version"].as_u64().unwrap_or(0)
+        ));
         text.push_str(result["text"].as_str().unwrap_or(""));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -656,7 +666,7 @@ impl TmuxMcp {
                     format!("OSC 133 injection status: {} — {}", status, msg)
                 } else {
                     format!(
-                        "OSC 133 injection status: {} — {}\n\nScreen:\n{}",
+                        "OSC 133 injection status: {} — {}\n\n{}",
                         status, msg, screen
                     )
                 }
@@ -684,6 +694,7 @@ impl TmuxMcp {
                     "origin_pane": self.origin_pane,
                     "pane_id": params.pane_id,
                     "keys": params.keys,
+                    "version": params.version,
                 }),
             )
             .await
@@ -767,7 +778,9 @@ impl ServerHandler for TmuxMcp {
                  to understand (typing, busy), a garbled prompt, a TUI. Command output \
                  comes from command_read.\n\n\
                  press_key: For control sequences only (C-c, C-d, Enter, Escape). \
-                 NOT for running commands — use command_run instead."
+                 NOT for running commands — use command_run instead. It takes the pane \
+                 version you last read (list_panes, debug_pane, a command result or a \
+                 refusal's screen), and refuses when the pane changed since."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

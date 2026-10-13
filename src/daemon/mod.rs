@@ -50,7 +50,9 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
 
     // Set PIDs from the same query
     for bp in &panes {
-        registry.set_pid(&bp.pane_id, bp.pid).await;
+        if let Some(handle) = registry.get_handle(&bp.pane_id) {
+            handle.set_pid(bp.pid).await;
+        }
     }
 
     tracing::info!("Monitoring {} panes", registry.len());
@@ -208,7 +210,9 @@ async fn execute_actions(
                 match conn.query_pane_pid(pane_id).await {
                     Ok(pid) => {
                         tracing::debug!("Pane {} pid={}", pane_id, pid);
-                        registry.set_pid(pane_id, pid).await;
+                        if let Some(handle) = registry.get_handle(pane_id) {
+                            handle.set_pid(pid).await;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to query pid for {}: {}", pane_id, e);

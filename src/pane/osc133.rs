@@ -207,8 +207,8 @@ impl Osc133Parser {
                 let output = std::mem::take(&mut self.capture);
                 if !command.is_empty() || !output.is_empty() {
                     state.push_command_start(command);
+                    state.append_active_output(&output);
                     if let Some(cmd) = state.active_command_mut() {
-                        cmd.output = output;
                         cmd.exit_code = exit_code;
                         cmd.output_done = true;
                     }
@@ -224,8 +224,8 @@ impl Osc133Parser {
                 let output = std::mem::take(&mut self.capture);
                 if !output.is_empty() {
                     state.push_command_start(String::new());
+                    state.append_active_output(&output);
                     if let Some(cmd) = state.active_command_mut() {
-                        cmd.output = output;
                         cmd.exit_code = exit_code;
                         cmd.output_done = true;
                     }
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(s.commands.len(), 1);
         let cmd = &s.commands[0];
         assert_eq!(cmd.command, "ls -la");
-        assert_eq!(cmd.output, "file1.txt\nfile2.txt\n");
+        assert_eq!(s.output(cmd.id), Some("file1.txt\nfile2.txt\n"));
         assert_eq!(cmd.exit_code, Some(0));
         assert!(cmd.completed);
     }
@@ -371,7 +371,7 @@ mod tests {
 
         assert_eq!(s.commands.len(), 1);
         assert_eq!(s.commands[0].command, "echo hello");
-        assert_eq!(s.commands[0].output, "hello\n");
+        assert_eq!(s.output(s.commands[0].id).unwrap(), "hello\n");
     }
 
     #[test]
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(s.commands.len(), 1);
         assert_eq!(s.commands[0].command, "cd /tmp");
         assert_eq!(s.commands[0].exit_code, Some(0));
-        assert!(s.commands[0].output.is_empty());
+        assert!(s.output(s.commands[0].id).unwrap().is_empty());
     }
 
     // --- Output capture without C marker (subshells, etc.) ---
@@ -505,7 +505,7 @@ mod tests {
 
         // Output is captured even without C
         assert_eq!(s.commands.len(), 1);
-        assert_eq!(s.commands[0].output, "sub\n");
+        assert_eq!(s.output(s.commands[0].id).unwrap(), "sub\n");
         assert_eq!(s.commands[0].exit_code, Some(0));
     }
 
@@ -522,7 +522,7 @@ mod tests {
 
         // Partial output is captured
         assert_eq!(s.commands.len(), 1);
-        assert_eq!(s.commands[0].output, "partial output\n");
+        assert_eq!(s.output(s.commands[0].id).unwrap(), "partial output\n");
     }
 
     // --- Recovery: missing markers ---
@@ -544,7 +544,7 @@ mod tests {
         // The abandoned command is recorded with no exit code
         assert_eq!(s.commands.len(), 1);
         assert_eq!(s.commands[0].command, "long-cmd");
-        assert_eq!(s.commands[0].output, "partial output");
+        assert_eq!(s.output(s.commands[0].id).unwrap(), "partial output");
         assert_eq!(s.commands[0].exit_code, None);
     }
 
@@ -781,7 +781,7 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
 
-        assert_eq!(s.commands[0].output, "file1\nfile2\nfile3\n");
+        assert_eq!(s.output(s.commands[0].id).unwrap(), "file1\nfile2\nfile3\n");
     }
 
     #[test]
@@ -803,7 +803,7 @@ mod tests {
         marker(&mut p, b'B', None, &mut s);
 
         assert_eq!(s.commands.len(), 1);
-        assert_eq!(s.commands[0].output, "hello\n");
+        assert_eq!(s.output(s.commands[0].id).unwrap(), "hello\n");
         assert!(s.commands[0].exit_code.is_none());
         assert!(s.commands[0].completed);
     }

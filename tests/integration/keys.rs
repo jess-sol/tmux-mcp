@@ -14,6 +14,21 @@ async fn ctrl_c_stops_a_running_command() {
     assert!(reply.contains("Exit code: 130"), "{reply:?}");
 }
 
+/// A key goes out only at the *Pane version* the model read: a pane that
+/// changed since refuses it.
+#[tokio::test]
+async fn a_key_at_an_old_version_sends_nothing() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    let old = h.version(&shell).await;
+    h.run(&shell, "true").await;
+
+    let reply = h.press_key_at(&shell, "x", old).await;
+
+    assert!(reply.contains("changed"), "{reply}");
+    assert!(!shell.screen().contains("$ x"), "{}", shell.screen());
+}
+
 #[tokio::test]
 async fn a_semicolon_reaches_the_pane_as_a_character() {
     let h = Harness::new().await;
