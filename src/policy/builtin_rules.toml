@@ -814,6 +814,8 @@ argument.subcommand.words = [
 global = [                                            # options come before or after the word
   "--host|-H:", "--machine|-M:", "--property|-p:", "--type|-t:", "--signal|-s:", "--lines|-n:",
   "--output|-o:", "--state:",
+  "--user", "--system", "--global", "--all|-a", "--full|-l", "--quiet|-q", "--no-pager",
+  "--no-block", "--now", "--force|-f",
 ]
 
 # --- Infrastructure: each grammar names only the local forms a rule lets through ---
@@ -1123,11 +1125,13 @@ The pane's working directory is already {{ command.shell_cwd }}.'''
 # Through Bash, these run unseen and out of the user's shell history; in a pane
 # the user watches them, answers their prompts, and finds them again. A project
 # lifts one with an allow that has `via = "bash"` and exempts the rule's id.
+# Cargo's everyday subcommands stay on Bash; only `cargo install` goes to a pane.
 
 [[rules]]
 id = "prefer-tmux"
 via = "bash"
-when = 'command.name in ["cargo", "make", "npm"]'
+command = ["make", "npm", "cargo"]
+when = 'command.name != "cargo" || subcommand == "install"'
 action = "deny"
 message = '''
 Run this in a tmux pane, where the user can watch it:

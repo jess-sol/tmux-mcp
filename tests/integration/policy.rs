@@ -129,7 +129,7 @@ async fn a_rule_with_via_counts_only_on_that_channel() {
 async fn the_hook_judges_a_bash_call_outside_tmux() {
     let h = Harness::new().await;
 
-    let (denied, reason) = h.bash("cd src && cargo build");
+    let (denied, reason) = h.bash("cd src && make");
 
     assert_eq!(h.bash("frobnicate"), (Pass, String::new()));
     assert_eq!(denied, Deny);
@@ -155,7 +155,9 @@ async fn a_bash_line_passes_through_what_no_rule_decides() {
         "eval x" => Deny,
         "git push --force origin main" => (Ask, "git-push-force"),
         "rm -r /etc" => (Ask, Ask),
-        "cd src && cargo build" => (Allow, _, Deny, "prefer-tmux"),
+        "cd src && cargo build" => (Allow, Pass),
+        "cd src && make" => (_, _, Deny, "prefer-tmux"),
+        "cargo install ripgrep" => (Ask, "cargo-install", Deny, "prefer-tmux"),
         "tmux capture-pane -p -t %1" => (_, _, Deny, "tmux-cli"),
     });
 }
@@ -186,6 +188,9 @@ async fn bash_asks_only_about_the_sharp_forms() {
         "chmod -R 755 src" => (Ask, _, Ask, "permissions-recursive"),
         "chown -R me src" => (Ask, _, Ask, "permissions-recursive"),
         "chgrp -R staff src" => (Ask, _, Ask, "permissions-recursive"),
+        "systemctl --user list-units" => (Ask, Pass),
+        "systemctl --user --no-pager status comfyui" => (Ask, Pass),
+        "systemctl --user restart comfyui" => (Ask, "service-disruption"),
         "rg --pre cat foo" => (Ask, "rg-runs-program"),
         "apt remove x" => (Ask, "package-remove"),
         "apt-get purge x" => (Ask, "package-remove"),
@@ -289,8 +294,8 @@ async fn a_project_exempts_prefer_tmux_for_bash() {
     h.project_policy(
         r#"
         [[rules]]
-        id = "cargo-in-bash"
-        command = "cargo"
+        id = "make-in-bash"
+        command = "make"
         via = "bash"
         action = "allow"
         exempts = ["prefer-tmux"]
@@ -298,8 +303,8 @@ async fn a_project_exempts_prefer_tmux_for_bash() {
     );
 
     decides!(h, {
-        "cargo build" => (Allow, _, Allow, "cargo-in-bash"),
-        "make" => (_, _, Deny, "prefer-tmux"),
+        "make" => (_, _, Allow, "make-in-bash"),
+        "npm test" => (_, _, Deny, "prefer-tmux"),
     });
 }
 

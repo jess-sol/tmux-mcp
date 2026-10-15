@@ -204,12 +204,12 @@ Rules are saved to `~/.claude/tmux-mcp.toml` (user-wide) or `.claude/tmux-mcp.to
 
 With `Bash` in the hook's matcher, the policy also judges Claude Code's own Bash tool. A line is allowed only when every command in it is; a line that no rule asks about or denies passes through to Claude Code's own permissions. Lints, the built-in allows and the outside-the-project ask apply only to `command_run`: on Bash, the built-ins only ask and deny, and allowing is left to Claude Code. Bash asks only about sharp forms, such as `git push --force`, `rm -r`, `kill -9` and `chmod -R`.
 
-Built-in rules deny build tools (`prefer-tmux`), SSH, file transfers, database clients, cluster and cloud CLIs, and system rebuilds through Bash, and tell Claude to run them in a pane you can watch, with a hint for each, such as how to open and verify an SSH session. Forms that only touch local files, such as `helm template` and `terraform fmt`, stay on Bash. `tmux-cli` denies driving tmux itself from Bash. A rule counts on tmux only, unless its `via` says `"bash"` or `["tmux", "bash"]`; to let one project run `cargo` through Bash:
+Built-in rules deny `make`, `npm` and `cargo install` (`prefer-tmux`), SSH, file transfers, database clients, cluster and cloud CLIs, and system rebuilds through Bash, and tell Claude to run them in a pane you can watch, with a hint for each, such as how to open and verify an SSH session. Forms that only touch local files, such as `helm template` and `terraform fmt`, stay on Bash. `tmux-cli` denies driving tmux itself from Bash. A rule counts on tmux only, unless its `via` says `"bash"` or `["tmux", "bash"]`; to let one project run `make` through Bash:
 
 ```toml
 [[rules]]
-id = "cargo-in-bash"
-command = "cargo"
+id = "make-in-bash"
+command = "make"
 via = "bash"
 action = "allow"
 exempts = ["prefer-tmux"]
@@ -247,14 +247,14 @@ exempts = ["git-push-force"]
 Use `/tmux-policy` to write rules, or edit the files directly. To see what the policy decides, and why, without running anything:
 
 ```sh
-tmux-mcp policy-eval 'kill -9 1234' 'cargo build'
+tmux-mcp policy-eval 'kill -9 1234' 'cargo install ripgrep'
 ```
 ```
 kill -9 1234
   tmux  ask          process-signals
   bash  ask          sigkill: SIGKILL leaves the process no chance to clean up
-cargo build
-  tmux  allow        cargo
+cargo install ripgrep
+  tmux  ask          cargo-install: cargo install downloads and compiles arbitrary code from crates.io
   bash  deny         prefer-tmux: …
 ```
 

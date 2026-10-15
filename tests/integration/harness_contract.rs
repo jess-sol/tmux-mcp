@@ -29,7 +29,7 @@ async fn decides_matches_each_form_and_lists_every_miss() {
         "eval x" => (Deny, "eval"),
         "frobnicate" => (Ask, Pass),
         "kill -9 1" => (Ask, Ask, _),
-        "cargo build" => (Allow, "cargo", Deny, "prefer-tmux"),
+        "cargo install ripgrep" => (Ask, "cargo-install", Deny, "prefer-tmux"),
         "git push --force origin main" => (_, "git-push-force"),
     });
     let missed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
