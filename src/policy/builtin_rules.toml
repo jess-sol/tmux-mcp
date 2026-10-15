@@ -578,6 +578,10 @@ argument.subcommand.words = [
   "gc", "prune", "merge-base", "rev-list", "for-each-ref", "show-ref", "symbolic-ref",
   "ls-remote", "name-rev", "cherry", "range-diff", "check-ignore", "format-patch", "notes",
   "sparse-checkout", "fsck", "archive", "bundle", "version", "help",
+  # plumbing
+  "update-index", "hash-object", "write-tree", "read-tree", "commit-tree", "update-ref",
+  "mktree", "mktag", "diff-tree", "diff-index", "diff-files", "count-objects", "pack-refs",
+  "verify-pack", "check-attr", "check-ref-format", "var", "stripspace",
 ]
 marks.cwd = ["dir"]
 marks.read = ["git_dir", "work_tree"]
