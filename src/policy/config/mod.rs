@@ -2,8 +2,13 @@
 //!
 //! Three sources, one format (`format`):
 //! - Built-in: compiled into binary via include_str!
-//! - Home: ~/.claude/tmux-mcp.toml
-//! - Project: `<project root>/.claude/tmux-mcp.toml`, found from the pane's directory
+//! - Home: `~/.pi/agent/tmux-mcp.toml` (Pi) or `~/.claude/tmux-mcp.toml` (Claude Code)
+//! - Project: `<project root>/.pi/tmux-mcp.toml` (Pi) or `.claude/tmux-mcp.toml`
+//!   (Claude Code), found from the pane's directory
+//!
+//! The Pi and Claude locations are interchangeable: the harness-preferred path
+//! is tried first, then the other, and whichever exists wins. Claude Code users
+//! with no `.pi` files see identical behavior to before.
 
 mod format;
 #[cfg(test)]
@@ -32,7 +37,7 @@ pub struct CompiledPolicy {
     pub remote_grammars: Grammars,
     /// Unresolved: they resolve against the project root, else the pane's directory.
     pub project_dirs: Vec<String>,
-    /// The directory that holds the project's `.claude/tmux-mcp.toml`.
+    /// The directory that holds the project's `.claude` or `.pi` policy file.
     pub project_root: Option<PathBuf>,
     /// Why a source did not load. While it is set, every command is denied.
     pub broken: Option<String>,
@@ -167,7 +172,8 @@ impl PolicyEngine {
 // --- Public helpers ---
 
 /// The nearest directory, from `cwd` up to but not including `$HOME`, that
-/// holds `.claude/tmux-mcp.toml`. `$HOME`'s own is the user source.
+/// holds a tmux-mcp policy (`.claude/tmux-mcp.toml` or `.pi/tmux-mcp.toml`).
+/// `$HOME`'s own is the user source.
 pub fn project_root(cwd: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut dir = Path::new(cwd);
@@ -175,7 +181,7 @@ pub fn project_root(cwd: &str) -> Option<PathBuf> {
         if home.as_deref() == Some(dir) {
             return None;
         }
-        if dir.join(".claude").join("tmux-mcp.toml").is_file() {
+        if project_config_candidates(dir).iter().any(|p| p.is_file()) {
             return Some(dir.to_path_buf());
         }
         dir = dir.parent()?;
@@ -224,7 +230,7 @@ fn load_sources(project_root: Option<&Path>) -> Result<Vec<Source>, String> {
         config: parse_config(BUILTIN_TOML).map_err(|e| format!("built-in policy: {e}"))?,
         is_project: false,
     }];
-    let project = project_root.map(|root| root.join(".claude").join("tmux-mcp.toml"));
+    let project = project_root.map(project_config_file);
     for (path, is_project) in [(Some(home_config_path()), false), (project, true)] {
         let Some(path) = path else { continue };
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -283,13 +289,52 @@ fn parse_decision(s: &str) -> Decision {
 
 // --- Paths ---
 
+/// Home config path. Prefers the harness-appropriate location and falls back
+/// to the other; when neither file exists, returns the harness-preferred path
+/// so the watcher and diagnostics point users at the right place.
 fn home_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".claude").join("tmux-mcp.toml")
+    pick_config(home_config_candidates(&home))
+}
+
+/// Home candidates, harness-preferred first.
+fn home_config_candidates(home: &str) -> [PathBuf; 2] {
+    let base = PathBuf::from(home);
+    let pi = base.join(".pi").join("agent").join("tmux-mcp.toml");
+    let claude = base.join(".claude").join("tmux-mcp.toml");
+    match crate::harness::detect() {
+        crate::harness::Harness::Pi => [pi, claude],
+        crate::harness::Harness::Claude => [claude, pi],
+    }
+}
+
+/// Project candidates within one project root, harness-preferred first.
+fn project_config_candidates(root: &Path) -> [PathBuf; 2] {
+    let pi = root.join(".pi").join("tmux-mcp.toml");
+    let claude = root.join(".claude").join("tmux-mcp.toml");
+    match crate::harness::detect() {
+        crate::harness::Harness::Pi => [pi, claude],
+        crate::harness::Harness::Claude => [claude, pi],
+    }
+}
+
+/// The project root's config file: whichever candidate exists (harness
+/// preferred), else the preferred path.
+fn project_config_file(root: &Path) -> PathBuf {
+    pick_config(project_config_candidates(root))
+}
+
+/// The first candidate that exists, else the first (harness-preferred) one.
+fn pick_config(candidates: [PathBuf; 2]) -> PathBuf {
+    let fallback = candidates[0].clone();
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or(fallback)
 }
 
 fn project_config_path(cwd: &str) -> Option<PathBuf> {
-    project_root(cwd).map(|root| root.join(".claude").join("tmux-mcp.toml"))
+    project_root(cwd).map(|root| project_config_file(&root))
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {

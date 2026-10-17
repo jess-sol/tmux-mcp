@@ -1,9 +1,11 @@
 pub mod client;
 pub mod daemon;
+pub mod harness;
 pub mod mcp;
 pub mod pane;
 pub mod parse;
 pub mod policy;
 pub mod proc;
+pub mod target;
 pub mod tmux;
 pub mod version;

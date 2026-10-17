@@ -215,12 +215,10 @@ impl Osc133Parser {
                 }
                 self.phase = Osc133Phase::Idle;
             }
-            _ => {
-                // D from unexpected state (race condition, mid-join, etc.)
-                tracing::debug!(
-                    "OSC 133;D from unexpected state {:?} — recovering",
-                    self.phase
-                );
+            Osc133Phase::Idle => {
+                // D with no command cycle: the daemon may have attached while
+                // a command was already running and missed its C marker.
+                tracing::debug!("OSC 133;D from Idle — synthesizing mid-join record");
                 let output = std::mem::take(&mut self.capture);
                 if !output.is_empty() {
                     state.push_command_start(String::new());
@@ -231,6 +229,14 @@ impl Osc133Parser {
                     }
                 }
                 self.phase = Osc133Phase::Idle;
+            }
+            Osc133Phase::Prompt => {
+                // Some shells emit native markers as well as the injected
+                // prompt hook. A second D in Prompt is a duplicate; synthesizing
+                // a record here would make the following B finalize that fake
+                // record instead of the command that just ran.
+                tracing::debug!("OSC 133;D from Prompt — duplicate marker, dropping");
+                self.capture.clear();
             }
         }
     }
@@ -247,6 +253,16 @@ impl Osc133Parser {
                 *command = text.to_string();
                 // Also update the active record
                 if let Some(cmd) = state.active_command_mut() {
+                    cmd.command = text.to_string();
+                }
+            }
+            Osc133Phase::Prompt => {
+                // Bash 4.4+ can deliver the DEBUG trap's history text after D,
+                // during prompt rendering. It still names the command that
+                // just finished, whose B marker has not arrived yet.
+                if let Some(cmd) = state.commands.front_mut()
+                    && !cmd.completed
+                {
                     cmd.command = text.to_string();
                 }
             }
@@ -639,6 +655,31 @@ mod tests {
         p.append_output("some output", &mut s);
         marker(&mut p, b'D', Some("0"), &mut s);
         assert_eq!(p.phase, Osc133Phase::Idle);
+    }
+
+    #[test]
+    fn native_fish_markers_and_injected_prompt_markers_complete_one_command() {
+        let mut p = Osc133Parser::new();
+        let mut s = TerminalState::new();
+
+        marker(&mut p, b'A', Some("special_key=1"), &mut s);
+        marker(&mut p, b'A', None, &mut s);
+        marker(&mut p, b'B', None, &mut s);
+        marker(&mut p, b'C', Some("cmdline_url=echo%20fish"), &mut s);
+        marker(&mut p, b'C', None, &mut s); // injected duplicate
+        p.append_output("fish\n", &mut s);
+        marker(&mut p, b'D', Some("0"), &mut s);
+        marker(&mut p, b'A', Some("special_key=1"), &mut s);
+        marker(&mut p, b'D', Some("0"), &mut s); // duplicate from fish_prompt
+        marker(&mut p, b'A', None, &mut s);
+        marker(&mut p, b'B', None, &mut s);
+
+        assert_eq!(s.commands.len(), 1);
+        let command = &s.commands[0];
+        assert_eq!(command.command, "echo fish");
+        assert_eq!(s.output(command.id), Some("fish\n"));
+        assert_eq!(command.exit_code, Some(0));
+        assert!(command.completed);
     }
 
     #[test]

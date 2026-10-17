@@ -51,6 +51,12 @@ pub(crate) fn parse_line(
 ) -> Option<ReaderMessage> {
     // %begin starts a new response block
     if line.starts_with("%begin ") {
+        if current_block.is_some() {
+            // A new block started before the previous one closed. This drops
+            // the in-flight response and desyncs the command queue, so make it
+            // visible rather than failing silently.
+            tracing::warn!("%begin while a response block was still open; dropping partial block");
+        }
         *current_block = Some(Vec::new());
         return None;
     }

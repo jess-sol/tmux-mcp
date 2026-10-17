@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "tmux-mcp": {
+      "command": "tmux-mcp",
+      "args": [],
+      "description": "Policy-controlled tmux panes with structured command tracking.",
+      "exposure": "direct"
+    }
+  }
+}
