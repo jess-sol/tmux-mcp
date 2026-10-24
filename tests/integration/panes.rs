@@ -44,6 +44,52 @@ async fn inject_osc133_leaves_an_integrated_shell_alone() {
     assert!(reply.contains("already active"), "{reply:?}");
 }
 
+/// Locate a fish binary for the fish-specific regression test, if installed.
+fn find_fish() -> Option<String> {
+    const CANDIDATES: &[&str] = &[
+        "/opt/homebrew/bin/fish",
+        "/usr/local/bin/fish",
+        "/run/current-system/sw/bin/fish",
+        "/usr/bin/fish",
+        "fish",
+    ];
+    CANDIDATES
+        .iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .map(|candidate| candidate.to_string())
+}
+
+/// A fish pane must complete commands even though fish 4.x emits its own OSC
+/// 133 markers alongside the injected ones. Regression test: the injected
+/// fish_prompt hook emits a second D marker in the Prompt phase, which used
+/// to synthesize a spurious record that swallowed the B latch, so the real
+/// command never completed and command_run hung until its timeout.
+#[tokio::test]
+async fn a_fish_shell_completes_commands_with_native_and_injected_markers() {
+    let Some(fish) = find_fish() else {
+        eprintln!("skipping: fish not installed");
+        return;
+    };
+    let h = Harness::new().await;
+    let shell = h.fish(&fish).await;
+
+    let reply = h.inject_osc133(&shell).await;
+    assert!(
+        reply.contains("active") && !reply.contains("unsupported"),
+        "{reply:?}"
+    );
+
+    let out = h.run(&shell, "seq 2").await;
+
+    assert!(out.contains("1\n2"), "{out:?}");
+    assert!(out.contains("Exit code: 0"), "{out:?}");
+}
+
 #[tokio::test]
 async fn debug_pane_shows_the_screen_of_an_idle_pane() {
     let h = Harness::new().await;

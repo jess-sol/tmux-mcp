@@ -14,32 +14,57 @@ use crate::tmux::notification::{
     CommandResponse, Notification, ReaderMessage, parse_line, parse_output,
 };
 
-/// Handle to send commands to the reader for response routing.
-///
-/// When `RawTmuxConnection::execute()` sends a command to tmux stdin,
-/// it also sends a response oneshot through this channel so the reader
-/// knows to route the next %begin/%end block back to the caller.
-pub(crate) type CommandRegistration = (String, oneshot::Sender<CommandResponse>);
+/// A message from the command half to the reader.
+pub(crate) enum ReaderCommand {
+    /// Route the next `%begin/%end` block to this sender.
+    Register {
+        command: String,
+        response_tx: oneshot::Sender<CommandResponse>,
+    },
+    /// Leave the priming phase early (e.g. the prime command timed out).
+    StopPriming,
+}
 
 /// Spawn the reader task. Returns immediately; the task runs until the
 /// stdout stream closes or the command channel drops.
+///
+/// The reader starts in a *priming* phase: `tmux -C attach-session` emits an
+/// unsolicited `%begin/%end` block for the attach itself. Until we have drained
+/// it, every subsequent response would be shifted by one — pairing the attach
+/// block with our first command and leaving the real response unowned. To
+/// align the queue deterministically we send a marker command
+/// (`display-message -p '<prime_marker>'`) before any real command and discard
+/// blocks until the one containing the marker arrives; then `ready_tx` fires
+/// and normal FIFO routing begins.
 pub(crate) fn spawn_reader(
     stdout: tokio::process::ChildStdout,
-    cmd_rx: mpsc::Receiver<CommandRegistration>,
+    cmd_rx: mpsc::Receiver<ReaderCommand>,
     notification_tx: mpsc::Sender<Notification>,
+    ready_tx: oneshot::Sender<()>,
+    prime_marker: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(reader_loop(stdout, cmd_rx, notification_tx))
+    tokio::spawn(reader_loop(
+        stdout,
+        cmd_rx,
+        notification_tx,
+        ready_tx,
+        prime_marker,
+    ))
 }
 
 async fn reader_loop(
     stdout: tokio::process::ChildStdout,
-    mut cmd_rx: mpsc::Receiver<CommandRegistration>,
+    mut cmd_rx: mpsc::Receiver<ReaderCommand>,
     notification_tx: mpsc::Sender<Notification>,
+    ready_tx: oneshot::Sender<()>,
+    prime_marker: String,
 ) {
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut pending_commands: VecDeque<oneshot::Sender<CommandResponse>> = VecDeque::new();
     let mut current_block: Option<Vec<String>> = None;
     let mut line_buf = Vec::new();
+    let mut priming = true;
+    let mut ready_tx = Some(ready_tx);
 
     loop {
         tokio::select! {
@@ -50,13 +75,22 @@ async fn reader_loop(
 
             cmd = cmd_rx.recv() => {
                 match cmd {
-                    Some((cmd_str, response_tx)) => {
+                    Some(ReaderCommand::Register { command: cmd_str, response_tx }) => {
                         tracing::debug!(
                             "Reader: registered command (pending={}): {}",
                             pending_commands.len() + 1,
                             cmd_str,
                         );
                         pending_commands.push_back(response_tx);
+                    }
+                    Some(ReaderCommand::StopPriming) => {
+                        if priming {
+                            tracing::warn!("Reader: priming stopped early; routing responses now");
+                            priming = false;
+                            if let Some(tx) = ready_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        }
                     }
                     None => {
                         tracing::info!("Reader: command channel closed");
@@ -87,7 +121,24 @@ async fn reader_loop(
                         if let Some(msg) = parse_line(line, &mut current_block) {
                             match msg {
                                 ReaderMessage::Response(resp) => {
-                                    if let Some(tx) = pending_commands.pop_front() {
+                                    if priming {
+                                        // Drain the attach block(s) and any other
+                                        // pre-prime output until the marker response
+                                        // arrives, so FIFO routing starts aligned.
+                                        if resp.output.contains(&prime_marker) {
+                                            priming = false;
+                                            tracing::debug!(
+                                                "Reader: primed; response routing active"
+                                            );
+                                            if let Some(tx) = ready_tx.take() {
+                                                let _ = tx.send(());
+                                            }
+                                        } else {
+                                            tracing::trace!(
+                                                "Reader: discarding pre-prime response block"
+                                            );
+                                        }
+                                    } else if let Some(tx) = pending_commands.pop_front() {
                                         let _ = tx.send(resp);
                                     } else {
                                         tracing::warn!(

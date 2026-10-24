@@ -64,10 +64,12 @@ async fn finished_commands_reply_with_their_output_and_exit_code() {
             "for p in 50 100; do printf '\\r%s%%' \"$p\"; done; printf '\\n%s\\n' \"$p\"",
             "$ for p in 50 100; do printf '\\r%s%%' \"$p\"; done; printf '\\n%s\\n' \"$p\"\n100%\n100\n\nExit code: 0",
         ),
-        // A signal's exit code is 128 plus the signal number.
+        // A signal's exit code is 128 plus the signal number. The job
+        // message is the shell's own: bash >= 4.4 prints it like this (and
+        // the subshell entries above already need 4.4's PS0).
         (
             "bash -c 'kill -TERM $$'",
-            "$ bash -c 'kill -TERM $$'\nTerminated                 bash -c 'kill -TERM $$'\n\nExit code: 143",
+            "$ bash -c 'kill -TERM $$'\nTerminated: 15\n\nExit code: 143",
         ),
     ];
 

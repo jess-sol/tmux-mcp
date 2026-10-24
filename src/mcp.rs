@@ -474,6 +474,14 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
 // --- Tool implementations ---
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EnsurePaneParams {
+    #[schemars(
+        description = "Create a scratch pane when the agent's own pane is the only one (default: true)"
+    )]
+    pub create: Option<bool>,
+}
+
 #[tool_router]
 impl TmuxMcp {
     #[tool(
@@ -634,7 +642,9 @@ impl TmuxMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Inject shell integration into a bash pane for command tracking")]
+    #[tool(
+        description = "Enable command tracking in a pane by injecting shell integration (supports bash and fish). Use when command_run reports that OSC 133 is not active."
+    )]
     async fn inject_osc133(
         &self,
         Parameters(params): Parameters<InjectOsc133Params>,
@@ -673,12 +683,55 @@ impl TmuxMcp {
             }
         };
 
-        let is_error = status == "failed";
+        let is_error = matches!(status, "failed" | "unsupported_shell");
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         if is_error {
             result.is_error = Some(true);
         }
         Ok(result)
+    }
+
+    #[tool(
+        description = "Pick the tmux pane to run commands in. Never target the pane hosting the agent, so when that is the only pane this creates a scratch pane (armed with shell integration) and returns its id. Use its pane_id for command_run."
+    )]
+    async fn ensure_pane(
+        &self,
+        Parameters(params): Parameters<EnsurePaneParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let target = crate::target::ensure_target(
+            &self.client,
+            &self.origin_pane,
+            params.create.unwrap_or(true),
+        )
+        .await
+        .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+
+        let mut text = if target.created {
+            format!(
+                "Created scratch pane {}. Use it with command_run.",
+                target.pane_id
+            )
+        } else {
+            format!(
+                "Pane {} is available (existing). Use it with command_run.",
+                target.pane_id
+            )
+        };
+        match target.injection.as_str() {
+            "active" | "already_active" => text.push_str(" Shell integration is active."),
+            "not_attempted" => {
+                text.push_str(" Call inject_osc133 first if shell integration is not active.")
+            }
+            other => text.push_str(&format!(" Shell integration status: {}.", other)),
+        }
+        if let Some(shell) = target.shell.as_deref()
+            && !shell.is_empty()
+        {
+            text.push_str(&format!(" Detected shell: {}.", shell));
+        }
+        text.push_str(" Never target the origin pane (the one hosting the agent).");
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Send a control key to a pane (C-c, C-d, Enter, Escape, etc.)")]
@@ -734,6 +787,13 @@ impl ServerHandler for TmuxMcp {
             instructions: Some(
                 "MCP server for working in the person's tmux panes. Use list_panes to \
                  discover available panes, then run commands and read their output.\n\n\
+                 Never target the pane marked origin in list_panes — that pane hosts the \
+                 agent itself (and this server), so commands sent there would type into \
+                 the agent's own terminal. Call ensure_pane to get a safe target: it \
+                 returns an existing pane, or creates a scratch pane when the agent's \
+                 pane is the only one. If command_run reports that shell integration is \
+                 not active, call inject_osc133 on the target pane (bash and fish are \
+                 supported).\n\n\
                  Writing commands: a pane is the person's own terminal. Every command \
                  you run shows on their screen and stays in their shell history, so \
                  write each one as a Staff SRE writes a runbook step for a sysadmin to \

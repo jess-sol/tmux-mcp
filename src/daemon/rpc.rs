@@ -497,6 +497,9 @@ async fn wait_and_read(
     // Set once a next/head window fills: a command that ends at once still
     // reports its exit code rather than "running".
     let mut settle_until: Option<tokio::time::Instant> = None;
+    // D can arrive before prompt markers and a late explicit command-text E.
+    // Give those markers a short window to finalize the record before replying.
+    let mut complete_settle: Option<tokio::time::Instant> = None;
 
     loop {
         {
@@ -519,12 +522,29 @@ async fn wait_and_read(
                 read_reply(cmd, snapshot.version, status, result, offset)
             };
 
-            // D ends the output and carries the exit code; B follows only
-            // once the next prompt is drawn.
+            // D ends the output and carries the exit code; B and sometimes E
+            // follow while the next prompt is drawn.
             if cmd.completed || cmd.output_done {
-                let mut offset = start;
-                let result = apply_read_params(&output, true, &mut offset, read_params);
-                return Ok(reply("completed", &result, offset));
+                let now = tokio::time::Instant::now();
+                if cmd.completed
+                    || now
+                        >= *complete_settle.get_or_insert((now + COMPLETION_SETTLE).min(deadline))
+                {
+                    let mut offset = start;
+                    let result = apply_read_params(&output, true, &mut offset, read_params);
+                    return Ok(reply("completed", &result, offset));
+                }
+            }
+
+            // Do not report the command as running while its prompt markers
+            // are still settling.
+            if cmd.output_done {
+                let wake = complete_settle.unwrap_or(deadline).min(deadline);
+                tokio::select! {
+                    _ = rx.changed() => {}
+                    _ = tokio::time::sleep_until(wake) => {}
+                }
+                continue;
             }
 
             let mut offset = start;
@@ -560,7 +580,10 @@ async fn wait_and_read(
             }
         }
 
-        let wake = settle_until.map_or(deadline, |settle| settle.min(deadline));
+        let wake = [settle_until, complete_settle]
+            .into_iter()
+            .flatten()
+            .fold(deadline, |wake, settle| wake.min(settle));
         tokio::select! {
             _ = rx.changed() => {}
             _ = tokio::time::sleep_until(wake) => {}
@@ -595,6 +618,9 @@ fn read_reply(
 /// How long a filled `next`/`head` window waits for the command's D marker, so a
 /// command that ends at once reports its exit code instead of "running".
 const WINDOW_SETTLE: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+
+/// Delay after D for prompt markers (B, and a late E) to finalize the reply.
+const COMPLETION_SETTLE: tokio::time::Duration = tokio::time::Duration::from_millis(150);
 
 /// The pane's last 20 rows, headed by the *Pane version* they show, which a
 /// `press_key` after them takes.
@@ -849,6 +875,14 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
+    if pane_id == origin_pane && !origin_target_allowed() {
+        return Err(RpcError::invalid_params(format!(
+            "Refusing to run commands in pane {pane_id}: that pane hosts the agent itself, so the \
+             command would be typed into the agent's terminal. Target another pane or explicitly \
+             allow this with TMUX_MCP_ALLOW_ORIGIN=1."
+        )));
+    }
+
     let read_params = ReadParams::from_json(params)?;
 
     // The probe types into the pane, so the pane's checks guard it too.
@@ -1052,6 +1086,15 @@ async fn handle_capture_pane(params: &Value, state: &Arc<DaemonState>) -> Result
     }))
 }
 
+/// Permit self-targeting for headless callers that intentionally map their
+/// origin pane to a pane they want to drive.
+fn origin_target_allowed() -> bool {
+    matches!(
+        std::env::var("TMUX_MCP_ALLOW_ORIGIN").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// OSC 133 + OSC 7 injection script for bash.
 /// Each line has leading space for history suppression.
 pub const OSC133_INJECT_LINES: &[&str] = &[
@@ -1059,6 +1102,23 @@ pub const OSC133_INJECT_LINES: &[&str] = &[
     " __osc133_debug() { if $__osc133_exec_ready; then __osc133_exec_ready=false; local cmd; cmd=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]* *//'); [[ -n \"$cmd\" ]] && printf '\\e]133;E;%s\\e\\\\' \"$cmd\"; fi; }; trap '__osc133_debug \"$_\"' DEBUG",
     " PS1=\"${PS1}\"$'\\001\\e]133;B\\e\\\\\\002'; PS0+='\\e]133;C\\e\\\\'",
 ];
+
+/// OSC 133 integration for fish. Prompt markers bracket input; preexec and
+/// postexec mark commands and preserve their exit status.
+const OSC133_INJECT_LINES_FISH: &[&str] = &[
+    " functions -q __tmux_mcp_osc133_saved_prompt; or functions -c fish_prompt __tmux_mcp_osc133_saved_prompt",
+    " function fish_prompt; if set -q __tmux_mcp_osc133_status; printf '\\e]133;D;%s\\e\\\\' $__tmux_mcp_osc133_status; set -e __tmux_mcp_osc133_status; end; printf '\\e]133;A\\e\\\\'; if functions -q __tmux_mcp_osc133_saved_prompt; __tmux_mcp_osc133_saved_prompt; end; printf '\\e]133;B\\e\\\\'; end",
+    " function __tmux_mcp_osc133_preexec --on-event fish_preexec; printf '\\e]133;C\\e\\\\'; end",
+    " function __tmux_mcp_osc133_postexec --on-event fish_postexec; set -g __tmux_mcp_osc133_status $status; end",
+];
+
+fn osc133_injection_for(shell: &str) -> Option<&'static [&'static str]> {
+    match shell.to_ascii_lowercase().trim_end_matches(".exe") {
+        "bash" => Some(OSC133_INJECT_LINES),
+        "fish" => Some(OSC133_INJECT_LINES_FISH),
+        _ => None,
+    }
+}
 
 async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
@@ -1075,38 +1135,77 @@ async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Resul
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
+    // tmux's pane_current_command follows the foreground process; fall back
+    // to /proc when tmux cannot answer.
+    let shell = {
+        let mut conn = state.conn.lock().await;
+        conn.query_pane_command(pane_id)
+            .await
+            .ok()
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                pane_handle
+                    .snapshot()
+                    .pid
+                    .and_then(crate::proc::process_name)
+            })
+            .unwrap_or_default()
+    };
+    let is_fish =
+        shell.eq_ignore_ascii_case("fish") || shell.to_ascii_lowercase().ends_with("/fish");
+
     let mut snapshot = pane_handle.snapshot();
     check_mode(pane_id, &snapshot)?;
     if snapshot.phase == Fact::Known(Osc133Phase::Input) {
-        return Ok(json!({ "status": "already_active" }));
+        return Ok(json!({ "status": "already_active", "shell": shell }));
     }
-    if snapshot.phase == Fact::Unknown && snapshot.integration == Fact::Known(true) {
+    if snapshot.phase == Fact::Unknown
+        && snapshot.integration == Fact::Known(true)
+        && (!is_fish || snapshot.commands.first().is_some_and(|cmd| !cmd.completed))
+    {
         return Err(RpcError::internal(format!(
             "Pane {pane_id} is busy: a command line is on its way to its shell. Try again."
         )));
     }
-    // A pane running a program is probed too: it may be a shell over ssh.
-    if snapshot.integration != Fact::Known(false) {
+    // Fish 4.x emits native OSC 133, but omits the B marker needed to mark
+    // input-ready. Install our prompt wrapper directly instead of probing it.
+    // Other shells are probed first, including a shell reached over SSH.
+    if !is_fish && snapshot.integration != Fact::Known(false) {
         snapshot = probe_osc133(pane_id, &pane_handle, state, &snapshot).await?;
         if snapshot.phase == Fact::Known(Osc133Phase::Input) {
-            return Ok(json!({ "status": "already_active" }));
+            return Ok(json!({ "status": "already_active", "shell": shell }));
         }
     }
+
+    let inject_lines = match osc133_injection_for(&shell) {
+        Some(lines) => lines,
+        None if shell.is_empty() => OSC133_INJECT_LINES,
+        None => {
+            return Ok(json!({
+                "status": "unsupported_shell",
+                "shell": shell,
+                "message": format!(
+                    "Pane {pane_id} runs `{shell}`, which has no automatic shell integration (supported: bash, fish)."
+                ),
+            }));
+        }
+    };
 
     // One line: each line of its own would bring markers, and so a new *Pane
     // version*, before the next.
     let rx = pane_handle.subscribe_state();
     state
-        .send_command(pane_id, snapshot.version, &OSC133_INJECT_LINES.join(";"))
+        .send_command(pane_id, snapshot.version, &inject_lines.join(";"))
         .await?;
 
     let answered = at_prompt(&pane_handle, rx).await;
     if answered.phase == Fact::Known(Osc133Phase::Input) {
-        Ok(json!({ "status": "active" }))
+        Ok(json!({ "status": "active", "shell": shell }))
     } else {
         Ok(json!({
             "status": "failed",
-            "message": "Injection sent but no markers detected. Shell may not be bash.",
+            "shell": shell,
+            "message": format!("Injection sent but no markers detected for shell `{shell}`."),
             "screen": shown_screen(&pane_handle).await,
         }))
     }

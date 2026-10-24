@@ -239,6 +239,35 @@ fn a_policy_file_relinked_to_a_file_of_the_same_mtime_reloads() {
     assert!(reloads.has_changed().unwrap());
 }
 
+#[test]
+fn a_pi_policy_file_also_marks_a_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(root.join(".pi")).unwrap();
+    std::fs::create_dir_all(root.join("a/b")).unwrap();
+    std::fs::write(root.join(".pi/tmux-mcp.toml"), "").unwrap();
+
+    assert_eq!(
+        project_root(root.join("a/b").to_str().unwrap()),
+        Some(root.clone())
+    );
+}
+
+#[test]
+fn config_candidates_cover_pi_and_claude() {
+    let [first, second] = home_config_candidates("/home/user");
+    let all = format!("{} {}", first.display(), second.display());
+    assert!(all.contains(".pi/agent/tmux-mcp.toml"));
+    assert!(all.contains(".claude/tmux-mcp.toml"));
+    assert_ne!(first, second);
+
+    let [first, second] = project_config_candidates(Path::new("/home/user/project"));
+    let all = format!("{} {}", first.display(), second.display());
+    assert!(all.contains(".pi/tmux-mcp.toml"));
+    assert!(all.contains(".claude/tmux-mcp.toml"));
+    assert_ne!(first, second);
+}
+
 // --- Dependency contract: toml and serde ---
 
 #[test]

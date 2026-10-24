@@ -1,3 +1,5 @@
 /target
+/fuzz/target
+/pi/node_modules/
 /ai/roadmaps/
 /todo.md

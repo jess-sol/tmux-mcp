@@ -1,0 +1,23 @@
+{
+  "name": "pi-tmux-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi integration for tmux-mcp: policy-gated tmux access, bash replacement, and footer status",
+  "type": "module",
+  "keywords": ["pi-package", "tmux", "mcp"],
+  "pi": {
+    "extensions": ["./extensions/tmux-mcp.ts"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
