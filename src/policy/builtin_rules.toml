@@ -819,7 +819,7 @@ global = [                                            # options come before or a
   "--host|-H:", "--machine|-M:", "--property|-p:", "--type|-t:", "--signal|-s:", "--lines|-n:",
   "--output|-o:", "--state:",
   "--user", "--system", "--global", "--all|-a", "--full|-l", "--quiet|-q", "--no-pager",
-  "--no-block", "--now", "--force|-f",
+  "--no-block", "--now", "--force|-f", "--failed", "--plain",
 ]
 
 # --- Infrastructure: each grammar names only the local forms a rule lets through ---

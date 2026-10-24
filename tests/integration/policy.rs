@@ -190,6 +190,7 @@ async fn bash_asks_only_about_the_sharp_forms() {
         "chgrp -R staff src" => (Ask, _, Ask, "permissions-recursive"),
         "systemctl --user list-units" => (Ask, Pass),
         "systemctl --user --no-pager status comfyui" => (Ask, Pass),
+        "systemctl --failed --no-pager --plain" => (Ask, Pass),
         "systemctl --user restart comfyui" => (Ask, "service-disruption"),
         "rg --pre cat foo" => (Ask, "rg-runs-program"),
         "apt remove x" => (Ask, "package-remove"),
