@@ -284,10 +284,11 @@ mod tests {
         ] {
             let r = evaluate_test(command);
             assert_eq!(r.decision, Decision::Deny, "{command}");
-            assert_eq!(
-                r.reasons,
-                ["dynamic command dispatch isn't allowed"],
-                "{command}"
+            assert!(
+                r.reason()
+                    .starts_with("dynamic command dispatch isn't allowed ("),
+                "{command}: {}",
+                r.reason()
             );
         }
     }

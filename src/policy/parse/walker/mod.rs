@@ -27,6 +27,9 @@ struct Walker<'a> {
     out: Vec<CommandInfo>,
     /// The context of the shell being walked.
     context: Context,
+    /// The index in `out` of the command whose *Inner command*s are being
+    /// walked.
+    outer: Option<usize>,
     /// A cd ran in the and-or list being walked. The cwd it set holds only
     /// for the commands that run if it succeeded: the rest of its `&&` chain.
     moved: bool,
@@ -57,6 +60,7 @@ pub(super) fn walk(
         bytes,
         out: Vec::new(),
         context: start.clone(),
+        outer: None,
         moved: false,
         error: None,
     };
@@ -272,6 +276,7 @@ impl Walker<'_> {
         let marked = matches!(parsed.cwd, TriVal::String(_));
         let cwd = join(&context.cwd, &parsed.cwd);
         let inner_context = inner_context(&context, &cwd, &parsed.args, &parsed.with);
+        let index = self.out.len();
         self.out.push(CommandInfo {
             name: match &name {
                 None => TriVal::Null,
@@ -291,6 +296,7 @@ impl Walker<'_> {
             context,
             text: place.text,
             top: place.top,
+            outer: self.outer,
             op_before: place.op_before,
             op_after: place.op_after,
             constant: place.constant,
@@ -298,6 +304,7 @@ impl Walker<'_> {
             cut: place.cut,
         });
 
+        let outer_index = self.outer.replace(index);
         for inner in parsed.inner {
             let outer = std::mem::replace(&mut self.context, inner_context.clone());
             match inner {
@@ -324,6 +331,7 @@ impl Walker<'_> {
             }
             self.context = outer;
         }
+        self.outer = outer_index;
         marked.then_some(cwd)
     }
 

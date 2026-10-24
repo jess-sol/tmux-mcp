@@ -43,7 +43,7 @@ Copy this checklist and tick it off:
 | `<id> (could not be ruled out)` | A guard fired on an Unknown: `$X`, an undeclared option, an extra operand, an unlisted subcommand, an unknown cwd | Usually the grammar: declare the option, operand or subcommand word |
 | `<id>` | The guard fired with certainty | Leave it, or add an *Exemption* if it is wrong here |
 | `policy:load_error (…)` | A policy file does not load; every command is denied | Fix the file (**Load errors**) |
-| `dynamic command dispatch isn't allowed` | A *Dynamic dispatch*: the command name or a shell line is Unknown | No rule can allow it; rewrite the command with literal words |
+| `dynamic command dispatch isn't allowed (…)` | A *Dynamic dispatch*: the command name is Unknown, or a word the line expands may become one (`find $DIR`, where `$DIR` may hold `-exec`); the detail names the command and the word | No rule can allow it; give the command literal words (`cd "$DIR" && find .`) |
 | `structural:parse_failure (…)`, `structural:unprintable_chars` | The line does not parse, or holds a control byte | Rewrite the line |
 
 The reason lists each rule at the winning action as `<id>` or `<id>: <message>`, one per line;

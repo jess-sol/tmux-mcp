@@ -52,6 +52,10 @@ pub struct CommandInfo {
     /// It runs in the line's own shell, as a stage of one of its pipelines,
     /// outside any compound command, substitution or *Inner command*.
     pub top: bool,
+    /// The index in the parse of the command that runs it: the outer
+    /// command of an *Inner command*, and of each command on a shell line
+    /// one runs.
+    pub outer: Option<usize>,
     /// The operators that join it to the commands before and after it:
     /// "|", "&&", "||", ";" or "&"; None at the ends of the line, and for a
     /// command that is not `top`.
