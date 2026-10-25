@@ -1,4 +1,5 @@
-//! Config loading: TOML parsing, 3-source merge, file watching for live reload.
+//! Config loading: TOML parsing, 3-source merge, reloaded on the first
+//! decision after a source changes.
 //!
 //! Three sources, one format (`format`):
 //! - Built-in: compiled into binary via include_str!
@@ -38,14 +39,13 @@ pub struct CompiledPolicy {
     pub broken: Option<String>,
 }
 
-/// Thread-safe policy engine that holds compiled policy and watches config files.
+/// Thread-safe policy engine that holds the compiled policy and reloads it
+/// when a source file changes.
 pub struct PolicyEngine {
     compiled: RwLock<CompiledPolicy>,
     home_path: PathBuf,
     home_stamp: RwLock<Option<Stamp>>,
     project_stamp: RwLock<Option<Stamp>>,
-    /// Counts reloads, so a pane can raise its *Pane version* on each.
-    reloads: tokio::sync::watch::Sender<u64>,
 }
 
 /// One loaded source; a project source applies only on this machine.
@@ -80,13 +80,7 @@ impl PolicyEngine {
             home_path,
             home_stamp: RwLock::new(home_stamp),
             project_stamp: RwLock::new(project_stamp),
-            reloads: tokio::sync::watch::channel(0).0,
         }
-    }
-
-    /// Changes each time the policy reloads.
-    pub fn reloads(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.reloads.subscribe()
     }
 
     /// Get a read reference to the compiled policy.
@@ -121,46 +115,7 @@ impl PolicyEngine {
         if let Some(current) = project {
             *self.project_stamp.write().unwrap() = current;
         }
-        self.reloads.send_modify(|count| *count += 1);
         tracing::info!("Policy config reloaded");
-    }
-
-    /// Start a background file watcher that calls check_reload on changes.
-    /// Returns the watcher handle (must be kept alive).
-    pub fn start_watcher(
-        engine: std::sync::Arc<PolicyEngine>,
-        project_cwd: Option<String>,
-    ) -> Option<notify::RecommendedWatcher> {
-        use notify::{RecursiveMode, Watcher};
-
-        let engine_clone = engine.clone();
-        let cwd_clone = project_cwd.clone();
-
-        let mut watcher = notify::recommended_watcher(
-            move |res: Result<notify::Event, notify::Error>| match res {
-                Ok(_event) => engine_clone.check_reload(cwd_clone.as_deref()),
-                Err(e) => tracing::warn!("File watch error: {}", e),
-            },
-        )
-        .ok()?;
-
-        let home_dir = engine.home_path.parent()?;
-        if home_dir.exists()
-            && let Err(e) = watcher.watch(home_dir, RecursiveMode::NonRecursive)
-        {
-            tracing::warn!("Failed to watch {}: {}", home_dir.display(), e);
-        }
-
-        if let Some(project_dir) = project_cwd
-            .as_deref()
-            .and_then(project_config_path)
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            && let Err(e) = watcher.watch(&project_dir, RecursiveMode::NonRecursive)
-        {
-            tracing::warn!("Failed to watch {}: {}", project_dir.display(), e);
-        }
-
-        Some(watcher)
     }
 }
 

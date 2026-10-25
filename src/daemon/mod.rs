@@ -58,18 +58,14 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
     tracing::info!("Monitoring {} panes", registry.len());
 
     // Shared state for RPC handlers
-    let policy = Arc::new(crate::policy::PolicyEngine::new(None));
     let state = Arc::new(DaemonState {
         conn: Mutex::new(commands),
         registry: RwLock::new(registry),
         approvals: Mutex::new(crate::policy::approval::ApprovalStore::new()),
-        policy: policy.clone(),
+        policy: Arc::new(crate::policy::PolicyEngine::new(None)),
         started_at: std::time::Instant::now(),
         send_delay: send_delay(),
     });
-
-    // Start file watcher for live policy reload
-    let _policy_watcher = crate::policy::PolicyEngine::start_watcher(policy, None);
 
     let cancel = CancellationToken::new();
 
@@ -98,18 +94,9 @@ async fn event_loop(
     state: Arc<DaemonState>,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut reloads = state.policy.reloads();
     loop {
         let notification = tokio::select! {
             notif = notifications.recv() => notif,
-            Ok(()) = reloads.changed() => {
-                let count = *reloads.borrow_and_update();
-                let handles = state.registry.read().await.snapshot_handles();
-                for handle in handles {
-                    handle.set_policy(count).await;
-                }
-                continue;
-            }
             _ = cancel.cancelled() => {
                 tracing::info!("Daemon cancelled");
                 break;

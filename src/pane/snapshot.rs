@@ -18,8 +18,6 @@ pub enum Fact<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneSnapshot {
     pub version: u64,
-    /// The count of policy reloads: every decision reads the policy.
-    pub policy: u64,
     pub mode: Fact<PaneMode>,
     /// Where the shell's OSC 133 markers have taken the pane: Known at
     /// `Input` or `Executing`, Unknown from a command line of the daemon's

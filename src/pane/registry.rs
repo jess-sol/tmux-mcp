@@ -25,7 +25,6 @@ struct PaneState {
     y: usize,
     processor: PaneProcessor,
     mode: Fact<PaneMode>,
-    policy: u64,
     phase: Fact<Osc133Phase>,
     integration: Fact<bool>,
 }
@@ -97,7 +96,6 @@ impl TrackedPane {
             y,
             processor: PaneProcessor::new(lines, columns),
             mode: Fact::Unknown,
-            policy: 0,
             phase: Fact::Unknown,
             integration: Fact::Unknown,
         };
@@ -192,13 +190,6 @@ impl TrackedPane {
         self.publish(&state);
     }
 
-    /// The count of policy reloads.
-    pub async fn set_policy(&self, reloads: u64) {
-        let mut state = self.state.lock().await;
-        state.policy = reloads;
-        self.publish(&state);
-    }
-
     /// The shell's process, as tmux gives it.
     pub async fn set_pid(&self, pid: u32) {
         let mut state = self.state.lock().await;
@@ -252,7 +243,6 @@ impl PaneState {
         let reported = terminal.osc7_since_command;
         PaneSnapshot {
             version,
-            policy: self.policy,
             mode: self.mode.clone(),
             phase: self.phase.clone(),
             integration: self.integration.clone(),
@@ -577,8 +567,6 @@ mod tests {
         let copy = pane.snapshot();
         pane.set_mode(copy_mode()).await;
         let same = pane.snapshot();
-        pane.set_policy(1).await;
-        let reloaded = pane.snapshot();
 
         assert!(prompt.version > start, "{prompt:?}");
         assert_eq!(unchanged.version, prompt.version);
@@ -587,7 +575,6 @@ mod tests {
         assert!(copy.version > changing.version, "an Unknown became known");
         assert_eq!(copy.mode, copy_mode());
         assert_eq!(same.version, copy.version, "nothing changed");
-        assert!(reloaded.version > same.version);
     }
 
     #[tokio::test]

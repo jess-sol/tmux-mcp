@@ -280,6 +280,16 @@ impl Harness {
         if let (Decision::Deny, reason) = self.hook(shell, command) {
             return reason;
         }
+        self.run_approved_with(shell, command, read).await
+    }
+
+    /// `command_run` alone, once `hook` has asked about `command`: the call
+    /// Claude Code makes when the person says yes.
+    pub async fn run_approved(&self, shell: &Shell, command: &str) -> String {
+        self.run_approved_with(shell, command, Read::default()).await
+    }
+
+    async fn run_approved_with(&self, shell: &Shell, command: &str, read: Read) -> String {
         let arguments = read
             .set("pane_id", shell.pane.as_str())
             .set("command", command);

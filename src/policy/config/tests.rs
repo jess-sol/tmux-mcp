@@ -181,18 +181,15 @@ fn the_project_root_is_the_nearest_directory_with_a_policy() {
 }
 
 #[test]
-fn a_changed_policy_file_announces_its_reload() {
+fn a_changed_policy_file_is_reloaded_on_the_next_decision() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join(".claude/tmux-mcp.toml");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, "").unwrap();
     let cwd = dir.path().to_str().unwrap();
     let engine = PolicyEngine::new(Some(cwd));
-    let reloads = engine.reloads();
 
-    engine.check_reload(Some(cwd));
-    let unchanged = reloads.has_changed().unwrap();
-    std::fs::write(&file, "default = \"ask\"\n").unwrap();
+    std::fs::write(&file, "default = \"deny\"\n").unwrap();
     std::fs::File::options()
         .write(true)
         .open(&file)
@@ -201,8 +198,7 @@ fn a_changed_policy_file_announces_its_reload() {
         .unwrap();
     engine.check_reload(Some(cwd));
 
-    assert!(!unchanged);
-    assert!(reloads.has_changed().unwrap());
+    assert_eq!(engine.compiled().rules.default, Decision::Deny);
 }
 
 /// A Nix switch relinks a policy file to a new store path, whose mtime is the
@@ -228,7 +224,6 @@ fn a_policy_file_relinked_to_a_file_of_the_same_mtime_reloads() {
     std::os::unix::fs::symlink(&old, &link).unwrap();
     let cwd = dir.path().to_str().unwrap();
     let engine = PolicyEngine::new(Some(cwd));
-    let reloads = engine.reloads();
 
     // Relinked as a switch does: a new link renamed over the old one.
     let staged = dir.path().join(".claude/tmux-mcp.toml.new");
@@ -236,7 +231,7 @@ fn a_policy_file_relinked_to_a_file_of_the_same_mtime_reloads() {
     std::fs::rename(&staged, &link).unwrap();
     engine.check_reload(Some(cwd));
 
-    assert!(reloads.has_changed().unwrap());
+    assert_eq!(engine.compiled().rules.default, Decision::Deny);
 }
 
 // --- Dependency contract: toml and serde ---

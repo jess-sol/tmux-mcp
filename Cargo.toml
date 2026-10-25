@@ -24,7 +24,6 @@ vte = { version = "0.15.0", features = ["ansi"] }
 brush-parser = "0.3"
 toml = "1"
 globset = "0.4"
-notify = "7"
 cel-parser = "0.10"
 percent-encoding = "2"
 memchr = "2"

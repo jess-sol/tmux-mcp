@@ -1,8 +1,10 @@
 //! When `command_run` refuses to touch a pane.
 
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
-use crate::harness::{Harness, SETTLE};
+use crate::harness::{Decision, Harness, SETTLE};
 
 #[tokio::test]
 async fn a_pane_the_user_is_typing_in_refuses_commands() {
@@ -122,6 +124,29 @@ async fn a_pane_that_changes_before_the_send_runs_nothing() {
 
     assert!(reply.contains("changed before"), "{reply}");
     assert!(!history.contains("seq 1"), "{history}");
+}
+
+/// The person's yes comes a while after the ask. A decision for a pane in
+/// another project in between changes nothing about this pane, so the
+/// command still runs.
+#[tokio::test]
+async fn a_decision_in_another_project_between_the_ask_and_the_yes_stops_nothing() {
+    let h = Harness::delaying_sends(Duration::from_millis(200)).await;
+    let shell = h.shell().await;
+    let other = h.shell().await;
+    std::fs::create_dir_all(h.dir().join("other/.claude")).expect("another project");
+    std::fs::write(h.dir().join("other/.claude/tmux-mcp.toml"), "default = \"ask\"\n")
+        .expect("its policy");
+    h.run(&other, "cd other").await;
+    std::fs::write(h.dir().join("hello"), "#!/bin/sh\necho hi\n").expect("a script");
+    std::fs::set_permissions(h.dir().join("hello"), Permissions::from_mode(0o755))
+        .expect("an executable script");
+    assert_eq!(h.decision(&shell, "./hello"), Decision::Ask);
+
+    h.decision(&other, "true");
+    let reply = h.run_approved(&shell, "./hello").await;
+
+    assert!(reply.ends_with("Exit code: 0"), "{reply}");
 }
 
 #[tokio::test]
