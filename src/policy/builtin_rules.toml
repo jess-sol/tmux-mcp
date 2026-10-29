@@ -851,6 +851,180 @@ parser = "gnu"
 arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["fmt", "validate", "version"]
 
+# --- Forges: a table per group, so forge-reads reads the word below it ---
+# `global` holds the read forms' flags, so `gh pr list --state open` stays
+# known on tmux. A word missing here (an alias, a newer release's command)
+# parses Unknown, which fires forge-in-a-pane: it errs toward the pane.
+
+[commands.gh]
+parser = { name = "gnu", short_equals = true }
+arguments = ["subcommand", "operands..."]
+argument.subcommand.words = ["api", "browse", "status", "search", "version", "help", "completion", "attestation", "codespace", "org"]
+global = ["--repo|-R:", "--help|-h", "--json:", "--jq|-q:", "--template|-t:"]
+
+[commands.gh.pr]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "status", "diff", "checks", "create", "merge", "close", "reopen", "edit", "review", "comment", "checkout", "ready", "lock", "unlock", "update-branch"]
+global = ["--web|-w", "--state|-s:", "--limit|-L:", "--author|-A:", "--base|-B:", "--head|-H:", "--label|-l:", "--search|-S:", "--assignee|-a:", "--comments|-c", "--draft|-d"]
+
+[commands.gh.issue]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "status", "create", "close", "reopen", "edit", "comment", "delete", "develop", "pin", "unpin", "lock", "unlock", "transfer"]
+global = ["--web|-w", "--state|-s:", "--limit|-L:", "--author|-A:", "--label|-l:", "--search|-S:", "--assignee|-a:", "--milestone|-m:", "--comments|-c"]
+
+[commands.gh.repo]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["view", "list", "clone", "create", "delete", "fork", "archive", "unarchive", "edit", "rename", "sync", "set-default", "deploy-key", "gitignore", "license", "autolink"]
+global = ["--web|-w", "--limit|-L:", "--language|-l:", "--topic:", "--branch|-b:"]
+
+[commands.gh.release]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "create", "delete", "edit", "upload", "download", "delete-asset"]
+global = ["--web|-w", "--limit|-L:"]
+
+[commands.gh.run]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "watch", "rerun", "cancel", "delete", "download"]
+global = ["--limit|-L:", "--workflow|-w:", "--branch|-b:", "--status|-s:", "--log", "--log-failed", "--job|-j:"]
+
+[commands.gh.workflow]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "run", "enable", "disable"]
+
+[commands.gh.gist]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "create", "edit", "delete", "clone", "rename"]
+
+[commands.gh.label]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "create", "edit", "delete", "clone"]
+
+[commands.gh.secret]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "set", "delete"]
+
+[commands.gh.variable]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "get", "set", "delete"]
+
+[commands.gh.cache]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "delete"]
+
+[commands.gh.ruleset]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "check"]
+
+[commands.gh.project]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "item-list", "field-list", "create", "edit", "delete", "close", "copy", "link", "unlink", "mark-template", "item-add", "item-create", "item-edit", "item-delete", "item-archive", "field-create", "field-delete"]
+
+[commands.gh.auth]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["status", "login", "logout", "refresh", "setup-git", "switch", "token"]
+
+[commands.gh.config]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["get", "list", "set", "clear-cache"]
+
+[commands.gh.alias]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "set", "delete", "import"]
+
+[commands.gh.extension]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "browse", "search", "install", "upgrade", "remove", "create", "exec"]
+
+[commands.glab]
+parser = { name = "gnu", short_equals = true }
+arguments = ["subcommand", "operands..."]
+argument.subcommand.words = [
+  "api", "artifact-registry", "attestation", "changelog", "check-update", "cluster",
+  "completion", "container-registry", "dependency-firewall", "deploy-key", "duo", "gpg-key",
+  "help", "mcp", "milestone", "opentofu", "orbit", "packages", "runner", "runner-controller",
+  "search", "securefile", "security", "skills", "ssh-key", "stack", "todo", "version",
+  "whatsnew", "work-items",
+]
+global = ["--repo|-R:", "--help|-h", "--output|-F:", "--per-page|-P:", "--page|-p:"]
+
+[commands.glab.mr]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "diff", "approvers", "issues", "create", "merge", "close", "reopen", "update", "delete", "approve", "revoke", "rebase", "checkout", "todo", "subscribe", "unsubscribe", "for"]
+global = ["--author:", "--assignee|-a:", "--reviewer:", "--label|-l:", "--source-branch|-s:", "--target-branch|-t:", "--comments|-c", "--all|-A", "--mine|-M", "--merged|-m", "--closed", "--draft|-d"]
+
+[commands.glab.mr.note]
+# An MR comment can be an Atlantis command that plans or applies, so only
+# `list` is a read.
+arguments = ["subcommand", "notes..."]
+argument.subcommand.words = ["create", "delete", "list", "reopen", "resolve", "update"]
+
+[commands.glab.issue]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "board", "create", "close", "reopen", "update", "delete", "note", "subscribe", "unsubscribe"]
+global = ["--author:", "--assignee|-a:", "--label|-l:", "--milestone|-m:", "--search:", "--comments|-c", "--all|-A", "--mine|-M", "--closed", "--opened|-o"]
+
+[commands.glab.repo]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["view", "list", "search", "contributors", "clone", "create", "delete", "fork", "archive", "unarchive", "mirror", "transfer", "update"]
+
+[commands.glab.ci]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "status", "get", "trace", "lint", "retry", "run", "delete", "cancel", "trigger", "artifact", "config", "compile", "update"]
+global = ["--branch|-b:", "--live|-l", "--compact|-c", "--status|-s:"]
+
+[commands.glab.release]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "create", "delete", "upload", "download", "delete-asset"]
+
+[commands.glab.variable]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "get", "set", "update", "delete", "export"]
+global = ["--group|-g:", "--scope|-s:"]
+
+[commands.glab.label]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "create", "delete"]
+
+[commands.glab.schedule]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "create", "run", "delete", "update"]
+
+[commands.glab.incident]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "view", "close", "reopen", "note", "subscribe", "unsubscribe"]
+
+[commands.glab.iteration]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list"]
+
+[commands.glab.snippet]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["create"]
+
+[commands.glab.token]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "create", "revoke", "rotate"]
+
+[commands.glab.user]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["events"]
+
+[commands.glab.job]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["artifact"]
+
+[commands.glab.auth]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["status", "login", "logout", "git-credential"]
+
+[commands.glab.config]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["get", "set", "init", "edit"]
+
+[commands.glab.alias]
+arguments = ["subcommand", "rest..."]
+argument.subcommand.words = ["list", "set", "delete"]
+
 # =============================================================================
 # Rules: code from text (deny)
 # =============================================================================
@@ -1254,6 +1428,71 @@ command = "kubectl create"
 when = 'args.dry_run == ["client"]'
 action = "allow"
 exempts = ["infra-in-a-pane"]
+
+# A forge CLI acts as the user: reads stay on Bash, everything else goes to
+# a pane. The deny covers both tools whole; the allows name the read words.
+# `api` has its own deny, since a subcommand usually covers the call: its
+# `when` excludes only a certain `api`, so an Unknown subcommand still fires it.
+
+[[rules]]
+id = "forge-in-a-pane"
+via = "bash"
+command = ["gh", "glab"]
+when = 'subcommand != "api"'
+action = "deny"
+message = '''
+Run this in a tmux pane: it acts on the forge with the user's token (a merge
+can deploy, an MR comment can drive Atlantis), and the user can watch it and
+find it in their history.
+
+  command_run(command="{{ line }}")'''
+
+[[rules]]
+id = "forge-api"
+via = "bash"
+command = ["gh api", "glab api"]
+action = "deny"
+message = '''
+Write this as the subcommand that covers it (gh pr view --json, gh issue list,
+glab mr view -F json, ...): the subcommand says what it does, where a raw API
+call says only an endpoint. When no subcommand covers it, run it in a tmux
+pane the user can watch:
+
+  command_run(command="{{ line }}")'''
+
+[[rules]]
+id = "forge-reads"
+via = ["tmux", "bash"]
+command = [
+  "gh pr", "gh issue", "gh repo", "gh release", "gh run", "gh workflow", "gh gist", "gh label",
+  "gh secret", "gh variable", "gh cache", "gh ruleset", "gh project", "gh auth", "gh config",
+  "gh alias", "gh extension",
+  "glab mr", "glab issue", "glab repo", "glab ci", "glab release", "glab variable", "glab label",
+  "glab schedule", "glab incident", "glab iteration", "glab token", "glab user", "glab auth",
+  "glab config", "glab alias",
+]
+when = '''subcommand in [
+  "list", "view", "status", "diff", "checks", "check", "get", "trace", "approvers", "issues",
+  "contributors", "search", "item-list", "field-list", "events",
+]'''
+action = "allow"
+exempts = ["forge-in-a-pane"]
+
+[[rules]]
+id = "forge-top-reads"
+via = ["tmux", "bash"]
+command = ["gh", "glab"]
+when = 'subcommand in ["status", "search", "version", "help", "completion", "check-update"]'
+action = "allow"
+exempts = ["forge-in-a-pane"]
+
+[[rules]]
+id = "forge-note-reads"
+via = ["tmux", "bash"]
+command = "glab mr note"
+when = 'subcommand == "list"'
+action = "allow"
+exempts = ["forge-in-a-pane"]
 
 # The tmux CLI reaches the panes around tmux-mcp: no command tracking, no
 # policy, and keystrokes into a shell the person may be typing in.

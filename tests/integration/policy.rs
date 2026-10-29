@@ -230,6 +230,46 @@ async fn bash_sends_infrastructure_to_a_pane() {
     });
 }
 
+/// On Bash, a forge CLI's reads run; whatever creates, changes, merges or
+/// reaches the API as the user runs in a pane. A subcommand the grammar
+/// does not know goes to the pane too.
+#[tokio::test]
+async fn bash_sends_forge_writes_to_a_pane() {
+    let h = Harness::new().await;
+    decides!(h, {
+        "gh pr list" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh pr view 12 --json body --jq .body" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh -R o/r pr checks 12" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh issue list --state open --limit 5" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh run view 123 --log" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh auth status" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh status" => (Allow, "forge-top-reads", Allow, "forge-top-reads"),
+        "gh search prs --author me" => (_, _, Allow, "forge-top-reads"),
+        "gh pr create --title x" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh pr merge --merge 12" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh pr merge --squash 12" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh pr review --approve 12" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh pr comment 12 -b hi" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh api repos/o/r" => (Ask, _, Deny, "forge-api"),
+        "gh repo fork" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh auth token" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh secret set X" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh pr frob" => (Ask, _, Deny, "forge-in-a-pane"),
+        "gh $X pr list" => (Ask, _, Deny, "forge-in-a-pane"),
+        "glab mr list" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "glab -R g/p mr view 12" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "glab ci status" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "glab mr note list 12" => (Allow, "forge-note-reads", Allow, "forge-note-reads"),
+        "glab version" => (Allow, "forge-top-reads", Allow, "forge-top-reads"),
+        "glab mr merge 12" => (Ask, _, Deny, "forge-in-a-pane"),
+        "glab mr approve 12" => (Ask, _, Deny, "forge-in-a-pane"),
+        "glab mr note create 12 -m hi" => (Ask, _, Deny, "forge-in-a-pane"),
+        "glab mr checkout 12" => (Ask, _, Deny, "forge-in-a-pane"),
+        "glab api projects" => (Ask, _, Deny, "forge-api"),
+        "glab variable set X y" => (Ask, _, Deny, "forge-in-a-pane"),
+    });
+}
+
 /// A function body may run wherever it is later called, so its commands meet
 /// the rules where it is defined, in a directory that cannot be known.
 #[tokio::test]
