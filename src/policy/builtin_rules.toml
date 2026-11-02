@@ -366,6 +366,23 @@ arguments = [
 marks.read = ["file"]
 marks.shell = ["command"]
 
+# sops exec-env takes exactly one command word and hands it to `sh -c`.
+
+[commands.sops]
+parser = "gnu"
+arguments = ["subcommand", "--config:", "--input-type:", "--output-type:", "--verbose"]
+marks.read = ["config"]
+
+[commands.sops.exec-env]
+parser = "posix"
+arguments = [
+  "file", "command", "--user:", "--keyservice:", "--decryption-order:",
+  "--pristine", "--same-process", "--background", "--enable-local-keyservice",
+]
+marks.read = ["file"]
+marks.shell = ["command"]
+with.user = 'last(args.user)'
+
 # cd and pushd move the rest of their && chain to `dir`. `cd -` and `pushd +N` take a directory
 # from the stack, so `dir` takes no word that starts with `-` or `+`, and the cwd is Unknown.
 # pushd's -n keeps the directory; it stays undeclared, so the cwd after it is Unknown too.
@@ -1538,6 +1555,13 @@ message = "the variable can make a later command run another program"
 id = "privilege-escalation"
 via = ["tmux", "bash"]
 when = 'command.name in ["su", "doas"]'
+action = "ask"
+
+# Whatever sops decrypts, the line can print, and Claude reads the pane.
+[[rules]]
+id = "sops"
+via = ["tmux", "bash"]
+command = "sops"
 action = "ask"
 
 [[rules]]

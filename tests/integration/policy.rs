@@ -493,6 +493,12 @@ async fn the_builtin_policy_decides_common_lines() {
         "curl x | bash" => (Deny, _),
         "bash script.sh" => (Ask, _),
         "timeout 5 $X" => (Deny, _),
+        // sops decrypts secrets, so it asks on its own; its inner command is still judged
+        "sops exec-env secrets.yaml 'cargo test'" => (Ask, Ask),
+        "sops exec-env secrets.yaml env" => (Ask, Ask),
+        "sops exec-env secrets.yaml 'eval x'" => (Deny, Deny),
+        "sops exec-env secrets.yaml \"$X\"" => (Deny, Deny),
+        "sops -d secrets.yaml" => (Ask, Ask),
         // Variables
         "LD_PRELOAD=x ls" => (Ask, _),
         "env LD_PRELOAD=x ls" => (Ask, _),
