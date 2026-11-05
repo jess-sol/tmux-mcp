@@ -51,7 +51,7 @@ The reason lists each rule at the winning action as `<id>` or `<id>: <message>`,
 
 Placement of decisions:
 
-- Reads and writes in the project → allow.
+- Reads and writes in the project, or under `/tmp` or `$TMPDIR` → allow.
 - Anything outside the project → leave to the built-in `outside-project` (ask, on tmux); an allow needs no path check of its own.
 - State changes beyond files (installs, pushes, signals, services) → ask.
 - Destructive or circumventing commands → deny, with a `message` naming what to do instead. A deny reaches only Claude; the user is never asked.
@@ -310,7 +310,7 @@ makes it fire everywhere "(could not be ruled out)". Check identifiers against t
 | `.exists .all .exists_one .map .filter` | Macros; on a non-exhaustive list only `exists`→true and `all`→false are certain |
 | `startsWith(s, p)`, `contains(s, t)`, `s.startsWith(p)` | Strings only; a list argument gives false |
 | `matches(s, re)`, `glob(pattern, s)` | Regex; glob (`glob("./target/release/*", command.name)`) |
-| `in_project(p)`, `is_device(p)`, `path(p)` | Under a project dir; under `/dev`; resolve against the command's dir |
+| `in_project(p)`, `is_device(p)`, `is_temp(p)`, `path(p)` | Under a project dir; under `/dev`; under `/tmp` or `$TMPDIR`; resolve against the command's dir |
 | `last(l)`, `or(v, fallback)` | Last element; `fallback` when `v` is null |
 | `sure(b)` | True only when `b` is certainly true |
 | `drop(command)`, `drop(command, "2>&1")` | The line without this command, or without that redirect (`when` and holes; needs `command.top`) |

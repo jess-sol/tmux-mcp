@@ -32,6 +32,8 @@ pub struct Harness {
     socket: PathBuf,
     /// Held for its `Drop`: everything the harness makes lives in it.
     dir: TempDir,
+    /// `$TMPDIR` of every harness process, outside the project.
+    tmp: TempDir,
 }
 
 /// One MCP server: a tmux-mcp process, talked to as one Claude Code session
@@ -152,6 +154,10 @@ impl Harness {
             .tempdir_in("/tmp")
             .expect("a temp dir");
         let socket = dir.path().join("tmux");
+        let tmp = tempfile::Builder::new()
+            .prefix("tmux-mcp-harness-tmp-")
+            .tempdir_in("/tmp")
+            .expect("a TMPDIR");
         let home = dir.path().join("home");
         let runtime = dir.path().join("run");
         std::fs::create_dir(&home).expect("a HOME");
@@ -197,6 +203,7 @@ impl Harness {
             ("TMUX_PANE", pane.to_string()),
             ("HOME", home.display().to_string()),
             ("XDG_RUNTIME_DIR", runtime.display().to_string()),
+            ("TMPDIR", tmp.path().display().to_string()),
         ];
         if let Some(delay) = send_delay {
             env.push(("TMUX_MCP_SEND_DELAY_MS", delay.as_millis().to_string()));
@@ -207,6 +214,7 @@ impl Harness {
             env,
             socket,
             dir,
+            tmp,
         }
     }
 
@@ -265,6 +273,11 @@ impl Harness {
 
     pub fn dir(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// `$TMPDIR` of every harness process.
+    pub fn tmp(&self) -> &Path {
+        self.tmp.path()
     }
 
     /// Runs `command` in `shell` as Claude Code would: the `policy-check`

@@ -2,7 +2,7 @@
 //! over `TriVal`, with Kleene logic.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cel_parser::ast as cel;
 use cel_parser::reference::Val;
@@ -128,6 +128,7 @@ fn eval_call(call: &cel::CallExpr, ctx: &Ctx) -> TriVal {
         "is_device" => eval_path_fn(call, ctx, |path, _| {
             TriBool::of(path.starts_with("/dev")).to_trival()
         }),
+        "is_temp" => eval_path_fn(call, ctx, is_temp),
         "path" => eval_path_fn(call, ctx, |path, _| {
             TriVal::String(path.to_string_lossy().into_owned())
         }),
@@ -366,6 +367,27 @@ fn in_project(path: &Path, site: &Site) -> TriVal {
         Host::Here => TriVal::Bool(site.env.project_dirs.iter().any(|d| path.starts_with(d))),
         Host::There(_) => TriVal::Bool(false),
         Host::Unknown => TriVal::Unknown,
+    }
+}
+
+/// Under `/tmp` on any host, or under this machine's temp directory when the
+/// command runs here. macOS spells both with or without `/private` in front.
+fn is_temp(path: &Path, site: &Site) -> TriVal {
+    let path = without_private(path);
+    if path.starts_with("/tmp") {
+        return TriVal::Bool(true);
+    }
+    match site.host {
+        Host::Here => TriVal::Bool(path.starts_with(without_private(&site.env.temp_dir))),
+        Host::There(_) => TriVal::Bool(false),
+        Host::Unknown => TriVal::Unknown,
+    }
+}
+
+fn without_private(path: &Path) -> PathBuf {
+    match path.strip_prefix("/private") {
+        Ok(rest) => Path::new("/").join(rest),
+        Err(_) => path.to_path_buf(),
     }
 }
 

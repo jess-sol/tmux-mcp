@@ -65,6 +65,8 @@ pub(crate) struct Env {
     /// The directory that relative command identities start from.
     pub anchor: Option<PathBuf>,
     pub project_dirs: Vec<PathBuf>,
+    /// This machine's temp directory: `$TMPDIR`, else `/tmp`.
+    pub temp_dir: PathBuf,
     pub via: Via,
 }
 

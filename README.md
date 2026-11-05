@@ -174,7 +174,7 @@ Add to `~/.claude/settings.json` (merge with existing):
 
 - **Read-only tools** (`list_panes`, `command_read`, `command_history`, `debug_pane`, `inject_osc133`) are auto-allowed — they can't modify anything.
 - **`command_run`** is auto-allowed so calls reach the daemon, but the **policy hook** gates execution:
-  - Safe commands on files in the project (ls, cat, grep, git status, cargo test, etc.) auto-approve silently
+  - Safe commands on files in the project or the temp dir (ls, cat, grep, git status, cargo test, etc.) auto-approve silently
   - Risky commands, and anything touching paths outside the project, trigger Claude Code's native approval prompt
   - Denied commands are blocked with a reason telling Claude what to do instead
   - Approvals are context-aware — if the pane's hostname, cwd, user, or foreground process changes between approval and execution, the approval is invalidated

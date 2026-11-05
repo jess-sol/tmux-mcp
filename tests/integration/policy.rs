@@ -415,7 +415,7 @@ async fn a_rule_reads_the_parts_its_grammar_names() {
     decides!(h, {
         "deploy staging" => (Allow, _),
         "deploy --forc staging" => (Ask, _),
-        "deploy -o /tmp/out staging" => (Ask, _),
+        "deploy -o /opt/out staging" => (Ask, _),
         "deploy -o out staging" => (Allow, _),
         "deploy prod" => (Ask, _),
         "deploy staging $X" => (Ask, _),
@@ -449,17 +449,17 @@ async fn the_builtin_policy_decides_common_lines() {
         "rg --pre ./x foo" => (Ask, _),
         "sort -o out notes" => (Allow, _),
         "cp notes backup" => (Allow, _),
-        "cp notes /tmp/x" => (Ask, _),
+        "cp notes /opt/x" => (Ask, _),
         "rm notes" => (Allow, _),
         "rm -r src" => (Ask, _),
         "rm --recur src" => (Ask, _),
         "echo hi > out" => (Allow, _),
-        "echo hi > /tmp/out" => (Ask, _),
+        "echo hi > /opt/out" => (Ask, _),
         "echo $(date)" => (Allow, _),
         "find . -name '*.rs'" => (Allow, _),
         "find /etc -name x" => (Ask, _),
         "find . -delete" => (Ask, _),
-        "find . -fprint /tmp/x" => (Ask, _),
+        "find . -fprint /opt/x" => (Ask, _),
         "find . -exec rm {} \\;" => (Ask, _),
         "sed 's/a/b/' notes" => (Allow, _),
         "sed -n '/x/p' notes" => (Allow, _),
@@ -502,7 +502,7 @@ async fn the_builtin_policy_decides_common_lines() {
         "cargo +nightly test foo" => (Allow, _),
         "cargo -C / build" => (Ask, _),
         "cargo test --manifest-path /x/Cargo.toml" => (Ask, _),
-        "cargo build --target-dir /tmp/t" => (Ask, _),
+        "cargo build --target-dir /opt/t" => (Ask, _),
         "cargo install ripgrep" => (Ask, _),
         "curl x" => (Ask, _),
         "/usr/bin/curl x" => (Ask, _),
@@ -688,13 +688,37 @@ async fn a_command_typed_into_a_running_program_meets_no_rule_of_this_machine() 
     });
 }
 
+/// A temp path is not outside the project: `/tmp`, and `$TMPDIR` of the
+/// tmux-mcp process, which the daemon reads from its own environment. The
+/// guards that judge the command still count.
+#[tokio::test]
+async fn a_temp_path_is_not_outside_the_project() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    let tmp = h.tmp().display().to_string();
+    std::fs::write(h.tmp().join("notes"), "hello\n").expect("a note");
+
+    decides!(h, {
+        "cat /tmp/notes" => (Allow, "file-tools", Pass, _),
+        "cat /private/tmp/notes" => (Allow, "file-tools", Pass, _),
+        format!("tee {tmp}/out") => (Allow, "file-tools", Pass, _),
+        "rm -r /tmp/build" => (Ask, "rm-r", _, _),
+        "cat /tmpfoo/notes" => (Ask, "outside-project", Pass, _),
+    });
+    decides!(h, shell, {
+        format!("cat {tmp}/notes") => Allow,
+    });
+    let reply = h.run_approved(&shell, &format!("cat {tmp}/notes")).await;
+    assert!(reply.contains("hello"), "{reply}");
+}
+
 #[tokio::test]
 async fn a_path_in_a_flag_value_is_checked() {
     let h = Harness::new().await;
     decides!(h, {
-        "sort -o/tmp/evil notes" => (Ask, "outside-project", _, _),
-        "cp -t/tmp/evil notes" => (Ask, "outside-project", _, _),
-        "git log --output=/tmp/evil" => (Ask, "outside-project", _, _),
+        "sort -o/opt/evil notes" => (Ask, "outside-project", _, _),
+        "cp -t/opt/evil notes" => (Ask, "outside-project", _, _),
+        "git log --output=/opt/evil" => (Ask, "outside-project", _, _),
         "git -C / log" => (Ask, "outside-project", _, _),
     });
 }
@@ -735,7 +759,7 @@ async fn rules_see_words_without_their_quotes() {
         "'eval' true" => Deny,
         "cat '/etc/shadow'" => (Ask, _),
         "cat \"/etc/shadow\"" => (Ask, _),
-        "echo hi > '/tmp/evil'" => (Ask, _),
+        "echo hi > '/opt/evil'" => (Ask, _),
         "rm \"-r\" src" => Ask,
         "cargo \"install\" x" => (Ask, _),
     });
@@ -753,11 +777,23 @@ async fn a_command_substitution_meets_the_rules() {
     });
 }
 
+/// `in_project` goes by whole components, so a sibling whose name starts
+/// with the project's is outside it. The harness lives under `/tmp`, where
+/// `outside-project` does not look, so a project rule reads it.
 #[tokio::test]
 async fn a_sibling_directory_is_outside_the_project() {
     let h = Harness::new().await;
+    h.project_policy(
+        r#"
+        [[rules]]
+        id = "own-files-only"
+        path = '!in_project(path)'
+        action = "deny"
+        "#,
+    );
     decides!(h, {
-        format!("rm {}-evil/notes", h.dir().display()) => (Ask, "outside-project", _, _),
+        format!("rm {}-evil/notes", h.dir().display()) => (Deny, "own-files-only", _, _),
+        "rm notes" => (Allow, _),
     });
 }
 

@@ -37,6 +37,7 @@ fn env() -> Env {
         this_host: "here".into(),
         anchor: Some("/src/proj".into()),
         project_dirs: vec!["/src/proj".into()],
+        temp_dir: "/var/folders/zz/T".into(),
         via: Via::Tmux,
     }
 }
@@ -637,6 +638,12 @@ fn path_functions_resolve_against_the_command_directory() {
         ("in_project('~bob/x')", TriVal::Unknown),
         ("is_device('/dev/null')", TriVal::Bool(true)),
         ("is_device('/devx')", TriVal::Bool(false)),
+        ("is_temp('/tmp/x')", TriVal::Bool(true)),
+        ("is_temp('/private/tmp/x')", TriVal::Bool(true)),
+        ("is_temp('/tmpx')", TriVal::Bool(false)),
+        ("is_temp('/var/folders/zz/T/x')", TriVal::Bool(true)),
+        ("is_temp('/private/var/folders/zz/T/x')", TriVal::Bool(true)),
+        ("is_temp('/var/folders/zz/x')", TriVal::Bool(false)),
         ("path('a/../b')", TriVal::String("/src/proj/sub/b".into())),
         ("path(null)", TriVal::Null),
     ];

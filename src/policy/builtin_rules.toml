@@ -1574,9 +1574,11 @@ command_run to run in it, command_read to read output, press_key for keys.'''
 # Rules: paths
 # =============================================================================
 
+# A temp path is nobody's but this user's and disposable, so it is not
+# outside; the guards that judge the command (rm-r, curl-wget) still count.
 [[rules]]
 id = "outside-project"
-path = '!in_project(path) && !is_device(path)'
+path = '!in_project(path) && !is_device(path) && !is_temp(path)'
 action = "ask"
 message = "a path outside the project"
 

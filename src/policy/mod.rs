@@ -173,6 +173,7 @@ fn env(ctx: &PaneContext, compiled: &config::CompiledPolicy, here: bool, via: Vi
         this_host: this_host(),
         anchor,
         project_dirs,
+        temp_dir: std::env::temp_dir(),
         via,
     }
 }
