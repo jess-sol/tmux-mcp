@@ -869,40 +869,69 @@ arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["fmt", "validate", "version"]
 
 # --- Forges: a table per group, so forge-reads reads the word below it ---
-# `global` holds the read forms' flags, so `gh pr list --state open` stays
-# known on tmux. A word missing here (an alias, a newer release's command)
-# parses Unknown, which fires forge-in-a-pane: it errs toward the pane.
+# A group's `global` holds the flags its read forms share, so `gh issue list
+# --state open` stays known on tmux. The pull and merge request subcommands
+# each get a table, since one short flag means a different thing to each
+# (`-s` is state, squash or sha) and a body file is a path. A word missing
+# here (an alias, a newer release's command) parses Unknown, which fires
+# forge-in-a-pane: it errs toward the pane.
 
 [commands.gh]
 parser = { name = "gnu", short_equals = true }
 arguments = ["subcommand", "operands..."]
 argument.subcommand.words = ["api", "browse", "status", "search", "version", "help", "completion", "attestation", "codespace", "org"]
-global = ["--repo|-R:", "--help|-h", "--json:", "--jq|-q:", "--template|-t:"]
+global = ["--repo|-R:", "--help|-h", "--json:", "--jq|-q:"]
 
 [commands.gh.pr]
 arguments = ["subcommand", "rest..."]
-argument.subcommand.words = ["list", "view", "status", "diff", "checks", "create", "merge", "close", "reopen", "edit", "review", "comment", "checkout", "ready", "lock", "unlock", "update-branch"]
-global = ["--web|-w", "--state|-s:", "--limit|-L:", "--author|-A:", "--base|-B:", "--head|-H:", "--label|-l:", "--search|-S:", "--assignee|-a:", "--comments|-c", "--draft|-d"]
+argument.subcommand.words = ["status", "diff", "checks", "close", "reopen", "checkout", "ready", "lock", "unlock", "update-branch"]
+global = ["--web|-w"]
+
+[commands.gh.pr.list]
+arguments = ["--app:", "--assignee|-a:", "--author|-A:", "--base|-B:", "--draft|-d", "--head|-H:", "--label|-l:", "--limit|-L:", "--search|-S:", "--state|-s:", "--template|-t:"]
+
+[commands.gh.pr.view]
+arguments = ["pr", "--comments|-c", "--template|-t:"]
+
+[commands.gh.pr.create]
+arguments = ["--assignee|-a:", "--attach:", "--base|-B:", "--body|-b:", "--body-file|-F:", "--draft|-d", "--dry-run", "--editor|-e", "--fill|-f", "--fill-first", "--fill-verbose", "--head|-H:", "--label|-l:", "--milestone|-m:", "--no-maintainer-edit", "--project|-p:", "--recover:", "--reviewer|-r:", "--template|-T:", "--title|-t:"]
+marks.read = ["body_file", "template"]
+
+[commands.gh.pr.merge]
+arguments = ["pr", "--admin", "--author-email|-A:", "--auto", "--body|-b:", "--body-file|-F:", "--delete-branch|-d", "--disable-auto", "--match-head-commit:", "--merge|-m", "--rebase|-r", "--squash|-s", "--subject|-t:"]
+marks.read = ["body_file"]
+
+[commands.gh.pr.review]
+arguments = ["pr", "--approve|-a", "--body|-b:", "--body-file|-F:", "--comment|-c", "--request-changes|-r"]
+marks.read = ["body_file"]
+
+[commands.gh.pr.comment]
+arguments = ["pr", "--attach:", "--body|-b:", "--body-file|-F:", "--create-if-none", "--delete-last", "--edit-last", "--editor|-e", "--yes"]
+marks.read = ["body_file"]
+
+[commands.gh.pr.edit]
+arguments = ["pr", "--add-assignee:", "--add-label:", "--add-project:", "--add-reviewer:", "--attach:", "--base|-B:", "--body|-b:", "--body-file|-F:", "--milestone|-m:", "--remove-assignee:", "--remove-label:", "--remove-milestone", "--remove-project:", "--remove-reviewer:", "--title|-t:"]
+marks.read = ["body_file"]
 
 [commands.gh.issue]
 arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["list", "view", "status", "create", "close", "reopen", "edit", "comment", "delete", "develop", "pin", "unpin", "lock", "unlock", "transfer"]
-global = ["--web|-w", "--state|-s:", "--limit|-L:", "--author|-A:", "--label|-l:", "--search|-S:", "--assignee|-a:", "--milestone|-m:", "--comments|-c"]
+global = ["--web|-w", "--state|-s:", "--limit|-L:", "--author|-A:", "--label|-l:", "--search|-S:", "--assignee|-a:", "--milestone|-m:", "--comments|-c", "--template|-t:"]
 
 [commands.gh.repo]
 arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["view", "list", "clone", "create", "delete", "fork", "archive", "unarchive", "edit", "rename", "sync", "set-default", "deploy-key", "gitignore", "license", "autolink"]
-global = ["--web|-w", "--limit|-L:", "--language|-l:", "--topic:", "--branch|-b:"]
+global = ["--web|-w", "--limit|-L:", "--language|-l:", "--topic:", "--branch|-b:", "--template|-t:"]
 
 [commands.gh.release]
 arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["list", "view", "create", "delete", "edit", "upload", "download", "delete-asset"]
-global = ["--web|-w", "--limit|-L:"]
+global = ["--web|-w", "--limit|-L:", "--template|-t:"]
 
 [commands.gh.run]
 arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["list", "view", "watch", "rerun", "cancel", "delete", "download"]
-global = ["--limit|-L:", "--workflow|-w:", "--branch|-b:", "--status|-s:", "--log", "--log-failed", "--job|-j:"]
+global = ["--limit|-L:", "--workflow|-w:", "--branch|-b:", "--status|-s:", "--log", "--log-failed", "--job|-j:", "--template|-t:"]
 
 [commands.gh.workflow]
 arguments = ["subcommand", "rest..."]
@@ -966,8 +995,26 @@ global = ["--repo|-R:", "--help|-h", "--output|-F:", "--per-page|-P:", "--page|-
 
 [commands.glab.mr]
 arguments = ["subcommand", "rest..."]
-argument.subcommand.words = ["list", "view", "diff", "approvers", "issues", "create", "merge", "close", "reopen", "update", "delete", "approve", "revoke", "rebase", "checkout", "todo", "subscribe", "unsubscribe", "for"]
-global = ["--author:", "--assignee|-a:", "--reviewer:", "--label|-l:", "--source-branch|-s:", "--target-branch|-t:", "--comments|-c", "--all|-A", "--mine|-M", "--merged|-m", "--closed", "--draft|-d"]
+argument.subcommand.words = ["diff", "approvers", "issues", "close", "reopen", "delete", "revoke", "rebase", "checkout", "todo", "subscribe", "unsubscribe", "for"]
+global = ["--web|-w"]
+
+[commands.glab.mr.list]
+arguments = ["--all|-A", "--assignee|-a:", "--author:", "--closed|-c", "--created-after:", "--created-before:", "--deployed-after:", "--deployed-before:", "--draft|-d", "--environment:", "--group|-g:", "--jq:", "--label|-l:", "--merged|-M", "--milestone|-m:", "--not-draft", "--not-label:", "--order|-o:", "--reviewer|-r:", "--search:", "--sort|-S:", "--source-branch|-s:", "--target-branch|-t:"]
+
+[commands.glab.mr.view]
+arguments = ["mr", "--comments|-c", "--jq:", "--resolved", "--system-logs|-s", "--unresolved"]
+
+[commands.glab.mr.create]
+arguments = ["--allow-collaboration", "--assignee|-a:", "--auto-merge", "--copy-issue-labels", "--create-source-branch", "--description|-d:", "--draft", "--fill|-f", "--fill-commit-body", "--head|-H:", "--label|-l:", "--milestone|-m:", "--no-editor", "--push", "--recover", "--related-issue|-i:", "--remove-source-branch", "--reviewer:", "--signoff", "--source-branch|-s:", "--squash-before-merge", "--target-branch|-b:", "--template:", "--title|-t:", "--wip", "--yes|-y"]
+
+[commands.glab.mr.merge]
+arguments = ["mr", "--auto-merge", "--message|-m:", "--rebase|-r", "--remove-source-branch|-d", "--sha:", "--squash|-s", "--squash-message:", "--yes|-y"]
+
+[commands.glab.mr.approve]
+arguments = ["mr", "--sha|-s:"]
+
+[commands.glab.mr.update]
+arguments = ["mr", "--assignee|-a:", "--description|-d:", "--draft", "--fill|-f", "--fill-commit-body", "--label|-l:", "--lock-discussion", "--milestone|-m:", "--ready|-r", "--remove-source-branch", "--reviewer:", "--squash-before-merge", "--target-branch:", "--title|-t:", "--unassign", "--unlabel|-u:", "--unlock-discussion", "--wip", "--yes|-y"]
 
 [commands.glab.mr.note]
 # An MR comment can be an Atlantis command that plans or applies, so only

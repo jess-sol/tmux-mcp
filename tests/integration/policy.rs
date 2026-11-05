@@ -270,6 +270,41 @@ async fn bash_sends_forge_writes_to_a_pane() {
     });
 }
 
+/// The grammars declare the options of the subcommands that write, so an
+/// allow for the tool is not undone by a doubtful path, and a body file is
+/// a path the command reads. A project allow lifts nothing on Bash.
+#[tokio::test]
+async fn forge_write_options_keep_the_parse_closed() {
+    let h = Harness::new().await;
+    h.project_policy(
+        r#"
+        [[rules]]
+        id = "forge-full"
+        command = ["gh", "glab"]
+        action = "allow"
+        "#,
+    );
+    decides!(h, {
+        "glab mr merge 73 --repo infra/mars --auto-merge=false --remove-source-branch --yes --message 'x'"
+            => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "glab mr create --fill --title t --description d --target-branch main -y"
+            => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "glab mr approve 73 --sha abc" => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "glab mr update 73 --ready --title t" => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "glab mr list --source-branch x --merged --draft" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "glab mr view 73 --comments --system-logs" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh pr merge --merge 12 -t subj -b body" => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "gh pr merge --merge 12 -F /etc/x" => (Ask, "outside-project", Deny, "forge-in-a-pane"),
+        "gh pr create --title x --body y --base main --draft"
+            => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "gh pr review --approve -b lgtm 12" => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "gh pr comment 12 -b hi" => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "gh pr edit 12 --title t --add-label x" => (Allow, "forge-full", Deny, "forge-in-a-pane"),
+        "gh pr list --state open -L 5 -t '{{.}}'" => (Allow, "forge-reads", Allow, "forge-reads"),
+        "gh issue list --json title -t '{{.title}}'" => (Allow, "forge-reads", Allow, "forge-reads"),
+    });
+}
+
 /// A function body may run wherever it is later called, so its commands meet
 /// the rules where it is defined, in a directory that cannot be known.
 #[tokio::test]
