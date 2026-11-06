@@ -858,15 +858,54 @@ arguments = ["subcommand", "rest..."]
 argument.subcommand.words = ["template", "lint", "show", "create", "package", "version"]
 global = ["--namespace|-n:", "--kube-context:", "--kubeconfig:", "--debug"]
 
+# Terraform and OpenTofu share one command line: Go flags, with `-chdir=DIR`
+# before the subcommand. The two tables are copies.
+
 [commands.terraform]
-parser = "gnu"                                        # `-chdir=` reads as Unknown flags
-arguments = ["subcommand", "rest..."]
-argument.subcommand.words = ["fmt", "validate", "version"]
+parser = "go"
+arguments = ["subcommand", "-chdir:", "-help", "-version"]
+argument.subcommand.words = ["version"]
+global = ["-no-color", "-compact-warnings", "-concise", "-consolidate-errors", "-consolidate-warnings", "-deprecation:"]
+marks.cwd = ["chdir"]
+
+[commands.terraform.fmt]
+arguments = ["paths...", "-check", "-diff", "-list", "-write", "-recursive"]
+argument.paths.default = ["."]
+marks.write = ["paths"]
+
+[commands.terraform.validate]
+arguments = ["path", "-json", "-json-into:", "-lint:", "-no-tests", "-test-directory:", "-var:", "-var-file:"]
+argument.path.default = ["."]
+marks.read = ["path", "test_directory", "var_file"]
+marks.write = ["json_into"]
+
+[commands.terraform.test]
+arguments = ["-cloud-run:", "-filter:", "-json", "-json-into:", "-junit-xml:", "-test-directory:", "-var:", "-var-file:", "-verbose"]
+marks.read = ["filter", "test_directory", "var_file"]
+marks.write = ["json_into", "junit_xml"]
 
 [commands.tofu]
-parser = "gnu"
-arguments = ["subcommand", "rest..."]
-argument.subcommand.words = ["fmt", "validate", "version"]
+parser = "go"
+arguments = ["subcommand", "-chdir:", "-help", "-version"]
+argument.subcommand.words = ["version"]
+global = ["-no-color", "-compact-warnings", "-concise", "-consolidate-errors", "-consolidate-warnings", "-deprecation:"]
+marks.cwd = ["chdir"]
+
+[commands.tofu.fmt]
+arguments = ["paths...", "-check", "-diff", "-list", "-write", "-recursive"]
+argument.paths.default = ["."]
+marks.write = ["paths"]
+
+[commands.tofu.validate]
+arguments = ["path", "-json", "-json-into:", "-lint:", "-no-tests", "-test-directory:", "-var:", "-var-file:"]
+argument.path.default = ["."]
+marks.read = ["path", "test_directory", "var_file"]
+marks.write = ["json_into"]
+
+[commands.tofu.test]
+arguments = ["-cloud-run:", "-filter:", "-json", "-json-into:", "-junit-xml:", "-test-directory:", "-var:", "-var-file:", "-verbose"]
+marks.read = ["filter", "test_directory", "var_file"]
+marks.write = ["json_into", "junit_xml"]
 
 # --- Forges: a table per group, so forge-reads reads the word below it ---
 # A group's `global` holds the flags its read forms share, so `gh issue list
@@ -1433,8 +1472,7 @@ command_run can't drive an interactive client session.'''
 id = "infra-in-a-pane"
 via = "bash"
 when = '''command.name in [
-  "kubectl", "helm", "k9s", "kubectx", "kubens", "argocd", "eksctl", "terraform", "tofu",
-  "pulumi", "ansible", "ansible-playbook", "packer", "vault", "aws", "gcloud", "gsutil", "bq",
+  "kubectl", "helm", "k9s", "kubectx", "kubens", "argocd", "eksctl", "pulumi", "ansible", "ansible-playbook", "packer", "vault", "aws", "gcloud", "gsutil", "bq",
   "az", "doctl", "flyctl",
 ]'''
 action = "deny"
@@ -1470,13 +1508,33 @@ when = 'subcommand in ["template", "lint", "show", "create", "package", "version
 action = "allow"
 exempts = ["infra-in-a-pane"]
 
+# Terraform's local forms pass through on Bash, so Claude Code's own
+# permissions decide them; the rest goes to a pane, as infra-in-a-pane sends
+# the other infrastructure tools. `terraform test` runs in a pane: its run
+# blocks apply for real unless the tests mock their providers.
+
 [[rules]]
-id = "terraform-local"
+id = "terraform-in-a-pane"
 via = "bash"
 command = ["terraform", "tofu"]
-when = 'subcommand in ["fmt", "validate", "version"]'
+when = '!(subcommand in ["fmt", "validate", "version"])'
+action = "deny"
+message = '''
+Run this in a tmux pane: it acts with the user's credentials and context, and
+the user can watch it and find it in their history.
+
+  command_run(command="{{ line }}")
+
+A command that asks for confirmation (terraform apply) waits for the user's
+answer in the pane. Use list_panes to pick the pane.'''
+
+# On tmux the project's own suite is the test author's call, as `cargo test` is.
+
+[[rules]]
+id = "terraform-local"
+command = ["terraform", "tofu"]
+when = 'subcommand in ["fmt", "validate", "test", "version"]'
 action = "allow"
-exempts = ["infra-in-a-pane"]
 
 [[rules]]
 id = "kubectl-kustomize"

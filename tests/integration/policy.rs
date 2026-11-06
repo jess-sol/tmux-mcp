@@ -224,9 +224,16 @@ async fn bash_sends_infrastructure_to_a_pane() {
         "helm lint ./chart" => (_, _, Allow, "helm-local"),
         "helm install web ./chart" => (_, _, Deny, "infra-in-a-pane"),
         "helm -n web upgrade web ./chart" => (_, _, Deny, "infra-in-a-pane"),
-        "terraform fmt -recursive" => (_, _, Allow, "terraform-local"),
-        "tofu validate" => (_, _, Allow, "terraform-local"),
-        "terraform apply" => (_, _, Deny, "infra-in-a-pane"),
+        "terraform fmt -recursive" => (Allow, "terraform-local", Pass, _),
+        "tofu validate" => (Allow, "terraform-local", Pass, _),
+        "tofu fmt -check -recursive . && tofu validate -no-color" => (Allow, "terraform-local", Pass, _),
+        "tofu -chdir=infra validate -json" => (Allow, "terraform-local", Pass, _),
+        "tofu fmt /opt/x" => (Ask, "outside-project", Pass, _),
+        "tofu test -no-color" => (Allow, "terraform-local", Deny, "terraform-in-a-pane"),
+        "tofu test -filter tests/x.tftest.hcl -var-file dev.tfvars -verbose" => (Allow, "terraform-local", Deny, "terraform-in-a-pane"),
+        "tofu plan" => (Ask, _, Deny, "terraform-in-a-pane"),
+        "terraform apply" => (Ask, _, Deny, "terraform-in-a-pane"),
+        "tofu $X" => (Ask, _, Deny, "terraform-in-a-pane"),
     });
 }
 
