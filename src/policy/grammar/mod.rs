@@ -103,7 +103,7 @@ struct Opt {
     /// Long spellings without their `--`.
     long: Vec<String>,
     short: Vec<char>,
-    /// The `find` parser's spellings: whole words, dash included.
+    /// The `find` and `go` parsers' spellings: whole words, dash included.
     single: Vec<String>,
     value: bool,
     /// Its value is a command up to `;` or `{} +` (`-exec...`).

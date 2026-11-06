@@ -178,6 +178,37 @@ fn the_find_parser_reads_single_dash_words_and_operators() {
     assert_eq!(parse(toml, "find a -newer b").reads, strings(&["a", "b"]));
 }
 
+#[test]
+fn the_go_parser_reads_single_dash_words_until_the_first_operand() {
+    let toml = r#"
+        [commands.tofu]
+        parser = "go"
+        arguments = ["subcommand", "-chdir:"]
+        marks.cwd = ["chdir"]
+
+        [commands.tofu.fmt]
+        arguments = ["paths...", "-check", "-write", "-no-color", "-deprecation:"]
+    "#;
+    check(
+        toml,
+        &[
+            ("tofu fmt -check -no-color .", "check", TriVal::Bool(true)),
+            ("tofu fmt -check -no-color .", "paths", strings(&["."])),
+            ("tofu fmt --check .", "check", TriVal::Bool(true)),
+            ("tofu fmt -write=false .", "write", TriVal::Bool(false)),
+            ("tofu fmt -write=true .", "write", TriVal::Bool(true)),
+            ("tofu -chdir=infra fmt", "chdir", strings(&["infra"])),
+            ("tofu fmt -deprecation=module:none .", "deprecation", strings(&["module:none"])),
+            ("tofu fmt -deprecation module:none .", "deprecation", strings(&["module:none"])),
+            ("tofu fmt . -check", "paths", strings(&[".", "-check"])),
+            ("tofu fmt . -check", "check", TriVal::Bool(false)),
+            ("tofu fmt -- -check", "paths", strings(&["-check"])),
+            ("tofu fmt -diff .", "paths", TriVal::Unknown),
+            ("tofu fmt -diff", "check", TriVal::Bool(false)),
+        ],
+    );
+}
+
 const CP: &str = r#"
     [commands.cp]
     parser = "gnu"

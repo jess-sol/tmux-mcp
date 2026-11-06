@@ -186,11 +186,13 @@ fn parse_spec(path: &str, spec: &str, parser: &Parser) -> Result<Item, String> {
                 }
                 let mut chars = rest.chars();
                 match (parser.name, chars.next(), chars.next()) {
-                    (ParserName::Find, ..) => opt.single.push(spelling.to_string()),
+                    (ParserName::Find | ParserName::Go, ..) => {
+                        opt.single.push(spelling.to_string())
+                    }
                     (_, Some(c), None) => opt.short.push(c),
                     _ => {
                         return Err(format!(
-                            "{path}: `{spelling}` is a single-dash word, which only the `find` parser reads"
+                            "{path}: `{spelling}` is a single-dash word, which only the `find` and `go` parsers read"
                         ));
                     }
                 }

@@ -3,6 +3,7 @@
 
 mod find;
 mod gnu;
+mod go;
 mod posix;
 
 use super::Opt;
@@ -55,6 +56,7 @@ impl Parser {
         }
         match self.name {
             ParserName::Find => find::is_option(text),
+            ParserName::Go => go::is_option(text),
             ParserName::Gnu | ParserName::Posix => gnu::is_option(text, at_start, active),
         }
     }
@@ -71,6 +73,7 @@ impl Parser {
     ) -> Read {
         match self.name {
             ParserName::Find => find::option(text, rest, active, scan, run),
+            ParserName::Go => go::option(text, rest, active, scan, run),
             ParserName::Gnu | ParserName::Posix => {
                 gnu::option(self, text, rest, at_start, active, scan, run)
             }
@@ -82,7 +85,7 @@ impl Parser {
     pub(super) fn operand(&self, scan: &mut Scan) -> bool {
         match self.name {
             ParserName::Find => find::operand(scan),
-            ParserName::Posix => posix::operand(scan),
+            ParserName::Posix | ParserName::Go => posix::operand(scan),
             ParserName::Gnu => true,
         }
     }

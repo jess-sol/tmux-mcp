@@ -140,7 +140,7 @@ the built-in `git` text and add the table to it.
 
 | Key | Meaning |
 |---|---|
-| `parser` | `"gnu"`, `"posix"`, `"find"`, or `{ name = "gnu", short_equals = true }`. Required at the top level; a sub-level inherits it |
+| `parser` | `"gnu"`, `"posix"`, `"find"`, `"go"`, or `{ name = "gnu", short_equals = true }`. Required at the top level; a sub-level inherits it |
 | `arguments` | List of argument strings and groups. These options parse only before this level's subcommand word |
 | `global` | Options (no operands, no groups) that parse at this level and every level below, before or after subcommand words |
 | `argument.<name>.words` | On `subcommand`: the words parsed by this level itself. On a `dash` option: the names its `-VALUE` form accepts |
@@ -175,7 +175,7 @@ Marks name only arguments declared at their own level (its `global` included).
 - A value option is a **list**: test `args.environment == ["local"]`, `"x" in args.include`, or `last(args.chdir)`. `args.environment == "local"` is Unknown, so an allow silently never fires.
 - A missing `:` turns the value into an operand, or into the subcommand word (`git -C dir log` would read `dir` as an unknown subcommand). An option with an optional value (`--color[=WHEN]`) is a flag.
 - Operands fill in order; one-word operands after a list operand take words from the end (`"files...", "dest"`). A leftover word makes every operand Unknown.
-- Single-dash multi-letter spellings (`-newer`) exist only under the `find` parser.
+- Single-dash multi-letter spellings (`-newer`, `-no-color`) exist only under the `find` and `go` parsers.
 
 ### Parsers
 
@@ -184,6 +184,7 @@ Marks name only arguments declared at their own level (its `global` included).
 | `gnu` | coreutils, git, cargo, most clap/cobra CLIs | Options anywhere until `--`; `-rf` clusters; `-n10`, `--lines=10` |
 | `posix` | anything that runs a command (`timeout`, `sudo`, `ssh`, `xargs`), and tools whose options end at the first operand | As `gnu`, but the first operand ends options |
 | `find` | `find` | Single-dash words; `( ) ! , -a -o -not -and -or` are operators |
+| `go` | Go `flag` tools (`terraform`, `tofu`) | Single-dash words, `--word` too; `-name=value` attaches, `-flag=false` unsets; no clusters; the first operand ends options |
 
 The one setting for `gnu`/`posix` is `short_equals = true` (`-e=x` gives `x`; pflag/cobra tools
 such as `helmfile`, `k3d`, and clap tools). A tool's `-5` or `-KILL` form is a property of the
@@ -356,7 +357,7 @@ grammars. The common ones:
 | ``unknown field `x`, expected one of …`` | Misspelled key, or a removed form (`[[wrappers]]`, `override`, `description`) |
 | ``missing field `id` `` / `` `action` `` | Every rule needs both |
 | `invalid type: sequence, expected struct GrammarConfig` (or `string "…"`) | Misspelled grammar key (`mark.read = […]`, `argumnets`, `parsr = "gnu"`) |
-| `data did not match any variant of untagged enum ParserConfig` | `parser` is not `"gnu"`, `"posix"`, `"find"` or a settings table (`"GNU"`) |
+| `data did not match any variant of untagged enum ParserConfig` | `parser` is not `"gnu"`, `"posix"`, `"find"`, `"go"` or a settings table (`"GNU"`) |
 | `` `args.x` is not declared by `cmd`; it declares: … `` | Read a name from that list, or declare it in the grammar |
 | `` `args` and `subcommand` need a `command` `` | Add `command`, or use `command.name` |
 | `` `git frob`: `frob` is not a subcommand that its grammar allows `` | Path word missing from `words` and sub-tables |

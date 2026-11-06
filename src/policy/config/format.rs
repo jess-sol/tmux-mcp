@@ -109,6 +109,7 @@ pub enum ParserName {
     Posix,
     Gnu,
     Find,
+    Go,
 }
 
 #[derive(Debug, Clone, Deserialize)]
