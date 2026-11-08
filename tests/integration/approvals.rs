@@ -3,6 +3,24 @@
 use crate::harness::Decision::{Ask, Deny};
 use crate::harness::Harness;
 
+/// Each command the hook asks about in a pane keeps its own approval: two
+/// asks in flight for one pane both run.
+#[tokio::test]
+async fn each_command_asked_for_a_pane_keeps_its_own_approval() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    std::fs::create_dir_all(h.dir().join("a")).expect("dir a");
+    std::fs::create_dir_all(h.dir().join("b")).expect("dir b");
+    assert_eq!(h.hook(&shell, "rm -r a").0, Ask);
+    assert_eq!(h.hook(&shell, "rm -r b").0, Ask);
+
+    let first = h.run_approved(&shell, "rm -r a").await;
+    let second = h.run_approved(&shell, "rm -r b").await;
+
+    assert!(first.ends_with("Exit code: 0"), "{first}");
+    assert!(second.ends_with("Exit code: 0"), "{second}");
+}
+
 /// A command that needs an approval and has none says so, and names the
 /// hook as the way to get one.
 #[tokio::test]

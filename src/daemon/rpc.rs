@@ -877,7 +877,11 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
         .send_command(pane_id, snapshot.version, command)
         .await?;
     if approved {
-        state.approvals.lock().await.consume(origin_pane, pane_id);
+        state
+            .approvals
+            .lock()
+            .await
+            .consume(origin_pane, pane_id, command);
     }
     let completion_deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let new_command_id = started_command(pane_id, &pane_handle, newest, rx).await?;
