@@ -3,6 +3,7 @@
 
 mod harness;
 
+mod approvals;
 mod command_read;
 mod command_run;
 mod daemon;

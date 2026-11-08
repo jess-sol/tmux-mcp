@@ -1233,7 +1233,14 @@ async fn handle_request_approval(
         (origin_pane, pane_handle)
     };
 
-    let ctx = policy::PaneContext::from(&*pane_handle.snapshot());
+    // An approval is for the pane as the person sees it: a pane that cannot
+    // take a command now is refused here, as command_run would refuse it.
+    let snapshot = pane_handle.snapshot();
+    if let Err(refusal) = check_pane(pane_id, &pane_handle, &snapshot).await {
+        return Ok(json!({"result": "deny", "rule": refusal.message}));
+    }
+
+    let ctx = policy::PaneContext::from(&*snapshot);
     let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
 
     let ctx_json = json!({

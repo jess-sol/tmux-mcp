@@ -683,18 +683,6 @@ async fn a_rule_meets_only_this_machine_and_the_shells_own_user_unless_it_says_o
     });
 }
 
-#[tokio::test]
-async fn a_command_typed_into_a_running_program_meets_no_rule_of_this_machine() {
-    let h = Harness::new().await;
-    let shell = h.shell().await;
-    h.start(&shell, "cat").await;
-
-    decides!(h, shell, {
-        "ls" => Ask,
-        "eval true" => Deny,
-    });
-}
-
 /// A temp path is not outside the project: `/tmp`, and `$TMPDIR` of the
 /// tmux-mcp process, which the daemon reads from its own environment. The
 /// guards that judge the command still count.
