@@ -3,6 +3,10 @@ use tmux_mcp::client::TmuxSession;
 use tmux_mcp::policy;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+/// How long the policy hook waits for the daemon: well inside Claude Code's
+/// own hook timeout, so the hook answers before it is killed.
+const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Parser)]
 #[command(name = "tmux-mcp")]
 #[command(about = "MCP server for interacting with tmux")]
@@ -185,18 +189,30 @@ async fn check_command_run(
 
     let session = TmuxSession::from_env()?;
     let origin_pane = std::env::var("TMUX_PANE").unwrap_or_default();
-    let client = tmux_mcp::client::DaemonClient::connect(&session).await?;
-
-    let result = client
-        .request(
-            "request_approval",
-            serde_json::json!({
-                "origin_pane": origin_pane,
-                "pane_id": pane_id,
-                "command": command,
-            }),
-        )
-        .await?;
+    // A hook Claude Code kills for running long lets the call through
+    // unjudged; one that gives up first denies it, with the reason.
+    let ask = async {
+        let client = tmux_mcp::client::DaemonClient::connect(&session).await?;
+        client
+            .request(
+                "request_approval",
+                serde_json::json!({
+                    "origin_pane": origin_pane,
+                    "pane_id": pane_id,
+                    "command": command,
+                }),
+            )
+            .await
+    };
+    let result = tokio::time::timeout(HOOK_TIMEOUT, ask)
+        .await
+        .map_err(|_| {
+            format!(
+                "The tmux-mcp daemon did not answer the policy check within {}s. Run the \
+                 command again.",
+                HOOK_TIMEOUT.as_secs()
+            )
+        })??;
 
     let decision = result["result"].as_str().unwrap_or("ask");
     let rule = result["rule"].as_str().unwrap_or("");
