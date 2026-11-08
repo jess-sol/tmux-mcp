@@ -562,6 +562,28 @@ async fn shown_screen(pane_handle: &PaneHandle) -> String {
 /// shell with integration answers at once.
 const MARKER_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The pane's snapshot once its markers say where its shell is. A shell that
+/// sends markers leaves the phase Unknown only until its next one: the
+/// prompt after a command ends, or the start of a command line just sent.
+/// This waits that out, up to `MARKER_TIMEOUT`, and returns the latest
+/// snapshot either way.
+async fn settled_snapshot(pane_handle: &PaneHandle) -> Arc<PaneSnapshot> {
+    let mut rx = pane_handle.subscribe_state();
+    let deadline = Instant::now() + MARKER_TIMEOUT;
+    loop {
+        let snapshot = pane_handle.snapshot();
+        let marker_due =
+            snapshot.phase == Fact::Unknown && snapshot.integration == Fact::Known(true);
+        if !marker_due || Instant::now() >= deadline {
+            return snapshot;
+        }
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
+}
+
 /// Probes OSC 133 by sending ` :` at the snapshot's *Pane version*. Returns
 /// the snapshot that answers it: at `Input` when the shell sends markers,
 /// with integration false when it sends none.
@@ -790,7 +812,7 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
     let read_params = ReadParams::from_json(params)?;
 
     // The probe types into the pane, so the pane's checks guard it too.
-    let mut snapshot = pane_handle.snapshot();
+    let mut snapshot = settled_snapshot(&pane_handle).await;
     check_pane(pane_id, &pane_handle, &snapshot).await?;
     if snapshot.phase == Fact::Unknown {
         snapshot = probe_osc133(pane_id, &pane_handle, state, &snapshot).await?;
@@ -823,7 +845,8 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
 
 /// Refuses a pane where a command line would not reach a shell at its
 /// prompt. An Unknown phase passes only while integration is Unknown too:
-/// the probe makes both known.
+/// the probe makes both known. `snapshot` is a settled one, so a marker
+/// still due has been waited for.
 async fn check_pane(
     pane_id: &str, pane_handle: &PaneHandle, snapshot: &PaneSnapshot,
 ) -> Result<(), RpcError> {
@@ -839,9 +862,7 @@ async fn check_pane(
         (Fact::Known(Osc133Phase::Executing { command }), _) => format!(
             "Pane {pane_id} is busy running '{command}'. Use command_read to check status or wait."
         ),
-        (Fact::Unknown, Fact::Known(true)) => {
-            format!("Pane {pane_id} is busy: a command line is on its way to its shell. Try again.")
-        }
+        (Fact::Unknown, Fact::Known(true)) => no_prompt(pane_id),
         (Fact::Unknown, Fact::Known(false)) => format!(
             "Pane {pane_id} sent no OSC 133 marker for the last command line. Its shell may \
              have no integration (inject_osc133 adds it), or the line may be unfinished, such \
@@ -865,6 +886,16 @@ async fn check_pane(
     };
     let screen = shown_screen(pane_handle).await;
     Err(RpcError::internal(format!("{refusal}\n{screen}")))
+}
+
+/// The refusal for a shell that sends markers but sent none in time since
+/// its last command line: neither its prompt nor the command's start.
+fn no_prompt(pane_id: &str) -> String {
+    format!(
+        "Pane {pane_id} has not drawn its prompt within {}s of its last command. Try again, or \
+         look at the screen below.",
+        MARKER_TIMEOUT.as_secs()
+    )
 }
 
 /// Refuses a pane in a mode: a mode takes typed keys, so they would never
@@ -1035,15 +1066,13 @@ async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Resul
             .ok_or_else(|| RpcError::invalid_params(format!("Unknown pane: {}", pane_id)))?
     };
 
-    let mut snapshot = pane_handle.snapshot();
+    let mut snapshot = settled_snapshot(&pane_handle).await;
     check_mode(pane_id, &snapshot)?;
     if snapshot.phase == Fact::Known(Osc133Phase::Input) {
         return Ok(json!({ "status": "already_active" }));
     }
     if snapshot.phase == Fact::Unknown && snapshot.integration == Fact::Known(true) {
-        return Err(RpcError::internal(format!(
-            "Pane {pane_id} is busy: a command line is on its way to its shell. Try again."
-        )));
+        return Err(RpcError::internal(no_prompt(pane_id)));
     }
     // A pane running a program is probed too: it may be a shell over ssh.
     if snapshot.integration != Fact::Known(false) {
@@ -1171,7 +1200,7 @@ async fn handle_request_approval(
 
     // An approval is for the pane as the person sees it: a pane that cannot
     // take a command now is refused here, as command_run would refuse it.
-    let snapshot = pane_handle.snapshot();
+    let snapshot = settled_snapshot(&pane_handle).await;
     if let Err(refusal) = check_pane(pane_id, &pane_handle, &snapshot).await {
         return Ok(json!({"result": "deny", "rule": refusal.message}));
     }

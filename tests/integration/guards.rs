@@ -62,6 +62,20 @@ async fn a_cleared_input_line_takes_commands_again() {
     assert!(reply.ends_with("1\n\nExit code: 0"), "{reply:?}");
 }
 
+/// A command sent as the last one ends waits for the shell's prompt rather
+/// than being refused: the prompt's marker is due.
+#[tokio::test]
+async fn a_command_right_after_another_waits_for_the_prompt() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    // Each prompt from now on takes half a second to draw.
+    h.run(&shell, "PS1='$(sleep 0.5)'\"$PS1\"").await;
+
+    let reply = h.run(&shell, "seq 1").await;
+
+    assert!(reply.ends_with("1\n\nExit code: 0"), "{reply:?}");
+}
+
 #[tokio::test]
 async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
     let h = Harness::new().await;
