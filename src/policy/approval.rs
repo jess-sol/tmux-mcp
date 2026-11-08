@@ -2,20 +2,18 @@
 //!
 //! When the hook calls `request_approval` and gets `Ask`, the daemon stores
 //! a PendingApproval. When `command_run` arrives, it verifies the approval
-//! is still valid (same command, same pane context, not expired), and
-//! consumes it once the command is sent.
+//! is still valid (same command, same pane context), and consumes it once
+//! the command is sent. An approval never expires: it runs one exact
+//! command once, in the pane context it was given for, so a prompt
+//! answered the next morning still runs.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use super::PaneContext;
-
-const APPROVAL_TTL_SECS: u64 = 1800;
 
 struct PendingApproval {
     command: String,
     ctx: PaneContext,
-    created_at: Instant,
 }
 
 #[derive(Default)]
@@ -31,19 +29,17 @@ impl ApprovalStore {
 
     /// Store an approval. Replaces any existing for the same (origin, pane).
     pub fn store(&mut self, origin: &str, pane_id: &str, command: &str, ctx: &PaneContext) {
-        self.cleanup();
         self.pending.insert(
             (origin.into(), pane_id.into()),
             PendingApproval {
                 command: command.into(),
                 ctx: ctx.clone(),
-                created_at: Instant::now(),
             },
         );
     }
 
-    /// Whether a pending approval covers this request: it exists, has not
-    /// expired, and names this command in this pane context.
+    /// Whether a pending approval covers this request: it exists, and names
+    /// this command in this pane context.
     pub fn verify(
         &self,
         origin: &str,
@@ -54,9 +50,6 @@ impl ApprovalStore {
         let key = (origin.to_string(), pane_id.to_string());
         let approval = self.pending.get(&key).ok_or("No pending approval")?;
 
-        if approval.created_at.elapsed().as_secs() >= APPROVAL_TTL_SECS {
-            return Err("Approval expired".into());
-        }
         if approval.command != command {
             return Err("Command changed since approval".into());
         }
@@ -70,11 +63,6 @@ impl ApprovalStore {
     pub fn consume(&mut self, origin: &str, pane_id: &str) {
         self.pending
             .remove(&(origin.to_string(), pane_id.to_string()));
-    }
-
-    fn cleanup(&mut self) {
-        self.pending
-            .retain(|_, a| a.created_at.elapsed().as_secs() < APPROVAL_TTL_SECS);
     }
 }
 
