@@ -627,9 +627,14 @@ struct PaneEntry {
     osc133_status: String,
 }
 
-/// What the OSC 133 phase says the pane is doing: "Busy", "Idle" or "Unknown".
-fn activity(phase: &Fact<Osc133Phase>) -> &'static str {
-    match phase {
+/// What the pane is doing: "Busy (full-screen)" while a full-screen program
+/// holds the screen, else what the OSC 133 phase says: "Busy", "Idle" or
+/// "Unknown".
+fn activity(snapshot: &PaneSnapshot) -> &'static str {
+    if snapshot.alternate_screen {
+        return "Busy (full-screen)";
+    }
+    match snapshot.phase {
         Fact::Known(Osc133Phase::Executing { .. }) => "Busy",
         Fact::Known(Osc133Phase::Input) => "Idle",
         _ => "Unknown",
@@ -688,7 +693,7 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
             osc_user: snapshot.user.clone(),
             osc_hostname: snapshot.host.clone().filter(|host| *host != local_hostname),
             foreground,
-            activity: activity(&snapshot.phase).to_string(),
+            activity: activity(snapshot).to_string(),
             mode: match &snapshot.mode {
                 Fact::Known(PaneMode::On(mode)) => Some(mode.clone()),
                 _ => None,

@@ -108,6 +108,8 @@ async fn a_full_screen_program_returns_the_screen_at_once() {
     assert!(reply.contains("Screen at version"), "{reply}");
     let prompt = reply.lines().last().unwrap_or_default();
     assert!(prompt == ":" || prompt.starts_with("lines 1-"), "less's prompt\n{reply}");
+    let row = h.list_panes().await.row(&shell);
+    assert!(row.contains("busy (full-screen)"), "{row}");
 
     h.press_key(&shell, "q").await;
     let after = h.read(&shell, Read::default().tail(1).timeout(5)).await;
