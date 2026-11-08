@@ -90,7 +90,7 @@ Use `/tmux-policy` to write grammars, rules and exemptions.
 
 ### Context-aware approval drift detection
 
-When the policy engine returns "ask" and a human approves, that approval is bound to a snapshot of the current context: the command text, hostname, cwd, user, and foreground process. If any of these change before execution (e.g., an `ssh` command changed the hostname, or `cd` moved the working directory), the approval is invalidated and must be re-requested. Approvals expire after 30 minutes.
+When the policy engine returns "ask" and a human approves, that approval is bound to the command text and the pane's context at the prompt: hostname, cwd and user. If any of these change before execution (e.g., an `ssh` command changed the hostname, or `cd` moved the working directory), the approval is refused and must be re-requested. An approval runs its command once and never expires, so a prompt answered the next morning still runs.
 
 ### Dual-mode security
 
