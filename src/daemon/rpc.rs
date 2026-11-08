@@ -11,7 +11,7 @@ use crate::pane::registry::{PaneHandle, PaneMode, PaneRegistry, Stale};
 use crate::pane::snapshot::{Fact, PaneSnapshot};
 use crate::pane::state::CommandRecord;
 use crate::policy;
-use crate::policy::approval::ApprovalStore;
+use crate::policy::approval::{ApprovalError, ApprovalStore};
 use crate::proc;
 use crate::tmux::connection::TmuxCommands;
 
@@ -985,15 +985,52 @@ async fn check_policy(
                 .lock()
                 .await
                 .verify(origin_pane, pane_id, command, &ctx);
-            verified.map(|()| true).map_err(|msg| RpcError {
+            verified.map(|()| true).map_err(|error| RpcError {
                 code: -32001,
                 message: format!(
-                    "Policy: {} (rule: {}). Install the tmux-mcp policy hook for interactive \
-                     approval, or update the policy.",
-                    msg,
+                    "Policy: {} (rule: {}).",
+                    unapproved(pane_id, &error),
                     result.reason()
                 ),
             })
+        }
+    }
+}
+
+/// Why a command that needs the person's approval has none, and what gets
+/// one.
+fn unapproved(pane_id: &str, error: &ApprovalError) -> String {
+    match error {
+        ApprovalError::Missing => format!(
+            "no approval is pending for this command in pane {pane_id}. The tmux-mcp policy \
+             hook asks the person and stores their answer: install it if it is missing, or \
+             run the command again if the hook timed out"
+        ),
+        ApprovalError::OtherCommand { approved } => format!(
+            "the person approved a different command in pane {pane_id}: {approved:?}. Run \
+             the command again to ask for this one"
+        ),
+        ApprovalError::ContextChanged { approved, live } => {
+            let changes = [
+                ("host", &approved.hostname, &live.hostname),
+                ("cwd", &approved.cwd, &live.cwd),
+                ("user", &approved.user, &live.user),
+            ]
+            .into_iter()
+            .filter(|(_, was, now)| was != now)
+            .map(|(name, was, now)| {
+                format!(
+                    "{name} {} to {}",
+                    was.as_deref().unwrap_or("unknown"),
+                    now.as_deref().unwrap_or("unknown")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+            format!(
+                "pane {pane_id} changed since the approval: {changes}. Run the command again to \
+                 ask anew"
+            )
         }
     }
 }

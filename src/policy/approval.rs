@@ -11,6 +11,21 @@ use std::collections::HashMap;
 
 use super::PaneContext;
 
+/// Why no stored approval covers a command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApprovalError {
+    /// The hook asked about nothing in this pane, or its approval was
+    /// consumed.
+    Missing,
+    /// The hook asked about another command in this pane: the newest.
+    OtherCommand { approved: String },
+    /// The pane is not where the person approved the command.
+    ContextChanged {
+        approved: Box<PaneContext>,
+        live: Box<PaneContext>,
+    },
+}
+
 struct PendingApproval {
     command: String,
     ctx: PaneContext,
@@ -38,23 +53,28 @@ impl ApprovalStore {
         );
     }
 
-    /// Whether a pending approval covers this request: it exists, and names
-    /// this command in this pane context.
+    /// Whether a pending approval covers this request: it exists, names this
+    /// command, and was given in this pane context.
     pub fn verify(
         &self,
         origin: &str,
         pane_id: &str,
         command: &str,
         live_ctx: &PaneContext,
-    ) -> Result<(), String> {
+    ) -> Result<(), ApprovalError> {
         let key = (origin.to_string(), pane_id.to_string());
-        let approval = self.pending.get(&key).ok_or("No pending approval")?;
+        let approval = self.pending.get(&key).ok_or(ApprovalError::Missing)?;
 
         if approval.command != command {
-            return Err("Command changed since approval".into());
+            return Err(ApprovalError::OtherCommand {
+                approved: approval.command.clone(),
+            });
         }
         if approval.ctx != *live_ctx {
-            return Err("Pane context changed since approval".into());
+            return Err(ApprovalError::ContextChanged {
+                approved: Box::new(approval.ctx.clone()),
+                live: Box::new(live_ctx.clone()),
+            });
         }
         Ok(())
     }
@@ -94,105 +114,72 @@ mod tests {
         assert!(store.verify("%0", "%1", "rm foo", &c).is_ok());
         store.consume("%0", "%1");
         assert_eq!(
-            store.verify("%0", "%1", "rm foo", &c).unwrap_err(),
-            "No pending approval"
+            store.verify("%0", "%1", "rm foo", &c),
+            Err(ApprovalError::Missing)
         );
     }
 
+    /// An approval is for one command in one pane from one origin. Another
+    /// command in that pane names the one the person approved.
     #[test]
-    fn command_mismatch() {
+    fn an_approval_covers_nothing_but_its_own_request() {
         let mut store = ApprovalStore::new();
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
-        assert_eq!(
-            store.verify("%0", "%1", "rm bar", &c).unwrap_err(),
-            "Command changed since approval"
-        );
+        let other = Err(ApprovalError::OtherCommand {
+            approved: "rm foo".into(),
+        });
+        for (origin, pane, command, want) in [
+            ("%99", "%1", "rm foo", Err(ApprovalError::Missing)),
+            ("%0", "%2", "rm foo", Err(ApprovalError::Missing)),
+            ("%0", "%1", "rm bar", other),
+        ] {
+            assert_eq!(
+                store.verify(origin, pane, command, &c),
+                want,
+                "{origin} {pane} {command:?}"
+            );
+        }
     }
 
+    /// A newer ask for a pane replaces the older one.
     #[test]
-    fn different_origin_cannot_consume() {
-        let mut store = ApprovalStore::new();
-        let c = ctx();
-        store.store("%0", "%1", "rm foo", &c);
-        assert_eq!(
-            store.verify("%99", "%1", "rm foo", &c).unwrap_err(),
-            "No pending approval"
-        );
-    }
-
-    #[test]
-    fn different_pane_cannot_consume() {
-        let mut store = ApprovalStore::new();
-        let c = ctx();
-        store.store("%0", "%1", "rm foo", &c);
-        assert_eq!(
-            store.verify("%0", "%2", "rm foo", &c).unwrap_err(),
-            "No pending approval"
-        );
-    }
-
-    #[test]
-    fn context_drift_hostname() {
-        let mut store = ApprovalStore::new();
-        let c = ctx();
-        store.store("%0", "%1", "rm foo", &c);
-        let mut drifted = c.clone();
-        drifted.hostname = Some("prod-server".into());
-        assert_eq!(
-            store.verify("%0", "%1", "rm foo", &drifted).unwrap_err(),
-            "Pane context changed since approval"
-        );
-    }
-
-    #[test]
-    fn context_drift_cwd() {
-        let mut store = ApprovalStore::new();
-        let c = ctx();
-        store.store("%0", "%1", "rm foo", &c);
-        let mut drifted = c.clone();
-        drifted.cwd = Some("/etc".into());
-        assert_eq!(
-            store.verify("%0", "%1", "rm foo", &drifted).unwrap_err(),
-            "Pane context changed since approval"
-        );
-    }
-
-    #[test]
-    fn context_drift_user() {
-        let mut store = ApprovalStore::new();
-        let c = ctx();
-        store.store("%0", "%1", "rm foo", &c);
-        let mut drifted = c.clone();
-        drifted.user = Some("root".into());
-        assert_eq!(
-            store.verify("%0", "%1", "rm foo", &drifted).unwrap_err(),
-            "Pane context changed since approval"
-        );
-    }
-
-    #[test]
-    fn store_replaces_existing() {
+    fn a_newer_ask_replaces_the_older() {
         let mut store = ApprovalStore::new();
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
         store.store("%0", "%1", "rm bar", &c);
-        // Old command should be gone
         assert_eq!(
-            store.verify("%0", "%1", "rm foo", &c).unwrap_err(),
-            "Command changed since approval"
+            store.verify("%0", "%1", "rm foo", &c),
+            Err(ApprovalError::OtherCommand {
+                approved: "rm bar".into()
+            })
         );
-        // New command should work
         assert!(store.verify("%0", "%1", "rm bar", &c).is_ok());
     }
 
+    /// A pane whose host, cwd or user moved since the approval refuses it,
+    /// naming both contexts.
     #[test]
-    fn no_pending_approval() {
-        let store = ApprovalStore::new();
+    fn a_context_that_drifted_refuses_with_both_contexts() {
+        let mut store = ApprovalStore::new();
         let c = ctx();
-        assert_eq!(
-            store.verify("%0", "%1", "rm foo", &c).unwrap_err(),
-            "No pending approval"
-        );
+        store.store("%0", "%1", "rm foo", &c);
+        let drifts: [fn(&mut PaneContext); 3] = [
+            |d| d.hostname = Some("prod-server".into()),
+            |d| d.cwd = Some("/etc".into()),
+            |d| d.user = Some("root".into()),
+        ];
+        for drift in drifts {
+            let mut live = c.clone();
+            drift(&mut live);
+            assert_eq!(
+                store.verify("%0", "%1", "rm foo", &live),
+                Err(ApprovalError::ContextChanged {
+                    approved: Box::new(c.clone()),
+                    live: Box::new(live.clone())
+                })
+            );
+        }
     }
 }
