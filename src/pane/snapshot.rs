@@ -26,6 +26,9 @@ pub struct PaneSnapshot {
     /// Whether the shell sends OSC 133 markers: true from any marker, false
     /// when a command line of the daemon's waited for one in vain.
     pub integration: Fact<bool>,
+    /// Whether a full-screen program (a pager, an editor) holds the screen:
+    /// the command's output pauses, and keys drive the program.
+    pub alternate_screen: bool,
     /// The text after the prompt.
     pub input: String,
     pub input_garbled: bool,

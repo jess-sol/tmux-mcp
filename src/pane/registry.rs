@@ -246,6 +246,7 @@ impl PaneState {
             mode: self.mode.clone(),
             phase: self.phase.clone(),
             integration: self.integration.clone(),
+            alternate_screen: self.processor.alternate_screen(),
             input: self.processor.read_input(),
             input_garbled: self.processor.input_looks_garbled(),
             cwd: terminal.cwd.clone().filter(|_| reported),
@@ -567,6 +568,8 @@ mod tests {
         let copy = pane.snapshot();
         pane.set_mode(copy_mode()).await;
         let same = pane.snapshot();
+        pane.apply_output(b"\x1b[?1049h").await;
+        let alternate = pane.snapshot();
 
         assert!(prompt.version > start, "{prompt:?}");
         assert_eq!(unchanged.version, prompt.version);
@@ -575,6 +578,8 @@ mod tests {
         assert!(copy.version > changing.version, "an Unknown became known");
         assert_eq!(copy.mode, copy_mode());
         assert_eq!(same.version, copy.version, "nothing changed");
+        assert!(alternate.version > same.version, "the alternate screen is a fact");
+        assert!(alternate.alternate_screen);
     }
 
     #[tokio::test]

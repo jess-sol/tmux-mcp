@@ -443,6 +443,17 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                 ));
             }
         }
+        "full-screen" => {
+            let screen = result["screen"].as_str().unwrap_or("");
+            if let Some(id) = command_id {
+                text.push_str(&format!(
+                    "\n[Command {id} opened a full-screen program (a pager, an editor): its output \
+                     pauses and keys go to the program. Drive it with press_key at the version \
+                     below; q leaves most pagers. Then command_read(command_id={id}) continues.]\n\
+                     {screen}"
+                ));
+            }
+        }
         "running" => {
             let version = result["version"].as_u64().unwrap_or(0);
             if let Some(id) = command_id {
@@ -763,7 +774,11 @@ impl ServerHandler for TmuxMcp {
                  Use timeout_secs=0 for commands that change shell state \
                  (sudo -i, ssh host, exit). \
                  If command_run says a pane is busy, use command_read with timeout_secs \
-                 to wait for output, or press_key C-c to cancel. \
+                 to wait for output, or press_key C-c to cancel. A command that opens a \
+                 full-screen program (a pager, an editor) returns at once with the screen: \
+                 drive the program with press_key (q leaves most pagers), then command_read \
+                 continues the command. Prefer commands that need no pager (git --no-pager, \
+                 PAGER=cat). \
                  Build separately from run — build output drowns run output.\n\n\
                  command_read: Stream output from running or completed commands. Use next \
                  to advance through output (advances cursor), head/tail to view ranges, \

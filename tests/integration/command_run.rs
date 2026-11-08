@@ -101,6 +101,32 @@ async fn a_bare_command_run_waits_for_the_command_to_finish() {
     assert!(reply.ends_with("3\n\nExit code: 0"), "{reply:?}");
 }
 
+/// A command that hands the pane to a full-screen program returns at once
+/// with the screen, for `press_key` to drive; what the program painted is
+/// not the command's output.
+#[tokio::test]
+async fn a_full_screen_program_returns_the_screen_at_once() {
+    let h = Harness::new().await;
+    let shell = h.shell().await;
+    let started = Instant::now();
+
+    let reply = h.run(&shell, "seq 100 | less").await;
+
+    assert!(started.elapsed() < Duration::from_secs(4), "{reply}");
+    assert!(reply.contains("full-screen program"), "{reply}");
+    assert!(reply.contains("Screen at version"), "{reply}");
+    let prompt = reply.lines().last().unwrap_or_default();
+    assert!(
+        prompt == ":" || prompt.starts_with("lines 1-"),
+        "less's prompt\n{reply}"
+    );
+
+    h.press_key(&shell, "q").await;
+    let after = h.read(&shell, Read::default().tail(1).timeout(5)).await;
+    assert!(after.contains("Exit code: 0"), "{after}");
+    assert!(after.contains("(0 lines)"), "no frame leaked\n{after}");
+}
+
 // The commands below sleep for 30 s, longer than the 10 s these tests allow,
 // so a reply in time means `command_run` returned early.
 

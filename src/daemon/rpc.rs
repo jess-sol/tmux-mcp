@@ -527,36 +527,47 @@ async fn wait_and_read(
                 return Ok(reply("completed", &result, offset));
             }
 
-            let mut offset = start;
-            let peeked = apply_read_params(&output, false, &mut offset, read_params);
-
-            let has_enough = if let Some(n) = required_lines {
-                // When search is active, count matches (not output lines
-                // which may be inflated by before/after context).
-                peeked.matched.unwrap_or(peeked.lines.len()) >= n && !peeked.context_pending
-            } else if is_tail || peeked.matched.is_some() {
-                false // tail / bare+search: wait for completion or timeout
-            } else {
-                // Bare read (no next/head/tail/search): policy decides.
-                matches!(bare_policy, BareReadPolicy::ReturnNow)
-            };
-
-            // A filled next/head window first waits out the settle; a bare
-            // read returns at once.
+            // A full-screen program holds the pane: no output comes until it
+            // leaves, so the screen is what the reader can act on. The
+            // settle lets the program paint its first frame.
             let now = tokio::time::Instant::now();
-            if has_enough
-                && (required_lines.is_none()
-                    || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
-            {
-                return Ok(reply("running", &peeked, offset));
-            }
-
-            // Timeout: tail returns nothing, the others what there is.
-            if now >= deadline {
-                if is_tail {
-                    return Ok(reply("running", &ReadResult::default(), start));
+            if snapshot.alternate_screen {
+                if now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)) {
+                    let mut full_screen = reply("full-screen", &ReadResult::default(), start);
+                    full_screen["screen"] = json!(shown_screen(pane_handle).await);
+                    return Ok(full_screen);
                 }
-                return Ok(reply("running", &peeked, offset));
+            } else {
+                let mut offset = start;
+                let peeked = apply_read_params(&output, false, &mut offset, read_params);
+
+                let has_enough = if let Some(n) = required_lines {
+                    // When search is active, count matches (not output lines
+                    // which may be inflated by before/after context).
+                    peeked.matched.unwrap_or(peeked.lines.len()) >= n && !peeked.context_pending
+                } else if is_tail || peeked.matched.is_some() {
+                    false // tail / bare+search: wait for completion or timeout
+                } else {
+                    // Bare read (no next/head/tail/search): policy decides.
+                    matches!(bare_policy, BareReadPolicy::ReturnNow)
+                };
+
+                // A filled next/head window first waits out the settle; a bare
+                // read returns at once.
+                if has_enough
+                    && (required_lines.is_none()
+                        || now >= *settle_until.get_or_insert((now + WINDOW_SETTLE).min(deadline)))
+                {
+                    return Ok(reply("running", &peeked, offset));
+                }
+
+                // Timeout: tail returns nothing, the others what there is.
+                if now >= deadline {
+                    if is_tail {
+                        return Ok(reply("running", &ReadResult::default(), start));
+                    }
+                    return Ok(reply("running", &peeked, offset));
+                }
             }
         }
 
@@ -896,6 +907,12 @@ async fn check_pane(
     check_mode(pane_id, snapshot)?;
     let input = &snapshot.input;
     let refusal = match (&snapshot.phase, &snapshot.integration) {
+        (Fact::Known(Osc133Phase::Executing { command }), _) if snapshot.alternate_screen => {
+            format!(
+                "Pane {pane_id} is in a full-screen program run by '{command}'. Drive it with \
+                 press_key: q leaves most pagers, then the command goes on."
+            )
+        }
         (Fact::Known(Osc133Phase::Executing { command }), _) => format!(
             "Pane {pane_id} is busy running '{command}'. Use command_read to check status or wait."
         ),

@@ -5,7 +5,7 @@ use alacritty_terminal::Term;
 /// structured command tracking.
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Config;
+use alacritty_terminal::term::{Config, TermMode};
 use vte::ansi::Processor;
 
 use crate::pane::osc::{OscEvent, OscMatch, find_next_osc_from};
@@ -36,18 +36,41 @@ impl Dimensions for PaneDimensions {
 // --- Output text ---
 
 /// The text a person sees in output: printed characters and line breaks,
-/// without escape sequences.
+/// without escape sequences. A frame a full-screen program paints on the
+/// alternate screen is not output, so the switch is followed here, at the
+/// character it happens.
 #[derive(Default)]
-struct Text(String);
+struct Text {
+    text: String,
+    alternate: bool,
+}
 
 impl vte::Perform for Text {
     fn print(&mut self, c: char) {
-        self.0.push(c);
+        if !self.alternate {
+            self.text.push(c);
+        }
     }
 
     fn execute(&mut self, byte: u8) {
-        if matches!(byte, b'\n' | b'\r' | b'\t') {
-            self.0.push(char::from(byte));
+        if !self.alternate && matches!(byte, b'\n' | b'\r' | b'\t') {
+            self.text.push(char::from(byte));
+        }
+    }
+
+    /// DECSET/DECRST of the alternate-screen modes, as alacritty_terminal
+    /// swaps on them.
+    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _: bool, action: char) {
+        if intermediates != b"?" {
+            return;
+        }
+        let alternate = match action {
+            'h' => true,
+            'l' => false,
+            _ => return,
+        };
+        if params.iter().any(|p| matches!(p, [47 | 1047 | 1049])) {
+            self.alternate = alternate;
         }
     }
 }
@@ -61,6 +84,7 @@ pub struct PaneProcessor {
     state: TerminalState,
     /// Reads a command's output as `Text`, across chunks.
     text_parser: vte::Parser,
+    text: Text,
 }
 
 impl PaneProcessor {
@@ -82,6 +106,7 @@ impl PaneProcessor {
             osc133: Osc133Parser::new(),
             state: TerminalState::new(),
             text_parser: vte::Parser::new(),
+            text: Text::default(),
         }
     }
 
@@ -266,6 +291,11 @@ impl PaneProcessor {
         self.term.grid().columns()
     }
 
+    /// Whether a full-screen program (a pager, an editor) holds the screen.
+    pub fn alternate_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
     /// Read all visible screen text as a vector of lines.
     pub fn screen_text(&self) -> Vec<String> {
         (0..self.screen_lines())
@@ -279,10 +309,10 @@ impl PaneProcessor {
     /// parser keeps its state between chunks, so a character or an escape
     /// sequence that a chunk boundary splits still reads whole.
     fn capture_text(&mut self, segment: &[u8]) {
-        let mut text = Text::default();
-        self.text_parser.advance(&mut text, segment);
-        if !text.0.is_empty() {
-            self.osc133.append_output(&text.0, &mut self.state);
+        self.text_parser.advance(&mut self.text, segment);
+        let text = std::mem::take(&mut self.text.text);
+        if !text.is_empty() {
+            self.osc133.append_output(&text, &mut self.state);
         }
     }
 
@@ -389,6 +419,18 @@ mod tests {
         let mut p = PaneProcessor::new(24, 80);
         p.process_chunk(b"\x1b[31mred\x1b[0m normal");
         assert_eq!(p.screen_line_text(0), "red normal");
+    }
+
+    /// DECSET 1049, the `smcup`/`rmcup` of every terminfo tmux offers, is the
+    /// alternate screen as alacritty_terminal tracks it.
+    #[test]
+    fn the_alternate_screen_follows_decset_1049() {
+        let mut p = PaneProcessor::new(24, 80);
+        assert!(!p.alternate_screen());
+        p.process_chunk(b"\x1b[?1049h");
+        assert!(p.alternate_screen());
+        p.process_chunk(b"\x1b[?1049l");
+        assert!(!p.alternate_screen());
     }
 
     // --- OSC boundary splitting ---
@@ -668,6 +710,20 @@ mod tests {
         assert_eq!(cmds[0].command, "echo hello");
         assert_eq!(cmds[0].exit_code, Some(0));
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
+    }
+
+    /// What a full-screen program paints on the alternate screen is not the
+    /// command's output: the output reads as it does without the program.
+    #[test]
+    fn frames_on_the_alternate_screen_are_not_output() {
+        let mut p = PaneProcessor::new(24, 80);
+        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\git log\x1b]133;C\x1b\\\x1b]133;E;git log\x1b\\");
+        p.process_chunk(b"\r\nbefore\r\n\x1b[?1049h\x1b[H\x1b[2J");
+        p.process_chunk(b"commit abc\r\n:");
+        p.process_chunk(b"\x1b[?1049lafter\r\n\x1b]133;D;0\x1b\\");
+
+        let id = p.state().recent_commands(1)[0].id;
+        assert_eq!(p.state().output(id), Some("\r\nbefore\r\nafter\r\n"));
     }
 
     // --- read_input / has_input_content ---
