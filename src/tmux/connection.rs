@@ -184,6 +184,13 @@ impl TmuxCommands {
         Ok(PaneMode::from_format(&output))
     }
 
+    /// Query whether a full-screen program holds a pane's screen.
+    pub async fn query_alternate_screen(&mut self, pane_id: &str) -> Result<bool> {
+        let output =
+            self.execute(&format!("display-message -t {pane_id} -p '#{{alternate_on}}'")).await?;
+        Ok(output.trim() == "1")
+    }
+
     /// Query the shell PID of a pane.
     pub async fn query_pane_pid(&mut self, pane_id: &str) -> Result<u32> {
         let output =

@@ -853,12 +853,10 @@ async fn check_pane(
     check_mode(pane_id, snapshot)?;
     let input = &snapshot.input;
     let refusal = match (&snapshot.phase, &snapshot.integration) {
-        (Fact::Known(Osc133Phase::Executing { command }), _) if snapshot.alternate_screen => {
-            format!(
-                "Pane {pane_id} is in a full-screen program run by '{command}'. Drive it with \
-                 press_key: q leaves most pagers, then the command goes on."
-            )
-        }
+        _ if snapshot.alternate_screen => format!(
+            "Pane {pane_id} is in a full-screen program (a pager, an editor), which takes its \
+             keys. Drive it with press_key: q leaves most pagers."
+        ),
         (Fact::Known(Osc133Phase::Executing { command }), _) => format!(
             "Pane {pane_id} is busy running '{command}'. Use command_read to check status or wait."
         ),

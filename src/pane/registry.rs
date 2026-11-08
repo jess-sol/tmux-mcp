@@ -175,6 +175,13 @@ impl TrackedPane {
         self.publish(&state);
     }
 
+    /// Puts the pane on the alternate screen, where a full-screen program
+    /// that started before the daemon joined the pane left it. Later switches
+    /// arrive in the pane's output.
+    pub async fn enter_alternate_screen(&self) {
+        self.apply_output(b"\x1b[?1049h").await;
+    }
+
     /// The shell's process, as tmux gives it.
     pub async fn set_pid(&self, pid: u32) {
         let mut state = self.state.lock().await;

@@ -202,6 +202,17 @@ async fn execute_actions(
                 if let Some(handle) = registry.get_handle(pane_id) {
                     handle.set_mode(queried_mode(pane_id, mode)).await;
                 }
+                match conn.query_alternate_screen(pane_id).await {
+                    Ok(true) => {
+                        if let Some(handle) = registry.get_handle(pane_id) {
+                            handle.enter_alternate_screen().await;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to query alternate screen for {}: {}", pane_id, e)
+                    }
+                }
             }
             SyncAction::PaneRemoved { pane_id } => {
                 tracing::info!("Pane {} removed", pane_id);

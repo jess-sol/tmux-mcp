@@ -19,6 +19,21 @@ async fn a_newer_client_replaces_an_older_daemon() {
     assert!(older.contains("Daemon closed connection"), "{older}");
 }
 
+/// A daemon that starts while a full-screen program holds a pane learns so
+/// from tmux, and refuses the pane rather than typing into the program.
+#[tokio::test]
+async fn a_new_daemon_knows_a_pane_a_full_screen_program_holds() {
+    let h = Harness::claiming("0.0.1").await;
+    let shell = h.shell().await;
+    h.run_approved(&shell, "seq 100 | less").await;
+
+    // The hook runs this build, which replaces the older daemon.
+    let (decision, reason) = h.hook(&shell, "seq 1");
+
+    assert_eq!(decision, Decision::Deny);
+    assert!(reason.contains("full-screen program"), "{reason}");
+}
+
 /// An older client leaves a newer daemon running and says why it stops.
 #[tokio::test]
 async fn an_older_client_refuses_a_newer_daemon() {
