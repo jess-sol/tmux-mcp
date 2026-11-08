@@ -133,10 +133,7 @@ async fn the_hook_judges_a_bash_call_outside_tmux() {
 
     assert_eq!(h.bash("frobnicate"), (Pass, String::new()));
     assert_eq!(denied, Deny);
-    assert!(
-        reason.starts_with("prefer-tmux: ") && reason.contains("command_run"),
-        "{reason}"
-    );
+    assert!(reason.starts_with("prefer-tmux: ") && reason.contains("command_run"), "{reason}");
     assert_eq!(h.other_tool(), None);
 }
 
@@ -594,11 +591,7 @@ async fn a_policy_that_does_not_load_denies_every_command() {
     let mended = h.decision(&shell, "ls");
 
     assert_eq!(refused.0, Deny);
-    assert!(
-        refused.1.contains("commands.deploy") && refused.1.contains("parser"),
-        "{}",
-        refused.1
-    );
+    assert!(refused.1.contains("commands.deploy") && refused.1.contains("parser"), "{}", refused.1);
     assert_eq!(mended, Allow);
 }
 
@@ -816,10 +809,8 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
     let h = Harness::new().await;
     let shell = h.shell().await;
     let dir = h.dir().display().to_string();
-    let (cd_dir, cd_dir_slash) = (
-        format!("cd {dir} && cargo test"),
-        format!("cd {dir}/ && cargo test"),
-    );
+    let (cd_dir, cd_dir_slash) =
+        (format!("cd {dir} && cargo test"), format!("cd {dir}/ && cargo test"));
     let cd_alone = format!("cd {dir}");
     let rows: Vec<(&str, Option<&str>)> = vec![
         ("ls | tail -5", Some("tail=5")),
@@ -847,10 +838,7 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
             Some("command_run(command=\"helmfile -e localsync\")"),
         ),
         ("make; echo $?", Some("command_run(command=\"make\")")),
-        (
-            "cargo test && echo \"rc=$?\"",
-            Some("command_run(command=\"cargo test\")"),
-        ),
+        ("cargo test && echo \"rc=$?\"", Some("command_run(command=\"cargo test\")")),
         (
             "helmfile -e localsync 2>&1; echo \"HELMFILE_EXIT=$?\"",
             Some("command_run(command=\"helmfile -e localsync 2>&1\")"),
@@ -866,10 +854,7 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
         ("make; [ $? -eq 0 ] && echo \"$msg\"", None),
         ("make; RC=$?; echo $RC", None),
         ("echo \"=== Building ===\"", Some("constant text")),
-        (
-            "echo \"Building\"; cargo build",
-            Some("Marker:    echo \"Building\""),
-        ),
+        ("echo \"Building\"; cargo build", Some("Marker:    echo \"Building\"")),
         ("cargo build; echo done", Some("constant-echo")),
         ("echo \"start\" && cargo build", Some("constant-echo")),
         ("printf '=== %s ===\\n' Building", Some("constant-echo")),
@@ -927,10 +912,7 @@ async fn a_lint_denies_with_a_message_that_says_how_to_fix_the_command() {
                 decision == Deny && reason.contains(text),
                 "{command}: {decision:?} {reason}"
             ),
-            None => assert!(
-                !LINTS.iter().any(|id| reason.contains(id)),
-                "{command}: {reason}"
-            ),
+            None => assert!(!LINTS.iter().any(|id| reason.contains(id)), "{command}: {reason}"),
         }
     }
 }

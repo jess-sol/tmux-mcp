@@ -24,16 +24,14 @@ pub(crate) type CommandRegistration = (String, oneshot::Sender<CommandResponse>)
 /// Spawn the reader task. Returns immediately; the task runs until the
 /// stdout stream closes or the command channel drops.
 pub(crate) fn spawn_reader(
-    stdout: tokio::process::ChildStdout,
-    cmd_rx: mpsc::Receiver<CommandRegistration>,
+    stdout: tokio::process::ChildStdout, cmd_rx: mpsc::Receiver<CommandRegistration>,
     notification_tx: mpsc::Sender<Notification>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(reader_loop(stdout, cmd_rx, notification_tx))
 }
 
 async fn reader_loop(
-    stdout: tokio::process::ChildStdout,
-    mut cmd_rx: mpsc::Receiver<CommandRegistration>,
+    stdout: tokio::process::ChildStdout, mut cmd_rx: mpsc::Receiver<CommandRegistration>,
     notification_tx: mpsc::Sender<Notification>,
 ) {
     let mut reader = tokio::io::BufReader::new(stdout);

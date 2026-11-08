@@ -46,8 +46,7 @@ pub(crate) enum ReaderMessage {
 ///
 /// Returns `Some(message)` when a complete response or notification is ready.
 pub(crate) fn parse_line(
-    line: &str,
-    current_block: &mut Option<Vec<String>>,
+    line: &str, current_block: &mut Option<Vec<String>>,
 ) -> Option<ReaderMessage> {
     // %begin starts a new response block
     if line.starts_with("%begin ") {
@@ -107,28 +106,24 @@ pub fn parse_notification(line: &str) -> Notification {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
 
     match parts.first().copied() {
-        Some("%window-close") if parts.len() >= 2 => Notification::WindowClose {
-            window_id: parts[1].to_string(),
-        },
-        Some("%session-closed") if parts.len() >= 2 => Notification::SessionClose {
-            session_id: parts[1].to_string(),
-        },
+        Some("%window-close") if parts.len() >= 2 => {
+            Notification::WindowClose { window_id: parts[1].to_string() }
+        }
+        Some("%session-closed") if parts.len() >= 2 => {
+            Notification::SessionClose { session_id: parts[1].to_string() }
+        }
         Some("%layout-change") if parts.len() >= 3 => Notification::LayoutChange {
             window_id: parts[1].to_string(),
             layout: parts[2].to_string(),
         },
-        Some("%window-add") if parts.len() >= 2 => Notification::WindowAdd {
-            window_id: parts[1].to_string(),
-        },
-        Some("%pane-mode-changed") if parts.len() >= 2 => Notification::PaneModeChanged {
-            pane_id: parts[1].to_string(),
-        },
-        Some("%exit") => Notification::Exit {
-            reason: parts.get(1).map(|s| s.to_string()),
-        },
-        _ => Notification::Other {
-            line: line.to_string(),
-        },
+        Some("%window-add") if parts.len() >= 2 => {
+            Notification::WindowAdd { window_id: parts[1].to_string() }
+        }
+        Some("%pane-mode-changed") if parts.len() >= 2 => {
+            Notification::PaneModeChanged { pane_id: parts[1].to_string() }
+        }
+        Some("%exit") => Notification::Exit { reason: parts.get(1).map(|s| s.to_string()) },
+        _ => Notification::Other { line: line.to_string() },
     }
 }
 
@@ -139,10 +134,7 @@ pub(crate) fn parse_output(line: &[u8]) -> Option<Notification> {
     let rest = line.strip_prefix(b"%output ")?;
     let space = rest.iter().position(|&b| b == b' ')?;
     let pane_id = String::from_utf8_lossy(&rest[..space]).into_owned();
-    Some(Notification::Output {
-        pane_id,
-        data: rest[space + 1..].to_vec(),
-    })
+    Some(Notification::Output { pane_id, data: rest[space + 1..].to_vec() })
 }
 
 #[cfg(test)]
@@ -168,10 +160,7 @@ mod tests {
         let n = parse_notification("%output %42 data here");
         assert_eq!(
             n,
-            Notification::Output {
-                pane_id: "%42".to_string(),
-                data: b"data here".to_vec(),
-            }
+            Notification::Output { pane_id: "%42".to_string(), data: b"data here".to_vec() }
         );
     }
 
@@ -179,35 +168,19 @@ mod tests {
     fn parse_output_empty_data() {
         // %output with pane_id but no data after the space
         let n = parse_notification("%output %0 ");
-        assert_eq!(
-            n,
-            Notification::Output {
-                pane_id: "%0".to_string(),
-                data: Vec::new(),
-            }
-        );
+        assert_eq!(n, Notification::Output { pane_id: "%0".to_string(), data: Vec::new() });
     }
 
     #[test]
     fn parse_window_close() {
         let n = parse_notification("%window-close @1");
-        assert_eq!(
-            n,
-            Notification::WindowClose {
-                window_id: "@1".to_string()
-            }
-        );
+        assert_eq!(n, Notification::WindowClose { window_id: "@1".to_string() });
     }
 
     #[test]
     fn parse_session_closed() {
         let n = parse_notification("%session-closed $0");
-        assert_eq!(
-            n,
-            Notification::SessionClose {
-                session_id: "$0".to_string()
-            }
-        );
+        assert_eq!(n, Notification::SessionClose { session_id: "$0".to_string() });
     }
 
     #[test]
@@ -219,34 +192,19 @@ mod tests {
     #[test]
     fn parse_exit_with_reason() {
         let n = parse_notification("%exit server-exited");
-        assert_eq!(
-            n,
-            Notification::Exit {
-                reason: Some("server-exited".to_string())
-            }
-        );
+        assert_eq!(n, Notification::Exit { reason: Some("server-exited".to_string()) });
     }
 
     #[test]
     fn parse_window_add() {
         let n = parse_notification("%window-add @5");
-        assert_eq!(
-            n,
-            Notification::WindowAdd {
-                window_id: "@5".to_string()
-            }
-        );
+        assert_eq!(n, Notification::WindowAdd { window_id: "@5".to_string() });
     }
 
     #[test]
     fn parse_pane_mode_changed() {
         let n = parse_notification("%pane-mode-changed %3");
-        assert_eq!(
-            n,
-            Notification::PaneModeChanged {
-                pane_id: "%3".to_string()
-            }
-        );
+        assert_eq!(n, Notification::PaneModeChanged { pane_id: "%3".to_string() });
     }
 
     #[test]
@@ -330,10 +288,7 @@ mod tests {
         let mut block = None;
         parse_line("%begin 123 0", &mut block);
         let msg = parse_line("%output %0 data", &mut block).unwrap();
-        assert!(matches!(
-            msg,
-            ReaderMessage::Notification(Notification::Output { .. })
-        ));
+        assert!(matches!(msg, ReaderMessage::Notification(Notification::Output { .. })));
         // Block is still open
         assert!(block.is_some());
         let msg = parse_line("%end 123 0", &mut block).unwrap();
@@ -363,10 +318,7 @@ mod tests {
     fn parse_line_exit_notification() {
         let mut block = None;
         let msg = parse_line("%exit", &mut block).unwrap();
-        assert!(matches!(
-            msg,
-            ReaderMessage::Notification(Notification::Exit { reason: None })
-        ));
+        assert!(matches!(msg, ReaderMessage::Notification(Notification::Exit { reason: None })));
     }
 
     #[test]
@@ -374,10 +326,7 @@ mod tests {
         let mut block = None;
         parse_line("%begin 1 0", &mut block);
         let msg = parse_line("%window-close @3", &mut block).unwrap();
-        assert!(matches!(
-            msg,
-            ReaderMessage::Notification(Notification::WindowClose { .. })
-        ));
+        assert!(matches!(msg, ReaderMessage::Notification(Notification::WindowClose { .. })));
         assert!(block.is_some()); // block still open
     }
 }

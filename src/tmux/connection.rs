@@ -86,9 +86,7 @@ pub async fn connect(session: &TmuxSession) -> Result<(TmuxCommands, TmuxNotific
         session: session.target(),
     };
 
-    let notifications = TmuxNotifications {
-        rx: notification_rx,
-    };
+    let notifications = TmuxNotifications { rx: notification_rx };
 
     // Consume initial attach response. tmux -C implicitly runs attach,
     // which sends a response block we need to drain.
@@ -120,19 +118,14 @@ impl TmuxCommands {
         tokio::task::yield_now().await;
 
         // Write command to tmux stdin
-        self.stdin
-            .write_all(format!("{}\n", command).as_bytes())
-            .await
-            .context(WriteSnafu)?;
+        self.stdin.write_all(format!("{}\n", command).as_bytes()).await.context(WriteSnafu)?;
         self.stdin.flush().await.context(WriteSnafu)?;
 
         // Wait for response
         let response = response_rx.await.map_err(|_| Error::ConnectionClosed)?;
 
         if response.is_error {
-            Err(Error::CommandFailed {
-                message: response.output,
-            })
+            Err(Error::CommandFailed { message: response.output })
         } else {
             Ok(response.output)
         }
@@ -143,8 +136,7 @@ impl TmuxCommands {
         let lines: Vec<&str> = keys.split('\n').collect();
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
-                self.execute(&format!("send-keys -t {} C-j", target))
-                    .await?;
+                self.execute(&format!("send-keys -t {} C-j", target)).await?;
             }
             if !line.is_empty() {
                 self.execute(&format!(
@@ -161,8 +153,7 @@ impl TmuxCommands {
     /// Send keys followed by Enter.
     pub async fn send_command(&mut self, target: &str, command: &str) -> Result<()> {
         self.send_keys(target, command).await?;
-        self.execute(&format!("send-keys -t {} Enter", target))
-            .await?;
+        self.execute(&format!("send-keys -t {} Enter", target)).await?;
         Ok(())
     }
 
@@ -172,47 +163,34 @@ impl TmuxCommands {
         // Quoted, so `;` or `#` in keys cannot end or comment out the tmux
         // command; tmux strips the quotes and still reads a key name.
         let keys = crate::parse::escape::shell_escape(keys);
-        self.execute(&format!("send-keys -t {} {}", target, keys))
-            .await?;
+        self.execute(&format!("send-keys -t {} {}", target, keys)).await?;
         Ok(())
     }
 
     /// Enable %output notifications for a pane.
     pub async fn enable_pane_output(&mut self, pane_id: &str) -> Result<()> {
-        self.execute(&format!("refresh-client -A '{}:on'", pane_id))
-            .await
-            .map(|_| ())
+        self.execute(&format!("refresh-client -A '{}:on'", pane_id)).await.map(|_| ())
     }
 
     /// Disable %output notifications for a pane.
     pub async fn disable_pane_output(&mut self, pane_id: &str) -> Result<()> {
-        self.execute(&format!("refresh-client -A '{}:off'", pane_id))
-            .await
-            .map(|_| ())
+        self.execute(&format!("refresh-client -A '{}:off'", pane_id)).await.map(|_| ())
     }
 
     /// Query the mode a pane is in.
     pub async fn query_pane_mode(&mut self, pane_id: &str) -> Result<PaneMode> {
-        let output = self
-            .execute(&format!("display-message -t {pane_id} -p '#{{pane_mode}}'"))
-            .await?;
+        let output =
+            self.execute(&format!("display-message -t {pane_id} -p '#{{pane_mode}}'")).await?;
         Ok(PaneMode::from_format(&output))
     }
 
     /// Query the shell PID of a pane.
     pub async fn query_pane_pid(&mut self, pane_id: &str) -> Result<u32> {
-        let output = self
-            .execute(&format!(
-                "display-message -t {} -p '#{{pane_pid}}'",
-                pane_id
-            ))
-            .await?;
-        output
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| Error::CommandFailed {
-                message: format!("invalid pane_pid: {}", output.trim()),
-            })
+        let output =
+            self.execute(&format!("display-message -t {} -p '#{{pane_pid}}'", pane_id)).await?;
+        output.trim().parse::<u32>().map_err(|_| Error::CommandFailed {
+            message: format!("invalid pane_pid: {}", output.trim()),
+        })
     }
 }
 

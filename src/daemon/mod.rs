@@ -35,11 +35,7 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
         .await?;
     let (windows, panes) = parse_bootstrap(&output);
 
-    tracing::info!(
-        "Bootstrap: {} windows, {} panes",
-        windows.len(),
-        panes.len(),
-    );
+    tracing::info!("Bootstrap: {} windows, {} panes", windows.len(), panes.len(),);
 
     // Seed registry from layouts
     for win in &windows {
@@ -90,9 +86,7 @@ pub async fn run(session: &TmuxSession) -> Result<(), Box<dyn std::error::Error 
 }
 
 async fn event_loop(
-    mut notifications: TmuxNotifications,
-    state: Arc<DaemonState>,
-    cancel: CancellationToken,
+    mut notifications: TmuxNotifications, state: Arc<DaemonState>, cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let notification = tokio::select! {
@@ -182,9 +176,7 @@ fn queried_mode(pane_id: &str, mode: connection::Result<PaneMode>) -> Fact<PaneM
 
 /// Execute sync actions (used during bootstrap and topology changes).
 async fn execute_actions(
-    conn: &mut TmuxCommands,
-    registry: &mut PaneRegistry,
-    actions: &[SyncAction],
+    conn: &mut TmuxCommands, registry: &mut PaneRegistry, actions: &[SyncAction],
 ) {
     for action in actions {
         match action {
@@ -217,11 +209,7 @@ async fn execute_actions(
                     tracing::warn!("Failed to disable output for {}: {}", pane_id, e);
                 }
             }
-            SyncAction::Resized {
-                pane_id,
-                width,
-                height,
-            } => {
+            SyncAction::Resized { pane_id, width, height } => {
                 tracing::debug!("Pane {} resized to {}x{}", pane_id, width, height);
             }
         }
@@ -262,10 +250,7 @@ fn parse_bootstrap(output: &str) -> (Vec<BootstrapWindow>, Vec<BootstrapPane>) {
         let layout = parts[3];
 
         if let Ok(pid) = pid_str.parse::<u32>() {
-            panes.push(BootstrapPane {
-                pane_id: pane_id.to_string(),
-                pid,
-            });
+            panes.push(BootstrapPane { pane_id: pane_id.to_string(), pid });
         }
 
         if seen_windows.insert(window_id.to_string()) {

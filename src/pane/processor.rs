@@ -94,10 +94,7 @@ impl PaneProcessor {
         // A pane that grows pulls lines back from history, as tmux does, so
         // the history covers one resize; tmux's own `history-limit` must not
         // be smaller.
-        let config = Config {
-            scrolling_history: 1000,
-            ..Config::default()
-        };
+        let config = Config { scrolling_history: 1000, ..Config::default() };
         let term = Term::new(config, &dims, VoidListener);
         let processor = Processor::new();
         Self {
@@ -236,17 +233,10 @@ impl PaneProcessor {
         let (cursor_line, cursor_col) = self.cursor_position();
         (start_line..=cursor_line).any(|line| {
             let from = if line == start_line { start_col } else { 0 };
-            let to = if line == cursor_line {
-                cursor_col
-            } else {
-                usize::MAX
-            };
+            let to = if line == cursor_line { cursor_col } else { usize::MAX };
             // One char per column, as in `read_input`.
             let text = self.screen_line_text(line);
-            text.chars()
-                .skip(from)
-                .take(to.saturating_sub(from))
-                .any(|c| !c.is_whitespace())
+            text.chars().skip(from).take(to.saturating_sub(from)).any(|c| !c.is_whitespace())
         })
     }
 
@@ -298,9 +288,7 @@ impl PaneProcessor {
 
     /// Read all visible screen text as a vector of lines.
     pub fn screen_text(&self) -> Vec<String> {
-        (0..self.screen_lines())
-            .map(|line| self.screen_line_text(line))
-            .collect()
+        (0..self.screen_lines()).map(|line| self.screen_line_text(line)).collect()
     }
 
     // --- Internal ---
@@ -440,20 +428,8 @@ mod tests {
         let mut p = PaneProcessor::new(24, 80);
         let events = p.process_chunk(b"\x1b]133;A\x07$ \x1b]133;B\x07");
         assert_eq!(events.len(), 2);
-        assert_eq!(
-            events[0].event,
-            OscEvent::Osc133 {
-                marker: b'A',
-                param: None
-            }
-        );
-        assert_eq!(
-            events[1].event,
-            OscEvent::Osc133 {
-                marker: b'B',
-                param: None
-            }
-        );
+        assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'A', param: None });
+        assert_eq!(events[1].event, OscEvent::Osc133 { marker: b'B', param: None });
     }
 
     #[test]
@@ -463,13 +439,7 @@ mod tests {
         let events = p.process_chunk(b"ls -la\x1b]133;C\x07");
         assert_eq!(p.screen_line_text(0), "$ ls -la");
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].event,
-            OscEvent::Osc133 {
-                marker: b'C',
-                param: None
-            }
-        );
+        assert_eq!(events[0].event, OscEvent::Osc133 { marker: b'C', param: None });
     }
 
     #[test]
@@ -486,12 +456,7 @@ mod tests {
         let mut p = PaneProcessor::new(24, 80);
         let events = p.process_chunk(b"\x1b]7;file://myhost/home/user\x07");
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].event,
-            OscEvent::Osc7 {
-                uri: "file://myhost/home/user".to_string()
-            }
-        );
+        assert_eq!(events[0].event, OscEvent::Osc7 { uri: "file://myhost/home/user".to_string() });
         // State should be updated
         assert_eq!(p.state().cwd.as_deref(), Some("/home/user"));
         assert!(p.state().user.is_none());
@@ -613,11 +578,7 @@ mod tests {
 
         if let Osc133Phase::Executing { command } = p.osc133_phase() {
             assert!(command.contains("echo hello"), "command: {:?}", command);
-            assert!(
-                !command.contains("\x1b"),
-                "should not contain raw escapes: {:?}",
-                command
-            );
+            assert!(!command.contains("\x1b"), "should not contain raw escapes: {:?}", command);
         } else {
             panic!("Expected Executing");
         }
@@ -717,7 +678,9 @@ mod tests {
     #[test]
     fn frames_on_the_alternate_screen_are_not_output() {
         let mut p = PaneProcessor::new(24, 80);
-        p.process_chunk(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\git log\x1b]133;C\x1b\\\x1b]133;E;git log\x1b\\");
+        p.process_chunk(
+            b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\git log\x1b]133;C\x1b\\\x1b]133;E;git log\x1b\\",
+        );
         p.process_chunk(b"\r\nbefore\r\n\x1b[?1049h\x1b[H\x1b[2J");
         p.process_chunk(b"commit abc\r\n:");
         p.process_chunk(b"\x1b[?1049lafter\r\n\x1b]133;D;0\x1b\\");

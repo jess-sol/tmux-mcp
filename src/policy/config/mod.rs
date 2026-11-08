@@ -71,9 +71,7 @@ impl PolicyEngine {
 
         let home_path = home_config_path();
         let home_stamp = file_stamp(&home_path);
-        let project_stamp = project_cwd
-            .and_then(project_config_path)
-            .and_then(|p| file_stamp(&p));
+        let project_stamp = project_cwd.and_then(project_config_path).and_then(|p| file_stamp(&p));
 
         Self {
             compiled: RwLock::new(compiled),
@@ -160,10 +158,7 @@ fn compile_config(project_cwd: Option<&str>) -> CompiledPolicy {
         Err(err) => {
             tracing::error!("Policy did not load: {}", err);
             CompiledPolicy {
-                rules: RuleSet {
-                    rules: Vec::new(),
-                    default: Decision::Ask,
-                },
+                rules: RuleSet { rules: Vec::new(), default: Decision::Ask },
                 grammars: Grammars::default(),
                 remote_grammars: Grammars::default(),
                 project_dirs: vec![".".into()],
@@ -193,12 +188,8 @@ fn load_sources(project_root: Option<&Path>) -> Result<Vec<Source>, String> {
 
 fn compile_sources(sources: &[Source]) -> Result<Compiled, String> {
     let grammars = Grammars::compile(sources.iter().map(|s| &s.config.commands))?;
-    let remote_grammars = Grammars::compile(
-        sources
-            .iter()
-            .filter(|s| !s.is_project)
-            .map(|s| &s.config.commands),
-    )?;
+    let remote_grammars =
+        Grammars::compile(sources.iter().filter(|s| !s.is_project).map(|s| &s.config.commands))?;
 
     let default = sources
         .iter()
@@ -216,12 +207,7 @@ fn compile_sources(sources: &[Source]) -> Result<Compiled, String> {
     // reply names the first, built-in before home before project.
     let rules: Vec<(RuleConfig, bool)> = sources
         .iter()
-        .flat_map(|s| {
-            s.config
-                .rules
-                .iter()
-                .map(move |r| (r.clone(), s.is_project))
-        })
+        .flat_map(|s| s.config.rules.iter().map(move |r| (r.clone(), s.is_project)))
         .collect();
     let rules = rules::compile(&rules, default, &grammars)?;
 

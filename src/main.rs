@@ -52,12 +52,7 @@ async fn main() {
                 std::process::exit(2);
             }
         }
-        Some(Commands::PolicyEval {
-            via,
-            cwd,
-            json,
-            lines,
-        }) => {
+        Some(Commands::PolicyEval { via, cwd, json, lines }) => {
             if let Err(e) = run_policy_eval(&lines, via.as_deref(), cwd, json) {
                 eprintln!("{}", e);
                 std::process::exit(1);
@@ -122,20 +117,13 @@ fn check_bash(input: &serde_json::Value) {
 
 /// A shell on this machine, in `cwd`, as the shell's own user.
 fn local_context(cwd: Option<String>) -> policy::PaneContext {
-    policy::PaneContext {
-        hostname: None,
-        cwd,
-        user: std::env::var("USER").ok(),
-    }
+    policy::PaneContext { hostname: None, cwd, user: std::env::var("USER").ok() }
 }
 
 /// Prints each line, then one row per channel: the decision, then its
 /// reasons, one per line. With `json`, one object per line and channel.
 fn run_policy_eval(
-    lines: &[String],
-    via: Option<&str>,
-    cwd: Option<String>,
-    json: bool,
+    lines: &[String], via: Option<&str>, cwd: Option<String>, json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = match cwd {
         Some(cwd) => cwd,
@@ -168,10 +156,7 @@ fn run_policy_eval(
             }
             let reason = result.reason();
             let mut reasons = reason.lines();
-            let row = format!(
-                "  {name:<5} {decision:<12} {}",
-                reasons.next().unwrap_or("")
-            );
+            let row = format!("  {name:<5} {decision:<12} {}", reasons.next().unwrap_or(""));
             println!("{}", row.trim_end());
             for reason in reasons {
                 println!("{}", format!("{:21}{reason}", "").trim_end());
@@ -204,15 +189,13 @@ async fn check_command_run(
             )
             .await
     };
-    let result = tokio::time::timeout(HOOK_TIMEOUT, ask)
-        .await
-        .map_err(|_| {
-            format!(
-                "The tmux-mcp daemon did not answer the policy check within {}s. Run the \
+    let result = tokio::time::timeout(HOOK_TIMEOUT, ask).await.map_err(|_| {
+        format!(
+            "The tmux-mcp daemon did not answer the policy check within {}s. Run the \
                  command again.",
-                HOOK_TIMEOUT.as_secs()
-            )
-        })??;
+            HOOK_TIMEOUT.as_secs()
+        )
+    })??;
 
     let decision = result["result"].as_str().unwrap_or("ask");
     let rule = result["rule"].as_str().unwrap_or("");
@@ -264,11 +247,7 @@ async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
         "TMUX_PANE not set — are you inside a tmux session?".into()
     })?;
 
-    tracing::info!(
-        "Connecting to daemon for session {}, origin pane {}",
-        session,
-        origin_pane
-    );
+    tracing::info!("Connecting to daemon for session {}, origin pane {}", session, origin_pane);
     let client = tmux_mcp::client::DaemonClient::connect(&session).await?;
 
     let server = tmux_mcp::mcp::TmuxMcp::new(client, origin_pane);

@@ -31,10 +31,7 @@ async fn a_command_without_an_approval_says_none_is_pending() {
 
     let reply = h.run_approved(&shell, "rm -r c").await;
 
-    assert!(
-        reply.contains("no approval is pending") && reply.contains("hook"),
-        "{reply}"
-    );
+    assert!(reply.contains("no approval is pending") && reply.contains("hook"), "{reply}");
 }
 
 /// A command other than the one the person approved names the approved
@@ -69,10 +66,7 @@ async fn an_approval_for_another_cwd_names_the_change() {
 
     let reply = h.run_approved(&shell, "rm -r d").await;
 
-    assert!(
-        reply.contains("cwd") && reply.contains("changed since the approval"),
-        "{reply}"
-    );
+    assert!(reply.contains("cwd") && reply.contains("changed since the approval"), "{reply}");
     assert!(h.dir().join("d").is_dir(), "nothing ran");
 }
 

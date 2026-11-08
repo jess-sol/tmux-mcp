@@ -43,9 +43,7 @@ pub enum TmuxSessionError {
 impl TmuxSession {
     /// The `TmuxSession` named by `$TMUX`: the one the shipped binary serves.
     pub fn from_env() -> Result<TmuxSession, TmuxSessionError> {
-        std::env::var("TMUX")
-            .map_err(|_| TmuxSessionError::NotInTmux)?
-            .parse()
+        std::env::var("TMUX").map_err(|_| TmuxSessionError::NotInTmux)?.parse()
     }
 
     /// Where the daemon of this `TmuxSession` listens.
@@ -63,10 +61,7 @@ impl TmuxSession {
 
     /// Creates the tmux-mcp directory, private to this user.
     pub(crate) fn create_dir(&self) -> std::io::Result<()> {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir())
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir())
     }
 
     pub(crate) fn server(&self) -> &Path {
@@ -81,11 +76,7 @@ impl TmuxSession {
     /// `<server socket name>-<server pid>-<session id>.<extension>`; the
     /// socket name only labels the server for a reader.
     fn file(&self, extension: &str) -> PathBuf {
-        let name = self
-            .server
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let name = self.server.file_name().unwrap_or_default().to_string_lossy();
         dir().join(format!("{name}-{}-{}.{extension}", self.pid, self.id))
     }
 }
@@ -96,27 +87,12 @@ impl FromStr for TmuxSession {
     /// Parses a `$TMUX` value, `<server socket>,<server pid>,<session id>`.
     /// The socket path may itself hold commas, so fields come off the right.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let malformed = || TmuxSessionError::Malformed {
-            value: value.to_string(),
-        };
+        let malformed = || TmuxSessionError::Malformed { value: value.to_string() };
         let mut fields = value.rsplitn(3, ',');
-        let id = fields
-            .next()
-            .and_then(|id| id.parse().ok())
-            .ok_or_else(malformed)?;
-        let pid = fields
-            .next()
-            .and_then(|pid| pid.parse().ok())
-            .ok_or_else(malformed)?;
-        let server = fields
-            .next()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(malformed)?;
-        Ok(TmuxSession {
-            server: PathBuf::from(server),
-            pid,
-            id,
-        })
+        let id = fields.next().and_then(|id| id.parse().ok()).ok_or_else(malformed)?;
+        let pid = fields.next().and_then(|pid| pid.parse().ok()).ok_or_else(malformed)?;
+        let server = fields.next().filter(|s| !s.is_empty()).ok_or_else(malformed)?;
+        Ok(TmuxSession { server: PathBuf::from(server), pid, id })
     }
 }
 
@@ -131,9 +107,7 @@ fn dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(runtime) => PathBuf::from(runtime).join("tmux-mcp"),
         None => {
-            let uid = std::fs::metadata("/proc/self")
-                .map(|m| m.uid())
-                .unwrap_or(0);
+            let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
             std::env::temp_dir().join(format!("tmux-mcp-{uid}"))
         }
     }
@@ -244,9 +218,7 @@ impl DaemonClient {
 
     /// Send a JSON-RPC request and wait for the response.
     pub async fn request(
-        &self,
-        method: &str,
-        params: Value,
+        &self, method: &str, params: Value,
     ) -> Result<Value, Box<dyn std::error::Error>> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -255,12 +227,7 @@ impl DaemonClient {
             None => return Err("Daemon closed connection".into()),
         };
 
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: method.to_string(),
-            params,
-        };
+        let req = JsonRpcRequest { jsonrpc: "2.0", id, method: method.to_string(), params };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
         {
@@ -311,10 +278,7 @@ async fn spawn_daemon(session: &TmuxSession) -> Result<(), Box<dyn std::error::E
 /// once its socket stops answering.
 async fn retire(pid: Option<i32>, sock: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let pid = pid.ok_or("The older tmux-mcp daemon's process is unknown")?;
-    tokio::process::Command::new("kill")
-        .arg(pid.to_string())
-        .status()
-        .await?;
+    tokio::process::Command::new("kill").arg(pid.to_string()).status().await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while UnixStream::connect(sock).await.is_ok() {
         if tokio::time::Instant::now() >= deadline {
@@ -341,12 +305,7 @@ async fn route_replies(mut reader: BufReader<OwnedReadHalf>, shared: Weak<Shared
             return;
         };
         let waiting = resp.id.and_then(|id| {
-            shared
-                .pending
-                .lock()
-                .expect("pending lock")
-                .as_mut()
-                .and_then(|p| p.remove(&id))
+            shared.pending.lock().expect("pending lock").as_mut().and_then(|p| p.remove(&id))
         });
         if let Some(waiting) = waiting {
             let _ = waiting.send(resp);
@@ -389,10 +348,7 @@ mod tests {
         let a: TmuxSession = "/run/user/1000/tmux-1000/default,4242,0".parse().unwrap();
         let b: TmuxSession = "/tmp/elsewhere/default,4343,0".parse().unwrap();
 
-        assert_eq!(
-            a.socket().file_name(),
-            Some(std::ffi::OsStr::new("default-4242-0.sock"))
-        );
+        assert_eq!(a.socket().file_name(), Some(std::ffi::OsStr::new("default-4242-0.sock")));
         assert_ne!(a.socket(), b.socket());
     }
 }

@@ -29,9 +29,6 @@ async fn an_older_client_refuses_a_newer_daemon() {
     let screen = h.debug_pane(&shell).await;
 
     assert_eq!(decision, Decision::Deny);
-    assert!(
-        reason.contains("99.0.0") && reason.contains(env!("CARGO_PKG_VERSION")),
-        "{reason}"
-    );
+    assert!(reason.contains("99.0.0") && reason.contains(env!("CARGO_PKG_VERSION")), "{reason}");
     assert!(screen.contains('$'), "{screen}");
 }

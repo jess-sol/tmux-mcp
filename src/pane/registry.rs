@@ -83,12 +83,7 @@ pub struct TrackedPane {
 
 impl TrackedPane {
     pub fn new(
-        pane_id: &str,
-        window_id: &str,
-        lines: usize,
-        columns: usize,
-        x: usize,
-        y: usize,
+        pane_id: &str, window_id: &str, lines: usize, columns: usize, x: usize, y: usize,
     ) -> TrackedPane {
         let state = PaneState {
             pid: None,
@@ -133,11 +128,7 @@ impl TrackedPane {
     /// kept. Output stands outside versions: it grows without a new one.
     pub async fn output(&self, command_id: u64) -> Option<String> {
         let state = self.state.lock().await;
-        state
-            .processor
-            .state()
-            .output(command_id)
-            .map(str::to_string)
+        state.processor.state().output(command_id).map(str::to_string)
     }
 
     /// Feeds the pane's output to its emulator. An A, B, C or D marker sets
@@ -145,15 +136,9 @@ impl TrackedPane {
     pub async fn apply_output(&self, bytes: &[u8]) {
         let mut state = self.state.lock().await;
         let events = state.processor.process_chunk(bytes);
-        let marked = events.iter().any(|osc| {
-            matches!(
-                osc.event,
-                OscEvent::Osc133 {
-                    marker: b'A'..=b'D',
-                    ..
-                }
-            )
-        });
+        let marked = events
+            .iter()
+            .any(|osc| matches!(osc.event, OscEvent::Osc133 { marker: b'A'..=b'D', .. }));
         if marked {
             state.phase = marked_phase(state.processor.osc133_phase());
             state.integration = Fact::Known(true);
@@ -261,11 +246,7 @@ impl PaneState {
 impl Screen {
     /// The last `n` rows above the blank ones below them, joined.
     pub fn last_rows(&self, n: usize) -> String {
-        let end = self
-            .rows
-            .iter()
-            .rposition(|row| !row.is_empty())
-            .map_or(0, |i| i + 1);
+        let end = self.rows.iter().rposition(|row| !row.is_empty()).map_or(0, |i| i + 1);
         self.rows[end.saturating_sub(n)..end].join("\n")
     }
 }
@@ -291,11 +272,7 @@ pub enum SyncAction {
     /// Pane gone. Caller must disable `%output`.
     PaneRemoved { pane_id: String },
     /// Dimensions changed. VTE already resized. Informational.
-    Resized {
-        pane_id: String,
-        width: usize,
-        height: usize,
-    },
+    Resized { pane_id: String, width: usize, height: usize },
 }
 
 /// Manages all tracked panes across the session.
@@ -341,16 +318,12 @@ impl PaneRegistry {
     /// Apply a layout change for one window. Diffs tracked panes in that
     /// window against the layout. Returns actions for the caller to execute.
     pub async fn apply_layout(
-        &mut self,
-        window_id: &str,
-        layout_panes: &[LayoutPane],
+        &mut self, window_id: &str, layout_panes: &[LayoutPane],
     ) -> Vec<SyncAction> {
         let mut actions = Vec::new();
 
-        let layout_ids: HashMap<String, &LayoutPane> = layout_panes
-            .iter()
-            .map(|lp| (format!("%{}", lp.pane_number), lp))
-            .collect();
+        let layout_ids: HashMap<String, &LayoutPane> =
+            layout_panes.iter().map(|lp| (format!("%{}", lp.pane_number), lp)).collect();
 
         // Remove tracked panes in this window that aren't in the layout
         let dead: Vec<String> = self
@@ -363,9 +336,7 @@ impl PaneRegistry {
             .collect();
         for id in &dead {
             self.panes.remove(id);
-            actions.push(SyncAction::PaneRemoved {
-                pane_id: id.clone(),
-            });
+            actions.push(SyncAction::PaneRemoved { pane_id: id.clone() });
         }
 
         // Add new panes, update existing
@@ -381,9 +352,7 @@ impl PaneRegistry {
             } else {
                 let tracked = TrackedPane::new(pane_id, window_id, lp.height, lp.width, lp.x, lp.y);
                 self.panes.insert(pane_id.clone(), Arc::new(tracked));
-                actions.push(SyncAction::PaneAdded {
-                    pane_id: pane_id.clone(),
-                });
+                actions.push(SyncAction::PaneAdded { pane_id: pane_id.clone() });
             }
         }
 
@@ -414,13 +383,7 @@ mod tests {
     use crate::pane::osc133::Osc133Phase;
 
     fn lp(pane_number: u32, width: usize, height: usize, x: usize, y: usize) -> LayoutPane {
-        LayoutPane {
-            pane_number,
-            width,
-            height,
-            x,
-            y,
-        }
+        LayoutPane { pane_number, width, height, x, y }
     }
 
     fn has_action(actions: &[SyncAction], expected: &SyncAction) -> bool {
@@ -430,39 +393,21 @@ mod tests {
     #[tokio::test]
     async fn adds_new_panes() {
         let mut reg = PaneRegistry::new();
-        let actions = reg
-            .apply_layout("@1", &[lp(0, 80, 24, 0, 0), lp(1, 80, 24, 0, 25)])
-            .await;
+        let actions = reg.apply_layout("@1", &[lp(0, 80, 24, 0, 0), lp(1, 80, 24, 0, 25)]).await;
         assert_eq!(actions.len(), 2);
-        assert!(has_action(
-            &actions,
-            &SyncAction::PaneAdded {
-                pane_id: "%0".into()
-            }
-        ));
-        assert!(has_action(
-            &actions,
-            &SyncAction::PaneAdded {
-                pane_id: "%1".into()
-            }
-        ));
+        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%0".into() }));
+        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%1".into() }));
         assert_eq!(reg.len(), 2);
     }
 
     #[tokio::test]
     async fn removes_dead_panes() {
         let mut reg = PaneRegistry::new();
-        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)])
-            .await;
+        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)]).await;
         assert_eq!(reg.len(), 2);
 
         let actions = reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0)]).await;
-        assert!(has_action(
-            &actions,
-            &SyncAction::PaneRemoved {
-                pane_id: "%2".into()
-            }
-        ));
+        assert!(has_action(&actions, &SyncAction::PaneRemoved { pane_id: "%2".into() }));
         assert_eq!(reg.len(), 1);
     }
 
@@ -474,11 +419,7 @@ mod tests {
         let actions = reg.apply_layout("@1", &[lp(1, 120, 40, 0, 0)]).await;
         assert!(has_action(
             &actions,
-            &SyncAction::Resized {
-                pane_id: "%1".into(),
-                width: 120,
-                height: 40,
-            }
+            &SyncAction::Resized { pane_id: "%1".into(), width: 120, height: 40 }
         ));
 
         let screen = reg.get_handle("%1").unwrap().screen().await;
@@ -513,12 +454,7 @@ mod tests {
         assert_eq!(reg.len(), 2);
 
         let actions = reg.apply_layout("@1", &[]).await;
-        assert!(has_action(
-            &actions,
-            &SyncAction::PaneRemoved {
-                pane_id: "%1".into()
-            }
-        ));
+        assert!(has_action(&actions, &SyncAction::PaneRemoved { pane_id: "%1".into() }));
         assert_eq!(reg.len(), 1);
         assert!(reg.get_handle("%2").is_some());
     }
@@ -526,8 +462,7 @@ mod tests {
     #[tokio::test]
     async fn remove_window_clears_all() {
         let mut reg = PaneRegistry::new();
-        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)])
-            .await;
+        reg.apply_layout("@1", &[lp(1, 80, 24, 0, 0), lp(2, 80, 24, 0, 25)]).await;
         reg.apply_layout("@2", &[lp(3, 80, 24, 0, 0)]).await;
         assert_eq!(reg.len(), 3);
 
@@ -556,8 +491,7 @@ mod tests {
         pane.set_mode(Fact::Known(PaneMode::Off)).await; // as a new pane's query does
         let start = pane.snapshot().version;
 
-        pane.apply_output(b"\r\n\r\n\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
-            .await;
+        pane.apply_output(b"\r\n\r\n\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\").await;
         let prompt = pane.snapshot();
         // A redraw on the top line, two lines above the prompt.
         pane.apply_output(b"\x1b7\x1b[1;1Hclock 12:01\x1b8").await;
@@ -607,12 +541,7 @@ mod tests {
         assert_eq!(sending.phase, Fact::Unknown);
         assert!(sending.version > prompt.version);
         assert_eq!(after_e.phase, Fact::Unknown, "E answers nothing");
-        assert_eq!(
-            running.phase,
-            Fact::Known(Osc133Phase::Executing {
-                command: "ls".into()
-            })
-        );
+        assert_eq!(running.phase, Fact::Known(Osc133Phase::Executing { command: "ls".into() }));
     }
 
     #[tokio::test]
@@ -621,8 +550,7 @@ mod tests {
         let fresh = pane.snapshot();
         pane.set_integration(Fact::Known(false)).await;
         let in_vain = pane.snapshot();
-        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
-            .await;
+        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\").await;
         let marked = pane.snapshot();
 
         assert_eq!(fresh.integration, Fact::Unknown);
@@ -648,10 +576,7 @@ mod tests {
         assert_eq!(screen.snapshot.pid, Some(42));
         assert_eq!(screen.last_rows(3), "$ ls\na\nb");
         assert_eq!(screen.cursor, (3, 0));
-        assert_eq!(
-            (screen.x, screen.y, screen.width, screen.height),
-            (0, 0, 30, 5)
-        );
+        assert_eq!((screen.x, screen.y, screen.width, screen.height), (0, 0, 30, 5));
         assert!(screen.last_output.is_some());
         assert!(resized && !moved, "only a new size counts as resized");
         assert_eq!(pane.output(id).await.as_deref(), Some("a\r\nb\r\n"));
@@ -669,15 +594,10 @@ mod tests {
 
         pane.apply_output(cycle("ls").as_bytes()).await;
         pane.apply_output(cycle("pwd").as_bytes()).await;
-        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\")
-            .await;
+        pane.apply_output(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\").await;
 
         let snapshot = pane.snapshot();
-        let commands: Vec<&str> = snapshot
-            .commands
-            .iter()
-            .map(|c| c.command.as_str())
-            .collect();
+        let commands: Vec<&str> = snapshot.commands.iter().map(|c| c.command.as_str()).collect();
         assert_eq!(commands, ["pwd", "ls"]);
     }
 
@@ -691,34 +611,20 @@ mod tests {
     async fn multi_window_lifecycle() {
         let mut reg = PaneRegistry::new();
 
-        reg.apply_layout("@1", &[lp(1, 100, 50, 0, 0), lp(2, 99, 50, 101, 0)])
-            .await;
+        reg.apply_layout("@1", &[lp(1, 100, 50, 0, 0), lp(2, 99, 50, 101, 0)]).await;
         reg.apply_layout("@2", &[lp(3, 80, 24, 0, 0)]).await;
         assert_eq!(reg.len(), 3);
 
         let actions = reg
             .apply_layout(
                 "@1",
-                &[
-                    lp(1, 100, 50, 0, 0),
-                    lp(2, 99, 25, 101, 0),
-                    lp(4, 99, 24, 101, 26),
-                ],
+                &[lp(1, 100, 50, 0, 0), lp(2, 99, 25, 101, 0), lp(4, 99, 24, 101, 26)],
             )
             .await;
+        assert!(has_action(&actions, &SyncAction::PaneAdded { pane_id: "%4".into() }));
         assert!(has_action(
             &actions,
-            &SyncAction::PaneAdded {
-                pane_id: "%4".into()
-            }
-        ));
-        assert!(has_action(
-            &actions,
-            &SyncAction::Resized {
-                pane_id: "%2".into(),
-                width: 99,
-                height: 25
-            }
+            &SyncAction::Resized { pane_id: "%2".into(), width: 99, height: 25 }
         ));
         assert_eq!(reg.len(), 4);
 

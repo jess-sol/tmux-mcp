@@ -44,16 +44,9 @@ const CHANGES_DIRECTORY: [&str; 3] = ["cd", "pushd", "popd"];
 /// The commands that `program`, the parse of `line`, runs, each parsed by
 /// its grammar, the first in `start`.
 pub(super) fn walk(
-    line: &str,
-    program: &ast::Program,
-    grammars: &Grammars,
-    start: &Context,
+    line: &str, program: &ast::Program, grammars: &Grammars, start: &Context,
 ) -> Result<Vec<CommandInfo>, ParseError> {
-    let bytes = line
-        .char_indices()
-        .map(|(b, _)| b)
-        .chain([line.len()])
-        .collect();
+    let bytes = line.char_indices().map(|(b, _)| b).chain([line.len()]).collect();
     let mut walker = Walker {
         grammars,
         line,
@@ -75,16 +68,10 @@ impl Walker<'_> {
     /// The line's own shell: its list items, across its lines, in order. A
     /// newline joins them as `;` does.
     fn top(&mut self, program: &ast::Program) {
-        let items: Vec<&ast::CompoundListItem> = program
-            .complete_commands
-            .iter()
-            .flat_map(|cc| &cc.0)
-            .collect();
+        let items: Vec<&ast::CompoundListItem> =
+            program.complete_commands.iter().flat_map(|cc| &cc.0).collect();
         let ops: Vec<_> = items.iter().map(|item| separator(&item.1)).collect();
-        let extents: Vec<_> = items
-            .iter()
-            .map(|item| self.and_or_extent(&item.0))
-            .collect();
+        let extents: Vec<_> = items.iter().map(|item| self.and_or_extent(&item.0)).collect();
         let line = Joint::line(ops.last().copied().filter(|op| *op == "&"));
         for (k, item) in items.iter().enumerate() {
             self.and_or_list(&item.0, Some(line.of_part(k, &ops, &extents)));
@@ -139,11 +126,7 @@ impl Walker<'_> {
     fn pipeline(&mut self, pipeline: &ast::Pipeline, joint: Option<Joint>) {
         let stages = pipeline.seq.len();
         let ops = vec!["|"; stages.saturating_sub(1)];
-        let extents: Vec<_> = pipeline
-            .seq
-            .iter()
-            .map(|c| self.command_extent(c))
-            .collect();
+        let extents: Vec<_> = pipeline.seq.iter().map(|c| self.command_extent(c)).collect();
         for (i, command) in pipeline.seq.iter().enumerate() {
             let joint = joint.map(|outer| outer.of_part(i, &ops, &extents));
             if stages > 1 {
@@ -189,11 +172,7 @@ impl Walker<'_> {
         let mut variables = Vec::new();
         let mut words = Vec::new();
         let mut constant_words = true;
-        let mut raws: Vec<&str> = simple
-            .word_or_name
-            .iter()
-            .map(|n| n.value.as_str())
-            .collect();
+        let mut raws: Vec<&str> = simple.word_or_name.iter().map(|n| n.value.as_str()).collect();
         for item in prefix() {
             match item {
                 ast::CommandPrefixOrSuffixItem::AssignmentWord(assignment, w) => {
@@ -233,11 +212,7 @@ impl Walker<'_> {
             }
         }
 
-        let place = Place {
-            constant: constant_words,
-            expands,
-            ..self.place(simple, joint)
-        };
+        let place = Place { constant: constant_words, expands, ..self.place(simple, joint) };
         let name = simple.word_or_name.as_ref().map(|n| word(&n.value, &home));
         let redirects = self.redirects(prefix().chain(suffix()), place.top);
         let marked_cwd = self.run(name.clone(), &words, variables, redirects, place);
@@ -251,12 +226,8 @@ impl Walker<'_> {
     /// context that its `with` gives them. Returns the cwd that the command's
     /// `marks.cwd` gives, if it gives one.
     fn run(
-        &mut self,
-        name: Option<Word>,
-        words: &[Word],
-        mut variables: Vec<TriVal>,
-        redirects: Vec<RedirectInfo>,
-        place: Place,
+        &mut self, name: Option<Word>, words: &[Word], mut variables: Vec<TriVal>,
+        redirects: Vec<RedirectInfo>, place: Place,
     ) -> Option<TriVal> {
         let context = self.context.clone();
         let parsed = match &name {
@@ -264,10 +235,7 @@ impl Walker<'_> {
             _ => self.grammars.parse("", &[], &context.home),
         };
         let exhaustive = match parsed.variables {
-            TriVal::List {
-                elements,
-                exhaustive,
-            } => {
+            TriVal::List { elements, exhaustive } => {
                 variables.extend(elements);
                 exhaustive
             }
@@ -289,10 +257,7 @@ impl Walker<'_> {
             reads: resolved(&parsed.reads, &cwd),
             writes: resolved(&parsed.writes, &cwd),
             cwd: cwd.clone(),
-            variables: TriVal::List {
-                elements: variables,
-                exhaustive,
-            },
+            variables: TriVal::List { elements: variables, exhaustive },
             context,
             text: place.text,
             top: place.top,

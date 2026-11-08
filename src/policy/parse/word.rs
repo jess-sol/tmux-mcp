@@ -13,9 +13,7 @@ use crate::policy::value::TriVal;
 pub(crate) fn word(raw: &str, home: &TriVal) -> Word {
     let options = brush_parser::ParserOptions::default();
     if let Ok(Some(pieces)) = brush_parser::word::parse_brace_expansions(raw, &options)
-        && pieces
-            .iter()
-            .any(|p| matches!(p, BraceExpressionOrText::Expr(_)))
+        && pieces.iter().any(|p| matches!(p, BraceExpressionOrText::Expr(_)))
     {
         return Word::Unknown { splits: true };
     }
@@ -71,9 +69,7 @@ pub(crate) fn expanded(raw: &str) -> Vec<String> {
 fn expanded_piece(piece: &WordPieceWithSource, raw: &str, names: &mut Vec<String>) {
     match &piece.piece {
         WordPiece::ParameterExpansion(_) => {
-            if let Some(name) = raw
-                .get(piece.start_index..piece.end_index)
-                .and_then(parameter_name)
+            if let Some(name) = raw.get(piece.start_index..piece.end_index).and_then(parameter_name)
             {
                 names.push(name);
             }
@@ -107,11 +103,7 @@ fn parameter_name(source: &str) -> Option<String> {
 /// Appends what `piece` contributes to a word's text. An expansion makes the
 /// word Unknown: one that may split when unquoted, or when it is `$@`-like.
 fn append_piece(
-    piece: &WordPiece,
-    quoted: bool,
-    raw: &str,
-    home: &TriVal,
-    text: &mut String,
+    piece: &WordPiece, quoted: bool, raw: &str, home: &TriVal, text: &mut String,
     unknown: &mut Option<bool>,
 ) {
     match piece {

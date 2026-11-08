@@ -23,9 +23,7 @@ pub(crate) struct Refs {
 }
 
 pub(super) fn rule(
-    config: &RuleConfig,
-    is_project: bool,
-    grammars: &Grammars,
+    config: &RuleConfig, is_project: bool, grammars: &Grammars,
 ) -> Result<CompiledRule, String> {
     if !is_id(&config.id) {
         return Err("an id is lowercase words joined by `-`".into());
@@ -63,17 +61,10 @@ pub(super) fn rule(
         Part::Text(_) => None,
     });
 
-    let keys = [
-        ("when", &when),
-        ("path", &path),
-        ("write", &write),
-        ("host", &host),
-        ("user", &user),
-    ];
-    for (key, expr) in keys
-        .into_iter()
-        .filter_map(|(key, expr)| Some((key, expr.as_ref()?)))
-        .chain(holes)
+    let keys =
+        [("when", &when), ("path", &path), ("write", &write), ("host", &host), ("user", &user)];
+    for (key, expr) in
+        keys.into_iter().filter_map(|(key, expr)| Some((key, expr.as_ref()?))).chain(holes)
     {
         let refs = Refs::of(&expr.expr);
         if refs.idents.contains("path") && !matches!(key, "path" | "write") {
@@ -151,10 +142,7 @@ pub(super) fn ids(rules: &[CompiledRule]) -> Result<HashMap<&str, usize>, String
 /// The rule that rule `i` exempts as `id`: one that exists, is stricter,
 /// and is judged per path only if rule `i` is too.
 pub(super) fn exemption(
-    rules: &[CompiledRule],
-    i: usize,
-    id: &str,
-    ids: &HashMap<&str, usize>,
+    rules: &[CompiledRule], i: usize, id: &str, ids: &HashMap<&str, usize>,
 ) -> Result<usize, String> {
     let Some(&target) = ids.get(id) else {
         return Err(format!("`exempts` names `{id}`, which no rule has"));
@@ -176,10 +164,7 @@ pub(super) fn exemption(
 fn is_id(id: &str) -> bool {
     !id.is_empty()
         && id.split('-').all(|word| {
-            !word.is_empty()
-                && word
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         })
 }
 
@@ -199,10 +184,9 @@ pub(crate) fn parse_cel(text: &str) -> Result<cel::IdedExpr, String> {
 fn command_paths(command: &CommandConfig) -> Result<Vec<Vec<String>>, String> {
     let paths = match command {
         CommandConfig::One(path) => vec![command_path(path)?],
-        CommandConfig::Many(paths) => paths
-            .iter()
-            .map(|p| command_path(p))
-            .collect::<Result<_, _>>()?,
+        CommandConfig::Many(paths) => {
+            paths.iter().map(|p| command_path(p)).collect::<Result<_, _>>()?
+        }
     };
     match paths.first() {
         None => Err("`command` is empty".into()),
@@ -222,9 +206,7 @@ fn command_path(command: &str) -> Result<Vec<String>, String> {
     };
     if first.contains('/') {
         let rest = first.strip_prefix("./").filter(|r| {
-            Path::new(r)
-                .components()
-                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            Path::new(r).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
         });
         let Some(rest) = rest else {
             return Err(format!(

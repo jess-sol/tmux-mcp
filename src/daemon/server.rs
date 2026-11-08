@@ -14,9 +14,7 @@ use crate::daemon::rpc::{self, DaemonState};
 
 /// Run the Unix socket server. Blocks until cancelled.
 pub async fn serve(
-    session: &TmuxSession,
-    state: Arc<DaemonState>,
-    cancel: CancellationToken,
+    session: &TmuxSession, state: Arc<DaemonState>, cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     session.create_dir()?;
     let sock_path = session.socket();
@@ -92,8 +90,7 @@ pub async fn serve(
 }
 
 async fn handle_client(
-    stream: tokio::net::UnixStream,
-    state: Arc<DaemonState>,
+    stream: tokio::net::UnixStream, state: Arc<DaemonState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (read, write) = stream.into_split();
     let (reply_tx, reply_rx) = mpsc::unbounded_channel();
@@ -158,8 +155,7 @@ async fn answer(request: &Value, state: &Arc<DaemonState>) -> Value {
 /// Writes each reply as it comes, in the order the requests finish; the id
 /// in each reply tells the client which request it answers.
 async fn write_replies(
-    mut write: OwnedWriteHalf,
-    mut replies: mpsc::UnboundedReceiver<Value>,
+    mut write: OwnedWriteHalf, mut replies: mpsc::UnboundedReceiver<Value>,
 ) -> std::io::Result<()> {
     while let Some(reply) = replies.recv().await {
         let mut line = reply.to_string();

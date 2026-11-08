@@ -18,10 +18,7 @@ use crate::policy::value::TriVal;
 /// else makes it Unknown. A host or user that changes leaves the home Unknown,
 /// and a user that changes ends the shell's own user.
 pub(super) fn inner_context(
-    outer: &Context,
-    cwd: &TriVal,
-    args: &BTreeMap<String, TriVal>,
-    with: &With,
+    outer: &Context, cwd: &TriVal, args: &BTreeMap<String, TriVal>, with: &With,
 ) -> Context {
     let args = TriVal::Map(args.clone().into_iter().collect());
     // The value a key gives its field; None keeps the field.
@@ -81,10 +78,7 @@ pub(super) fn join(base: &TriVal, dir: &TriVal) -> TriVal {
 /// Each path of a list, from the directory `cwd`.
 pub(super) fn resolved(paths: &TriVal, cwd: &TriVal) -> TriVal {
     match paths {
-        TriVal::List {
-            elements,
-            exhaustive,
-        } => TriVal::List {
+        TriVal::List { elements, exhaustive } => TriVal::List {
             elements: elements.iter().map(|p| join(cwd, p)).collect(),
             exhaustive: *exhaustive,
         },

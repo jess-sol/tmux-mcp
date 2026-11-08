@@ -30,9 +30,7 @@ async fn the_typing_refusal_suggests_ctrl_c_only_when_the_cursor_sits_outside_th
     let before = h.run(&shell, "seq 1").await;
     h.press_key(&shell, "C-c").await;
     shell.say("(sleep 0.5; printf '\\141\\142\\143\\n'; sleep 30) &");
-    shell
-        .wait_until(SETTLE, |s| s.lines().any(|row| row.ends_with("$ abc")))
-        .unwrap();
+    shell.wait_until(SETTLE, |s| s.lines().any(|row| row.ends_with("$ abc"))).unwrap();
     let above = h.run(&shell, "seq 1").await;
     h.press_key(&shell, "C-c").await;
     shell.type_text("git sta");
@@ -69,18 +67,13 @@ async fn two_commands_sent_to_one_pane_at_once_run_one_at_a_time() {
     let h = Harness::new().await;
     let shell = h.shell().await;
 
-    let (first, second) = tokio::join!(
-        h.run(&shell, "sleep 1; seq 1"),
-        h.run(&shell, "sleep 1; seq 2")
-    );
+    let (first, second) =
+        tokio::join!(h.run(&shell, "sleep 1; seq 1"), h.run(&shell, "sleep 1; seq 2"));
 
     // Whichever reads the pane after the other's send sees it busy; one that
     // read it before finds it changed at its own send.
     let replies = [&first, &second];
-    let ran = replies
-        .iter()
-        .filter(|r| r.contains("Exit code: 0"))
-        .count();
+    let ran = replies.iter().filter(|r| r.contains("Exit code: 0")).count();
     let refused = replies
         .iter()
         .filter(|r| r.contains("busy") || r.contains("changed before the send"))
@@ -157,8 +150,5 @@ async fn a_pane_running_a_command_refuses_another() {
 
     let reply = h.run(&shell, "seq 1").await;
 
-    assert!(
-        reply.contains("busy") && reply.contains("sleep 30"),
-        "{reply:?}"
-    );
+    assert!(reply.contains("busy") && reply.contains("sleep 30"), "{reply:?}");
 }

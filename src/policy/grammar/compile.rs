@@ -23,11 +23,7 @@ enum Item {
 }
 
 /// The defaults, the subcommand words, and the arguments that `appends` sets.
-type Settings = (
-    BTreeMap<String, Vec<String>>,
-    BTreeSet<String>,
-    BTreeSet<String>,
-);
+type Settings = (BTreeMap<String, Vec<String>>, BTreeSet<String>, BTreeSet<String>);
 
 impl Level {
     /// A grammar's top level, with every level below it.
@@ -36,10 +32,7 @@ impl Level {
     }
 
     fn compile_level(
-        path: &str,
-        config: &GrammarConfig,
-        inherited: Option<&Parser>,
-        chain: &Chain,
+        path: &str, config: &GrammarConfig, inherited: Option<&Parser>, chain: &Chain,
     ) -> Result<Level, String> {
         let parser = match (&config.parser, inherited) {
             (Some(p), _) => Parser::from(p),
@@ -84,15 +77,11 @@ impl Level {
         let (defaults, words, appends) =
             settings(path, config, &mut slots, &mut options, &mut global)?;
         let marks = marks(path, config, &names, &slots, appends)?;
-        let with = with(path, &config.with, |n| {
-            names.contains(n) || chain.names.contains(n)
-        })?;
+        let with = with(path, &config.with, |n| names.contains(n) || chain.names.contains(n))?;
 
         let mut child_chain = chain.clone();
         child_chain.names.extend(names);
-        child_chain
-            .global_spellings
-            .extend(global.iter().flat_map(Opt::spellings));
+        child_chain.global_spellings.extend(global.iter().flat_map(Opt::spellings));
         let mut tables = BTreeMap::new();
         // A reserved name never gets here: serde reads it as the key of that name.
         for (word, sub) in &config.subcommands {
@@ -112,17 +101,7 @@ impl Level {
             return Err(format!("{path}: `subcommand` has no words and no tables"));
         }
 
-        Ok(Level {
-            parser,
-            slots,
-            options,
-            global,
-            defaults,
-            marks,
-            with,
-            words,
-            tables,
-        })
+        Ok(Level { parser, slots, options, global, defaults, marks, with, words, tables })
     }
 }
 
@@ -201,11 +180,7 @@ fn parse_spec(path: &str, spec: &str, parser: &Parser) -> Result<Item, String> {
             }
         }
         let first = body.split('|').next().unwrap_or_default();
-        opt.name = name(
-            path,
-            prefix,
-            first.trim_start_matches('-').replace('-', "_"),
-        )?;
+        opt.name = name(path, prefix, first.trim_start_matches('-').replace('-', "_"))?;
         return Ok(Item::Opt(opt));
     }
 
@@ -220,12 +195,7 @@ fn parse_spec(path: &str, spec: &str, parser: &Parser) -> Result<Item, String> {
         return Err(format!("{path}: `subcommand` takes no `...`"));
     }
     let name = name(path, prefix, base.to_string())?;
-    Ok(Item::Slot(Slot {
-        name,
-        kind,
-        matches: None,
-        group: vec![],
-    }))
+    Ok(Item::Slot(Slot { name, kind, matches: None, group: vec![] }))
 }
 
 /// A group: one operand, then the options that stand in for it.
@@ -256,9 +226,7 @@ fn parse_group(path: &str, specs: &[String], parser: &Parser) -> Result<(Slot, V
 fn name(path: &str, prefix: Option<&str>, derived: String) -> Result<String, String> {
     let name = match prefix {
         Some(p) if p == derived => {
-            return Err(format!(
-                "{path}: `{p}=` repeats the name the argument already has"
-            ));
+            return Err(format!("{path}: `{p}=` repeats the name the argument already has"));
         }
         Some(p) => p.to_string(),
         None => derived,
@@ -267,17 +235,13 @@ fn name(path: &str, prefix: Option<&str>, derived: String) -> Result<String, Str
     let snake = chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     if !snake {
-        return Err(format!(
-            "{path}: the name `{name}` is not snake_case; give one with `name=`"
-        ));
+        return Err(format!("{path}: the name `{name}` is not snake_case; give one with `name=`"));
     }
     Ok(name)
 }
 
 fn is_spelling(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The index of the subcommand slot, after checking where it stands.
@@ -299,22 +263,13 @@ fn check_slots(path: &str, slots: &[Slot]) -> Result<Option<usize>, String> {
 }
 
 fn check_names(
-    path: &str,
-    slots: &[Slot],
-    options: &[Opt],
-    global: &[Opt],
-    chain: &Chain,
+    path: &str, slots: &[Slot], options: &[Opt], global: &[Opt], chain: &Chain,
 ) -> Result<BTreeSet<String>, String> {
     let mut names = BTreeSet::new();
-    let slot_names = slots
-        .iter()
-        .filter(|s| s.kind != SlotKind::Subcommand)
-        .map(|s| &s.name);
+    let slot_names = slots.iter().filter(|s| s.kind != SlotKind::Subcommand).map(|s| &s.name);
     for name in slot_names.chain(options.iter().chain(global).map(|o| &o.name)) {
         if chain.names.contains(name) || !names.insert(name.clone()) {
-            return Err(format!(
-                "{path}: `{name}` is declared twice along its levels"
-            ));
+            return Err(format!("{path}: `{name}` is declared twice along its levels"));
         }
     }
     for spelling in options.iter().chain(global).flat_map(Opt::spellings) {
@@ -328,28 +283,19 @@ fn check_names(
 }
 
 fn settings(
-    path: &str,
-    config: &GrammarConfig,
-    slots: &mut [Slot],
-    options: &mut [Opt],
-    global: &mut [Opt],
+    path: &str, config: &GrammarConfig, slots: &mut [Slot], options: &mut [Opt], global: &mut [Opt],
 ) -> Result<Settings, String> {
     let mut defaults = BTreeMap::new();
     let mut words = BTreeSet::new();
     let mut appends = BTreeSet::new();
     for (name, s) in &config.argument {
-        let mut opt = options
-            .iter_mut()
-            .chain(global.iter_mut())
-            .find(|o| &o.name == name);
+        let mut opt = options.iter_mut().chain(global.iter_mut()).find(|o| &o.name == name);
         let slot = slots.iter_mut().find(|x| &x.name == name);
         let kind = match (&slot, &opt) {
             (Some(slot), _) => Some(slot.kind),
             (None, Some(_)) => None,
             (None, None) => {
-                return Err(format!(
-                    "{path}: `argument.{name}` names no argument of this level"
-                ));
+                return Err(format!("{path}: `argument.{name}` names no argument of this level"));
             }
         };
         if s.dash {
@@ -370,9 +316,7 @@ fn settings(
         }
         if let Some(pattern) = &s.matches {
             let Some(slot) = slot.filter(|s| s.kind != SlotKind::Subcommand) else {
-                return Err(format!(
-                    "{path}: `argument.{name}.match` is only for an operand"
-                ));
+                return Err(format!("{path}: `argument.{name}.match` is only for an operand"));
             };
             let glob =
                 Glob::new(pattern).map_err(|e| format!("{path}: `argument.{name}.match`: {e}"))?;
@@ -395,10 +339,7 @@ fn settings(
 }
 
 fn marks(
-    path: &str,
-    config: &GrammarConfig,
-    names: &BTreeSet<String>,
-    slots: &[Slot],
+    path: &str, config: &GrammarConfig, names: &BTreeSet<String>, slots: &[Slot],
     appends: BTreeSet<String>,
 ) -> Result<Marks, String> {
     let m = &config.marks;
@@ -417,9 +358,8 @@ fn marks(
             ));
         }
     }
-    if let Some(slot) = slots
-        .iter()
-        .find(|s| s.kind == SlotKind::One && m.command.contains(&s.name))
+    if let Some(slot) =
+        slots.iter().find(|s| s.kind == SlotKind::One && m.command.contains(&s.name))
     {
         return Err(format!(
             "{path}: `marks.command` names `{}`, a one-word operand; a command is `{0}...`",
@@ -445,9 +385,7 @@ fn marks(
 /// The CEL of the fields that `with` sets. It reads only `args` of the names
 /// along the level's chain, the command's `cwd`, `user` and `host`, and `with`.
 fn with(
-    path: &str,
-    config: &ContextConfig,
-    declared: impl Fn(&str) -> bool,
+    path: &str, config: &ContextConfig, declared: impl Fn(&str) -> bool,
 ) -> Result<With, String> {
     let compile = |field: &str, text: &Option<String>| {
         let Some(text) = text else { return Ok(None) };
@@ -459,14 +397,10 @@ fn with(
             .iter()
             .find(|n| !matches!(n.as_str(), "args" | "cwd" | "user" | "host" | "with"))
         {
-            return Err(bad(format!(
-                "`{name}` is not one of args, cwd, user, host and with"
-            )));
+            return Err(bad(format!("`{name}` is not one of args, cwd, user, host and with")));
         }
         if let Some(name) = refs.args.iter().find(|n| !declared(n)) {
-            return Err(bad(format!(
-                "`args.{name}` is not declared along this level"
-            )));
+            return Err(bad(format!("`args.{name}` is not declared along this level")));
         }
         Ok(Some(expr))
     };

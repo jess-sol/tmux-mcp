@@ -30,19 +30,12 @@ pub fn proc_info(pid: u32) -> Option<ProcInfo> {
     let cwd = read_cwd(pid);
     let foreground = find_foreground(pid);
 
-    Some(ProcInfo {
-        pid,
-        comm,
-        cwd,
-        foreground,
-    })
+    Some(ProcInfo { pid, comm, cwd, foreground })
 }
 
 /// Read `/proc/{pid}/comm` — the process name (max 16 chars, kernel-truncated).
 fn read_comm(pid: u32) -> Option<String> {
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .ok()
-        .map(|s| s.trim().to_string())
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
 }
 
 /// Read `/proc/{pid}/cwd` — symlink to the current working directory.

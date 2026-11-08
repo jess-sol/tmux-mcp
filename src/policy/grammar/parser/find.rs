@@ -13,11 +13,7 @@ pub(super) fn is_option(text: &str) -> bool {
 }
 
 pub(super) fn option(
-    text: &str,
-    rest: &[Word],
-    active: &[&Opt],
-    scan: &mut Scan,
-    run: &mut Run,
+    text: &str, rest: &[Word], active: &[&Opt], scan: &mut Scan, run: &mut Run,
 ) -> Read {
     if is_operator(text) {
         scan.expression = true;
@@ -73,8 +69,5 @@ fn take_command(opt: &Opt, rest: &[Word], run: &mut Run) -> usize {
 }
 
 fn is_operator(text: &str) -> bool {
-    matches!(
-        text,
-        "(" | ")" | "!" | "," | "-a" | "-o" | "-not" | "-and" | "-or"
-    )
+    matches!(text, "(" | ")" | "!" | "," | "-a" | "-o" | "-not" | "-and" | "-or")
 }

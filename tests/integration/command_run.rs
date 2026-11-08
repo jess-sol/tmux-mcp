@@ -24,10 +24,7 @@ async fn finished_commands_reply_with_their_output_and_exit_code() {
             "(echo outer; (echo inner))",
             "$ (echo outer; (echo inner))\nouter\ninner\n\nExit code: 0",
         ),
-        (
-            "{ echo aaa; echo bbb; }",
-            "$ { echo aaa; echo bbb; }\naaa\nbbb\n\nExit code: 0",
-        ),
+        ("{ echo aaa; echo bbb; }", "$ { echo aaa; echo bbb; }\naaa\nbbb\n\nExit code: 0"),
         (
             "for i in x y z; do echo $i; done",
             "$ for i in x y z; do echo $i; done\nx\ny\nz\n\nExit code: 0",
@@ -36,10 +33,7 @@ async fn finished_commands_reply_with_their_output_and_exit_code() {
             "echo hello | tr a-z A-Z | sed 's/H/h/'",
             "$ echo hello | tr a-z A-Z | sed 's/H/h/'\nhELLO\n\nExit code: 0",
         ),
-        (
-            "echo $(echo inner)",
-            "$ echo $(echo inner)\ninner\n\nExit code: 0",
-        ),
+        ("echo $(echo inner)", "$ echo $(echo inner)\ninner\n\nExit code: 0"),
         (
             "cat <<'EOF'\nhello heredoc\nworld\nEOF",
             "$ cat <<'EOF'\nhello heredoc\nworld\nEOF\nhello heredoc\nworld\n\nExit code: 0",
@@ -84,10 +78,7 @@ async fn back_to_back_commands_each_get_their_own_output() {
     for n in 1..=5 {
         let reply = h.run(&shell, &format!("seq {n} {n}")).await;
 
-        assert!(
-            reply.ends_with(&format!("{n}\n\nExit code: 0")),
-            "{reply:?}"
-        );
+        assert!(reply.ends_with(&format!("{n}\n\nExit code: 0")), "{reply:?}");
     }
 }
 
@@ -116,10 +107,7 @@ async fn a_full_screen_program_returns_the_screen_at_once() {
     assert!(reply.contains("full-screen program"), "{reply}");
     assert!(reply.contains("Screen at version"), "{reply}");
     let prompt = reply.lines().last().unwrap_or_default();
-    assert!(
-        prompt == ":" || prompt.starts_with("lines 1-"),
-        "less's prompt\n{reply}"
-    );
+    assert!(prompt == ":" || prompt.starts_with("lines 1-"), "less's prompt\n{reply}");
 
     h.press_key(&shell, "q").await;
     let after = h.read(&shell, Read::default().tail(1).timeout(5)).await;
@@ -144,15 +132,8 @@ async fn next_with_search_returns_at_the_first_match_and_leaves_the_command_runn
         )
         .await;
 
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "returned after {:?}",
-        started.elapsed()
-    );
-    assert!(
-        reply.contains("\nMARK\n") && reply.contains("Command still running"),
-        "{reply:?}"
-    );
+    assert!(started.elapsed() < Duration::from_secs(10), "returned after {:?}", started.elapsed());
+    assert!(reply.contains("\nMARK\n") && reply.contains("Command still running"), "{reply:?}");
 }
 
 #[tokio::test]
@@ -162,15 +143,9 @@ async fn head_with_search_returns_once_enough_matches_arrive() {
     let started = Instant::now();
 
     let command = "seq 2 | sed s/2/HIT_1/; sleep 2; seq 2 | sed s/2/HIT_2/; sleep 30";
-    let reply = h
-        .run_with(&shell, command, Read::default().head(2).search("HIT"))
-        .await;
+    let reply = h.run_with(&shell, command, Read::default().head(2).search("HIT")).await;
 
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "returned after {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(10), "returned after {:?}", started.elapsed());
     assert!(
         reply.contains("HIT_1\nHIT_2\n") && reply.contains("Command still running"),
         "{reply:?}"
@@ -183,26 +158,14 @@ async fn a_search_window_waits_for_its_matchs_after_context() {
     let shell = h.shell().await;
     let window = || Read::default().head(1).search("HIT").after(1);
 
-    let finished = h
-        .run_with(
-            &shell,
-            "seq 1 | sed s/1/HIT/; sleep 1; seq 1 | sed s/1/ctx/",
-            window(),
-        )
-        .await;
+    let finished =
+        h.run_with(&shell, "seq 1 | sed s/1/HIT/; sleep 1; seq 1 | sed s/1/ctx/", window()).await;
     let started = Instant::now();
     let command = "seq 1 | sed s/1/HIT/; sleep 2; seq 1 | sed s/1/ctx/; sleep 30";
     let running = h.run_with(&shell, command, window()).await;
 
-    assert!(
-        finished.contains("HIT\nctx\n") && finished.contains("Exit code: 0"),
-        "{finished:?}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "returned after {:?}",
-        started.elapsed()
-    );
+    assert!(finished.contains("HIT\nctx\n") && finished.contains("Exit code: 0"), "{finished:?}");
+    assert!(started.elapsed() < Duration::from_secs(10), "returned after {:?}", started.elapsed());
     assert!(
         running.contains("HIT\nctx\n") && running.contains("Command still running"),
         "{running:?}"
@@ -215,19 +178,10 @@ async fn next_returns_once_enough_lines_arrive() {
     let shell = h.shell().await;
     let started = Instant::now();
 
-    let reply = h
-        .run_with(&shell, "sleep 1; seq 3; sleep 30", Read::default().next(3))
-        .await;
+    let reply = h.run_with(&shell, "sleep 1; seq 3; sleep 30", Read::default().next(3)).await;
 
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "returned after {:?}",
-        started.elapsed()
-    );
-    assert!(
-        reply.contains("2\n3\n") && reply.contains("Command still running"),
-        "{reply:?}"
-    );
+    assert!(started.elapsed() < Duration::from_secs(10), "returned after {:?}", started.elapsed());
+    assert!(reply.contains("2\n3\n") && reply.contains("Command still running"), "{reply:?}");
 }
 
 #[tokio::test]

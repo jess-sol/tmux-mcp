@@ -162,10 +162,7 @@ impl Harness {
         let runtime = dir.path().join("run");
         std::fs::create_dir(&home).expect("a HOME");
         std::fs::write(home.join(".bashrc"), bashrc()).expect("a .bashrc");
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&runtime)
-            .expect("a runtime dir");
+        std::fs::DirBuilder::new().mode(0o700).create(&runtime).expect("a runtime dir");
 
         // The command that starts the server sets the environment every pane
         // inherits. 60 rows keep a Shell beside the harness's pane taller than
@@ -187,19 +184,10 @@ impl Harness {
         let ids =
             run(tmux(&socket).args(["display-message", "-p", "#{pid} #{session_id} #{pane_id}"]));
         let ids: Vec<&str> = ids.split_whitespace().collect();
-        let [pid, session, pane] = ids[..] else {
-            panic!("tmux gave ids {ids:?}")
-        };
+        let [pid, session, pane] = ids[..] else { panic!("tmux gave ids {ids:?}") };
 
         let mut env = vec![
-            (
-                "TMUX",
-                format!(
-                    "{},{pid},{}",
-                    socket.display(),
-                    session.trim_start_matches('$')
-                ),
-            ),
+            ("TMUX", format!("{},{pid},{}", socket.display(), session.trim_start_matches('$'))),
             ("TMUX_PANE", pane.to_string()),
             ("HOME", home.display().to_string()),
             ("XDG_RUNTIME_DIR", runtime.display().to_string()),
@@ -209,13 +197,7 @@ impl Harness {
             env.push(("TMUX_MCP_SEND_DELAY_MS", delay.as_millis().to_string()));
         }
         let session = Session::start(&env, version).await;
-        Harness {
-            session,
-            env,
-            socket,
-            dir,
-            tmp,
-        }
+        Harness { session, env, socket, dir, tmp }
     }
 
     /// A second MCP server on the same daemon, as a second Claude Code session
@@ -234,38 +216,19 @@ impl Harness {
     /// A `shell` whose bash skips the `.bashrc`, so it sends no OSC 133
     /// markers until `inject_osc133`.
     pub async fn shell_without_integration(&self) -> Shell {
-        self.open_shell("PS1='$ ' exec bash --noprofile --norc -i")
-            .await
+        self.open_shell("PS1='$ ' exec bash --noprofile --norc -i").await
     }
 
     async fn open_shell(&self, program: &str) -> Shell {
         let cwd = self.dir().to_str().expect("a UTF-8 temp dir");
-        let split = [
-            "split-window",
-            "-d",
-            "-P",
-            "-F",
-            "#{pane_id}",
-            "-c",
-            cwd,
-            program,
-        ];
+        let split = ["split-window", "-d", "-P", "-F", "#{pane_id}", "-c", cwd, program];
         let pane = run(tmux(&self.socket).args(split)).trim().to_string();
-        let shell = Shell {
-            socket: self.socket.clone(),
-            pane,
-        };
+        let shell = Shell { socket: self.socket.clone(), pane };
 
-        shell
-            .wait_until(SETTLE, |s| s.lines().any(|row| row == "$"))
-            .expect("a prompt");
+        shell.wait_until(SETTLE, |s| s.lines().any(|row| row == "$")).expect("a prompt");
         let deadline = Instant::now() + SETTLE;
         while self.list_panes().await.find(&shell).is_none() {
-            assert!(
-                Instant::now() < deadline,
-                "list_panes never listed {}",
-                shell.pane
-            );
+            assert!(Instant::now() < deadline, "list_panes never listed {}", shell.pane);
             tokio::time::sleep(POLL).await;
         }
         shell
@@ -303,23 +266,19 @@ impl Harness {
     }
 
     async fn run_approved_with(&self, shell: &Shell, command: &str, read: Read) -> String {
-        let arguments = read
-            .set("pane_id", shell.pane.as_str())
-            .set("command", command);
+        let arguments = read.set("pane_id", shell.pane.as_str()).set("command", command);
         self.call("command_run", arguments.0).await
     }
 
     /// Starts `command` and returns while it still runs: a `command_run` that
     /// stops waiting after a second.
     pub async fn start(&self, shell: &Shell, command: &str) {
-        self.run_with(shell, command, Read::default().timeout(1))
-            .await;
+        self.run_with(shell, command, Read::default().timeout(1)).await;
     }
 
     /// `command_read` of the pane's latest command.
     pub async fn read(&self, shell: &Shell, read: Read) -> String {
-        self.call("command_read", read.set("pane_id", shell.pane.as_str()).0)
-            .await
+        self.call("command_read", read.set("pane_id", shell.pane.as_str()).0).await
     }
 
     pub async fn history(&self, shell: &Shell) -> String {
@@ -337,10 +296,8 @@ impl Harness {
         let deadline = Instant::now() + SETTLE;
         loop {
             let reply = self.debug_pane(shell).await;
-            let daemon = reply
-                .split_once(":\n")
-                .map_or(reply.as_str(), |(_, screen)| screen)
-                .to_string();
+            let daemon =
+                reply.split_once(":\n").map_or(reply.as_str(), |(_, screen)| screen).to_string();
             let tmux = shell.screen().trim_end().to_string();
             if daemon == tmux || Instant::now() >= deadline {
                 return (daemon, tmux);
@@ -376,9 +333,7 @@ impl Harness {
     }
 
     pub async fn list_panes(&self) -> PaneTable {
-        PaneTable {
-            text: self.call("list_panes", Map::new()).await,
-        }
+        PaneTable { text: self.call("list_panes", Map::new()).await }
     }
 
     /// Writes the project's `.claude/tmux-mcp.toml`, as a user would. The
@@ -410,8 +365,7 @@ impl Harness {
             "tool_name": "mcp__tmux-mcp__command_run",
             "tool_input": {"pane_id": shell.pane, "command": command},
         });
-        self.ask_hook(&self.env, input)
-            .expect("a decision for command_run")
+        self.ask_hook(&self.env, input).expect("a decision for command_run")
     }
 
     /// Asks the hook about a Claude Code `Bash` call in the project, from
@@ -424,8 +378,7 @@ impl Harness {
             "cwd": self.dir().to_str().expect("a UTF-8 project dir"),
             "tool_input": {"command": command},
         });
-        self.ask_hook(&env, input)
-            .unwrap_or((Decision::Pass, String::new()))
+        self.ask_hook(&env, input).unwrap_or((Decision::Pass, String::new()))
     }
 
     /// What the policy decides for each of `lines`, on both channels, in a
@@ -438,17 +391,10 @@ impl Harness {
             .collect();
         rows.chunks(2)
             .map(|pair| {
-                let [tmux, bash] = pair else {
-                    panic!("one row per channel: {pair:?}")
-                };
+                let [tmux, bash] = pair else { panic!("one row per channel: {pair:?}") };
                 let (tmux, tmux_rule) = judgement(tmux);
                 let (bash, bash_rule) = judgement(bash);
-                Judged {
-                    tmux,
-                    tmux_rule,
-                    bash,
-                    bash_rule,
-                }
+                Judged { tmux, tmux_rule, bash, bash_rule }
             })
             .collect()
     }
@@ -472,10 +418,7 @@ impl Harness {
 
     /// The hook's answer to a payload for any other tool: None.
     pub fn other_tool(&self) -> Option<(Decision, String)> {
-        self.ask_hook(
-            &self.env,
-            json!({"tool_name": "Read", "tool_input": {"file_path": "x"}}),
-        )
+        self.ask_hook(&self.env, json!({"tool_name": "Read", "tool_input": {"file_path": "x"}}))
     }
 }
 
@@ -483,11 +426,7 @@ impl Harness {
     /// The harness's environment without its tmux server: a process run
     /// with it is outside tmux.
     fn outside_tmux(&self) -> Vec<(&'static str, String)> {
-        self.env
-            .iter()
-            .filter(|(name, _)| !name.starts_with("TMUX"))
-            .cloned()
-            .collect()
+        self.env.iter().filter(|(name, _)| !name.starts_with("TMUX")).cloned().collect()
     }
 
     /// Runs `policy-check` on `input` under `env`. No output means no
@@ -522,10 +461,7 @@ impl Harness {
         let answer: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|_| panic!("hook said {:?}", String::from_utf8_lossy(&output.stdout)));
         let answer = &answer["hookSpecificOutput"];
-        let reason = answer["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let reason = answer["permissionDecisionReason"].as_str().unwrap_or_default().to_string();
         let decision = match answer["permissionDecision"].as_str() {
             Some("allow") => Decision::Allow,
             Some("ask") => Decision::Ask,
@@ -548,8 +484,7 @@ impl Shell {
     /// the test does next meets a pane that already holds the text.
     pub fn type_text(&self, text: &str) {
         run(tmux(&self.socket).args(["send-keys", "-l", "-t", &self.pane, "--", text]));
-        self.wait_until(SETTLE, |s| s.contains(text))
-            .expect("the typed text on screen");
+        self.wait_until(SETTLE, |s| s.contains(text)).expect("the typed text on screen");
     }
 
     /// `type_text`, then Enter.
@@ -576,9 +511,7 @@ impl Shell {
 
     /// Polls the screen, as tmux renders it, until `pred` holds.
     pub fn wait_until(
-        &self,
-        timeout: Duration,
-        mut pred: impl FnMut(&str) -> bool,
+        &self, timeout: Duration, mut pred: impl FnMut(&str) -> bool,
     ) -> Result<(), Timeout> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -612,9 +545,7 @@ impl PaneTable {
     pub fn version(&self, shell: &Shell) -> u64 {
         let row = self.row(shell);
         let version = row.split_whitespace().nth(1);
-        version
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| panic!("no version in {row:?}"))
+        version.and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("no version in {row:?}"))
     }
 }
 
@@ -651,8 +582,7 @@ impl Read {
 impl Session {
     /// `command_read` of the pane's latest command, from this session.
     pub async fn read(&self, shell: &Shell, read: Read) -> String {
-        self.call("command_read", read.set("pane_id", shell.pane.as_str()).0)
-            .await
+        self.call("command_read", read.set("pane_id", shell.pane.as_str()).0).await
     }
 }
 
@@ -681,10 +611,7 @@ impl Session {
             server.stdin.take().expect("piped stdin"),
         );
         let client = ().serve(pipes).await.expect("an MCP session with tmux-mcp");
-        Session {
-            client,
-            _server: server,
-        }
+        Session { client, _server: server }
     }
 
     async fn call(&self, tool: &str, arguments: Map<String, Value>) -> String {
@@ -718,11 +645,7 @@ impl Shell {
     /// The screen as tmux shows it.
     pub fn screen(&self) -> String {
         let screen = run(tmux(&self.socket).args(["capture-pane", "-p", "-t", &self.pane]));
-        screen
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n")
+        screen.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -730,10 +653,7 @@ impl PaneTable {
     /// The row whose ID column names `shell`'s pane, `*`-marked or not.
     fn find(&self, shell: &Shell) -> Option<&str> {
         self.text.lines().find(|line| {
-            line.split_whitespace()
-                .next()
-                .map(|id| id.trim_end_matches('*'))
-                == Some(&shell.pane)
+            line.split_whitespace().next().map(|id| id.trim_end_matches('*')) == Some(&shell.pane)
         })
     }
 }
@@ -749,12 +669,7 @@ impl Read {
 /// the isolation cannot be forgotten at one call site.
 fn tmux(socket: &Path) -> Command {
     let mut cmd = Command::new("tmux");
-    cmd.arg("-S")
-        .arg(socket)
-        .arg("-f")
-        .arg("/dev/null")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE");
+    cmd.arg("-S").arg(socket).arg("-f").arg("/dev/null").env_remove("TMUX").env_remove("TMUX_PANE");
     cmd
 }
 

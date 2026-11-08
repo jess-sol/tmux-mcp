@@ -17,10 +17,7 @@ pub fn check(commands: &[CommandInfo]) -> Option<PolicyResult> {
     let dispatch = commands.iter().position(|cmd| cmd.name == TriVal::Unknown)?;
     Some(PolicyResult::of(
         Decision::Deny,
-        format!(
-            "dynamic command dispatch isn't allowed ({})",
-            expanded_word(commands, dispatch)
-        ),
+        format!("dynamic command dispatch isn't allowed ({})", expanded_word(commands, dispatch)),
     ))
 }
 
@@ -39,16 +36,9 @@ fn expanded_word(commands: &[CommandInfo], dispatch: usize) -> String {
     let outer = &commands[outer];
     let names: Vec<String> = outer.expands.iter().map(|n| format!("${n}")).collect();
     if names.is_empty() {
-        format!(
-            "`{}` expands a word that may name a command it runs",
-            outer.text
-        )
+        format!("`{}` expands a word that may name a command it runs", outer.text)
     } else {
-        format!(
-            "`{}` expands {}, which may name a command it runs",
-            outer.text,
-            names.join(", ")
-        )
+        format!("`{}` expands {}, which may name a command it runs", outer.text, names.join(", "))
     }
 }
 
@@ -80,14 +70,8 @@ mod tests {
     #[test]
     fn the_reason_names_the_expanded_word() {
         let rows = [
-            (
-                "$CMD arg",
-                "the command name in `$CMD arg` is expanded at run time",
-            ),
-            (
-                "echo; ${EVIL}",
-                "the command name in `${EVIL}` is expanded at run time",
-            ),
+            ("$CMD arg", "the command name in `$CMD arg` is expanded at run time"),
+            ("echo; ${EVIL}", "the command name in `${EVIL}` is expanded at run time"),
             (
                 "find -L \"$P\" -name x",
                 "`find -L \"$P\" -name x` expands $P, which may name a command it runs",

@@ -91,13 +91,7 @@ fn parse_cell(bytes: &[u8], pos: &mut usize, result: &mut Vec<LayoutPane>) {
             let Some(pane_number) = parse_number(bytes, pos) else {
                 return;
             };
-            result.push(LayoutPane {
-                pane_number: pane_number as u32,
-                width,
-                height,
-                x,
-                y,
-            });
+            result.push(LayoutPane { pane_number: pane_number as u32, width, height, x, y });
         }
         _ => {
             // Unexpected character — bail out of this cell
@@ -134,16 +128,7 @@ mod tests {
     #[test]
     fn single_pane() {
         let panes = parse_layout("a1b2,80x24,0,0,0");
-        assert_eq!(
-            panes,
-            vec![LayoutPane {
-                pane_number: 0,
-                width: 80,
-                height: 24,
-                x: 0,
-                y: 0,
-            }]
-        );
+        assert_eq!(panes, vec![LayoutPane { pane_number: 0, width: 80, height: 24, x: 0, y: 0 }]);
     }
 
     #[test]
@@ -151,26 +136,8 @@ mod tests {
         // Two panes side by side
         let panes = parse_layout("d5a0,200x50,0,0{100x50,0,0,1,99x50,101,0,2}");
         assert_eq!(panes.len(), 2);
-        assert_eq!(
-            panes[0],
-            LayoutPane {
-                pane_number: 1,
-                width: 100,
-                height: 50,
-                x: 0,
-                y: 0,
-            }
-        );
-        assert_eq!(
-            panes[1],
-            LayoutPane {
-                pane_number: 2,
-                width: 99,
-                height: 50,
-                x: 101,
-                y: 0,
-            }
-        );
+        assert_eq!(panes[0], LayoutPane { pane_number: 1, width: 100, height: 50, x: 0, y: 0 });
+        assert_eq!(panes[1], LayoutPane { pane_number: 2, width: 99, height: 50, x: 101, y: 0 });
     }
 
     #[test]
@@ -178,26 +145,8 @@ mod tests {
         // Two panes stacked
         let panes = parse_layout("e3f1,80x50,0,0[80x25,0,0,3,80x24,0,26,4]");
         assert_eq!(panes.len(), 2);
-        assert_eq!(
-            panes[0],
-            LayoutPane {
-                pane_number: 3,
-                width: 80,
-                height: 25,
-                x: 0,
-                y: 0,
-            }
-        );
-        assert_eq!(
-            panes[1],
-            LayoutPane {
-                pane_number: 4,
-                width: 80,
-                height: 24,
-                x: 0,
-                y: 26,
-            }
-        );
+        assert_eq!(panes[0], LayoutPane { pane_number: 3, width: 80, height: 25, x: 0, y: 0 });
+        assert_eq!(panes[1], LayoutPane { pane_number: 4, width: 80, height: 24, x: 0, y: 26 });
     }
 
     #[test]
@@ -206,36 +155,9 @@ mod tests {
         let panes =
             parse_layout("abcd,200x50,0,0{100x50,0,0,1,99x50,101,0[99x25,101,0,2,99x24,101,26,3]}");
         assert_eq!(panes.len(), 3);
-        assert_eq!(
-            panes[0],
-            LayoutPane {
-                pane_number: 1,
-                width: 100,
-                height: 50,
-                x: 0,
-                y: 0,
-            }
-        );
-        assert_eq!(
-            panes[1],
-            LayoutPane {
-                pane_number: 2,
-                width: 99,
-                height: 25,
-                x: 101,
-                y: 0,
-            }
-        );
-        assert_eq!(
-            panes[2],
-            LayoutPane {
-                pane_number: 3,
-                width: 99,
-                height: 24,
-                x: 101,
-                y: 26,
-            }
-        );
+        assert_eq!(panes[0], LayoutPane { pane_number: 1, width: 100, height: 50, x: 0, y: 0 });
+        assert_eq!(panes[1], LayoutPane { pane_number: 2, width: 99, height: 25, x: 101, y: 0 });
+        assert_eq!(panes[2], LayoutPane { pane_number: 3, width: 99, height: 24, x: 101, y: 26 });
     }
 
     #[test]

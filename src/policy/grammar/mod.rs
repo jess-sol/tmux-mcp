@@ -138,10 +138,7 @@ impl Grammars {
         let mut commands = BTreeMap::new();
         for source in sources {
             for (name, config) in source {
-                commands.insert(
-                    name.clone(),
-                    Level::compile(&format!("commands.{name}"), config)?,
-                );
+                commands.insert(name.clone(), Level::compile(&format!("commands.{name}"), config)?);
             }
         }
         Ok(Grammars { commands })
@@ -199,9 +196,7 @@ impl Grammars {
     }
 
     fn lookup(&self, name: &str) -> Option<&Level> {
-        self.commands
-            .get(name)
-            .or_else(|| self.commands.get(name.rsplit('/').next()?))
+        self.commands.get(name).or_else(|| self.commands.get(name.rsplit('/').next()?))
     }
 }
 
@@ -210,11 +205,7 @@ impl Grammars {
 impl Level {
     /// The names this level declares, its global options included.
     fn names(&self) -> BTreeSet<String> {
-        let slots = self
-            .slots
-            .iter()
-            .filter(|s| s.kind != SlotKind::Subcommand)
-            .map(|s| &s.name);
+        let slots = self.slots.iter().filter(|s| s.kind != SlotKind::Subcommand).map(|s| &s.name);
         let options = self.options.iter().chain(&self.global).map(|o| &o.name);
         slots.chain(options).cloned().collect()
     }
@@ -228,8 +219,5 @@ fn value_of(word: &Word) -> TriVal {
 }
 
 fn list(elements: Vec<TriVal>, exhaustive: bool) -> TriVal {
-    TriVal::List {
-        elements,
-        exhaustive,
-    }
+    TriVal::List { elements, exhaustive }
 }

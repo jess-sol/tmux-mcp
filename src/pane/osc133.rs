@@ -60,11 +60,7 @@ pub struct Osc133Parser {
 
 impl Osc133Parser {
     pub fn new() -> Self {
-        Self {
-            phase: Osc133Phase::Idle,
-            pending_command_text: None,
-            capture: String::new(),
-        }
+        Self { phase: Osc133Phase::Idle, pending_command_text: None, capture: String::new() }
     }
 
     /// Current phase (for external queries).
@@ -81,10 +77,7 @@ impl Osc133Parser {
     /// marker fallback). Provided by PaneProcessor which has access to the
     /// terminal.
     pub fn handle_marker(
-        &mut self,
-        marker: u8,
-        param: Option<&str>,
-        state: &mut TerminalState,
+        &mut self, marker: u8, param: Option<&str>, state: &mut TerminalState,
         screen_input: Option<&str>,
     ) {
         match marker {
@@ -159,10 +152,7 @@ impl Osc133Parser {
     /// PaneProcessor — it handles all editing (backspace, cursor movement,
     /// etc.) correctly because it reads from the real terminal emulator.
     fn handle_c(
-        &mut self,
-        param: Option<&str>,
-        state: &mut TerminalState,
-        screen_input: Option<&str>,
+        &mut self, param: Option<&str>, state: &mut TerminalState, screen_input: Option<&str>,
     ) {
         if matches!(self.phase, Osc133Phase::Executing { .. }) {
             tracing::debug!("Duplicate OSC 133;C — ignoring");
@@ -217,10 +207,7 @@ impl Osc133Parser {
             }
             _ => {
                 // D from unexpected state (race condition, mid-join, etc.)
-                tracing::debug!(
-                    "OSC 133;D from unexpected state {:?} — recovering",
-                    self.phase
-                );
+                tracing::debug!("OSC 133;D from unexpected state {:?} — recovering", self.phase);
                 let output = std::mem::take(&mut self.capture);
                 if !output.is_empty() {
                     state.push_command_start(String::new());
@@ -282,11 +269,7 @@ impl Default for Osc133Parser {
 /// a URL's encoding, where `+` is a plus.
 fn parse_cmdline_url(param: &str) -> Option<String> {
     let value = param.strip_prefix("cmdline_url=")?;
-    Some(
-        percent_encoding::percent_decode_str(value)
-            .decode_utf8_lossy()
-            .into_owned(),
-    )
+    Some(percent_encoding::percent_decode_str(value).decode_utf8_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -300,9 +283,7 @@ mod tests {
 
     /// Shorthand for C marker with screen_input (simulating terminal grid read).
     fn marker_c(
-        parser: &mut Osc133Parser,
-        param: Option<&str>,
-        state: &mut TerminalState,
+        parser: &mut Osc133Parser, param: Option<&str>, state: &mut TerminalState,
         screen_input: &str,
     ) {
         parser.handle_marker(b'C', param, state, Some(screen_input));
@@ -398,12 +379,7 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
         // C with cmdline_url parameter (URL-encoded)
-        marker(
-            &mut p,
-            b'C',
-            Some("cmdline_url=echo%20hello%20world"),
-            &mut s,
-        );
+        marker(&mut p, b'C', Some("cmdline_url=echo%20hello%20world"), &mut s);
 
         if let Osc133Phase::Executing { command } = &p.phase {
             assert_eq!(command, "echo hello world");
@@ -883,10 +859,7 @@ mod tests {
         assert!(!s.commands[0].completed, "D should not complete yet");
 
         marker(&mut p, b'A', None, &mut s);
-        assert!(
-            !s.commands[0].completed,
-            "A should not complete (that's B's job)"
-        );
+        assert!(!s.commands[0].completed, "A should not complete (that's B's job)");
 
         marker(&mut p, b'B', None, &mut s);
         assert!(s.commands[0].completed, "B should complete the command");
@@ -903,29 +876,19 @@ mod tests {
         marker(&mut p, b'A', None, &mut s);
         marker(&mut p, b'B', None, &mut s);
 
-        assert_eq!(
-            p.phase,
-            Osc133Phase::Input,
-            "should be in Input after D→A→B recovery"
-        );
+        assert_eq!(p.phase, Osc133Phase::Input, "should be in Input after D→A→B recovery");
     }
 
     // --- Helpers ---
 
     #[test]
     fn parse_cmdline_url_basic() {
-        assert_eq!(
-            parse_cmdline_url("cmdline_url=echo%20hello"),
-            Some("echo hello".into())
-        );
+        assert_eq!(parse_cmdline_url("cmdline_url=echo%20hello"), Some("echo hello".into()));
     }
 
     #[test]
     fn parse_cmdline_url_special_chars() {
-        assert_eq!(
-            parse_cmdline_url("cmdline_url=ls%20-la%20%2Ftmp"),
-            Some("ls -la /tmp".into()),
-        );
+        assert_eq!(parse_cmdline_url("cmdline_url=ls%20-la%20%2Ftmp"), Some("ls -la /tmp".into()),);
     }
 
     #[test]
@@ -950,12 +913,6 @@ mod tests {
         assert_eq!(Osc133Phase::Idle.executing_command(), None);
         assert_eq!(Osc133Phase::Prompt.executing_command(), None);
         assert_eq!(Osc133Phase::Input.executing_command(), None);
-        assert_eq!(
-            Osc133Phase::Executing {
-                command: "ls".into()
-            }
-            .executing_command(),
-            Some("ls"),
-        );
+        assert_eq!(Osc133Phase::Executing { command: "ls".into() }.executing_command(), Some("ls"),);
     }
 }

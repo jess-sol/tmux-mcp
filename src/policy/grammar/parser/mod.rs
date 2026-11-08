@@ -31,25 +31,15 @@ pub(super) struct Scan {
 impl Parser {
     pub(super) fn from(config: &ParserConfig) -> Parser {
         match config {
-            ParserConfig::Name(name) => Parser {
-                name: *name,
-                short_equals: false,
-            },
-            ParserConfig::Settings(s) => Parser {
-                name: s.name,
-                short_equals: s.short_equals,
-            },
+            ParserConfig::Name(name) => Parser { name: *name, short_equals: false },
+            ParserConfig::Settings(s) => Parser { name: s.name, short_equals: s.short_equals },
         }
     }
 
     /// Whether the word `text` is read as an option, among the `active`
     /// options.
     pub(super) fn is_option(
-        &self,
-        text: &str,
-        at_start: bool,
-        active: &[&Opt],
-        scan: &Scan,
+        &self, text: &str, at_start: bool, active: &[&Opt], scan: &Scan,
     ) -> bool {
         if scan.options_end {
             return false;
@@ -63,12 +53,7 @@ impl Parser {
 
     /// Reads the option word `text`: matched exactly, never by prefix.
     pub(super) fn option(
-        &self,
-        text: &str,
-        rest: &[Word],
-        at_start: bool,
-        active: &[&Opt],
-        scan: &mut Scan,
+        &self, text: &str, rest: &[Word], at_start: bool, active: &[&Opt], scan: &mut Scan,
         run: &mut Run,
     ) -> Read {
         match self.name {

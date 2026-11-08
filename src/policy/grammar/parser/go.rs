@@ -14,11 +14,7 @@ pub(super) fn is_option(text: &str) -> bool {
 }
 
 pub(super) fn option(
-    text: &str,
-    rest: &[Word],
-    active: &[&Opt],
-    scan: &mut Scan,
-    run: &mut Run,
+    text: &str, rest: &[Word], active: &[&Opt], scan: &mut Scan, run: &mut Run,
 ) -> Read {
     if text == "--" {
         scan.options_end = true;

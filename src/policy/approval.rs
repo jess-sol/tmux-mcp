@@ -24,10 +24,7 @@ pub enum ApprovalError {
     /// The hook asked about another command in this pane: the newest.
     OtherCommand { approved: String },
     /// The pane is not where the person approved the command.
-    ContextChanged {
-        approved: Box<PaneContext>,
-        live: Box<PaneContext>,
-    },
+    ContextChanged { approved: Box<PaneContext>, live: Box<PaneContext> },
 }
 
 struct PendingApproval {
@@ -57,29 +54,20 @@ impl ApprovalStore {
             self.evict_oldest();
         }
         self.next_seq += 1;
-        self.pending.insert(
-            key,
-            PendingApproval {
-                ctx: ctx.clone(),
-                seq: self.next_seq,
-            },
-        );
+        self.pending.insert(key, PendingApproval { ctx: ctx.clone(), seq: self.next_seq });
     }
 
     /// Whether a pending approval covers this request: it exists, and was
     /// given in this pane context.
     pub fn verify(
-        &self,
-        origin: &str,
-        pane_id: &str,
-        command: &str,
-        live_ctx: &PaneContext,
+        &self, origin: &str, pane_id: &str, command: &str, live_ctx: &PaneContext,
     ) -> Result<(), ApprovalError> {
         let Some(approval) = self.pending.get(&key(origin, pane_id, command)) else {
-            return Err(self.newest_other(origin, pane_id).map_or(
-                ApprovalError::Missing,
-                |approved| ApprovalError::OtherCommand { approved },
-            ));
+            return Err(self
+                .newest_other(origin, pane_id)
+                .map_or(ApprovalError::Missing, |approved| ApprovalError::OtherCommand {
+                    approved,
+                }));
         };
 
         if approval.ctx != *live_ctx {
@@ -148,10 +136,7 @@ mod tests {
         store.store("%0", "%1", "rm foo", &c);
         assert!(store.verify("%0", "%1", "rm foo", &c).is_ok());
         store.consume("%0", "%1", "rm foo");
-        assert_eq!(
-            store.verify("%0", "%1", "rm foo", &c),
-            Err(ApprovalError::Missing)
-        );
+        assert_eq!(store.verify("%0", "%1", "rm foo", &c), Err(ApprovalError::Missing));
     }
 
     /// An approval is for one command in one pane from one origin. Another
@@ -161,9 +146,7 @@ mod tests {
         let mut store = ApprovalStore::new();
         let c = ctx();
         store.store("%0", "%1", "rm foo", &c);
-        let other = Err(ApprovalError::OtherCommand {
-            approved: "rm foo".into(),
-        });
+        let other = Err(ApprovalError::OtherCommand { approved: "rm foo".into() });
         for (origin, pane, command, want) in [
             ("%99", "%1", "rm foo", Err(ApprovalError::Missing)),
             ("%0", "%2", "rm foo", Err(ApprovalError::Missing)),

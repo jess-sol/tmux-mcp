@@ -80,11 +80,7 @@ pub fn find_next_osc(bytes: &[u8]) -> Option<OscMatch> {
         let data = &bytes[data_start..data_end];
         match parse_osc_event(osc_number, data) {
             Some(event) => {
-                return Some(OscMatch {
-                    start: seq_start,
-                    end: term_end,
-                    event,
-                });
+                return Some(OscMatch { start: seq_start, end: term_end, event });
             }
             None => {
                 // Complete but unparseable — skip it and keep scanning
@@ -193,22 +189,15 @@ mod tests {
     // --- Helper ---
 
     fn osc133(marker: u8, param: Option<&str>) -> OscEvent {
-        OscEvent::Osc133 {
-            marker,
-            param: param.map(|s| s.to_string()),
-        }
+        OscEvent::Osc133 { marker, param: param.map(|s| s.to_string()) }
     }
 
     fn osc7(uri: &str) -> OscEvent {
-        OscEvent::Osc7 {
-            uri: uri.to_string(),
-        }
+        OscEvent::Osc7 { uri: uri.to_string() }
     }
 
     fn osc9(text: &str) -> OscEvent {
-        OscEvent::Osc9 {
-            text: text.to_string(),
-        }
+        OscEvent::Osc9 { text: text.to_string() }
     }
 
     // --- OSC 133 with BEL terminator ---

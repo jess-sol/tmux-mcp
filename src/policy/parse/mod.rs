@@ -121,9 +121,7 @@ pub(crate) enum Word {
 /// Parse a command string into the flat list of commands it runs, the first
 /// in `start`. A shell line that an *Inner command* runs must parse too.
 pub fn parse_command(
-    command: &str,
-    grammars: &Grammars,
-    start: &Context,
+    command: &str, grammars: &Grammars, start: &Context,
 ) -> Result<Vec<CommandInfo>, ParseError> {
     walker::walk(command, &parse_with_brush(command)?, grammars, start)
 }
@@ -152,7 +150,5 @@ fn parse_with_brush(command: &str) -> Result<ast::Program, ParseError> {
         &brush_parser::ParserOptions::default(),
         &brush_parser::SourceInfo::default(),
     );
-    parser.parse_program().map_err(|e| ParseError {
-        message: format!("{}", e),
-    })
+    parser.parse_program().map_err(|e| ParseError { message: format!("{}", e) })
 }

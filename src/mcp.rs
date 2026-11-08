@@ -29,12 +29,7 @@ const OFFSETS_PER_PANE: usize = 100;
 
 impl TmuxMcp {
     pub fn new(client: DaemonClient, origin_pane: String) -> Self {
-        Self {
-            client,
-            origin_pane,
-            offsets: Offsets::default(),
-            tool_router: Self::tool_router(),
-        }
+        Self { client, origin_pane, offsets: Offsets::default(), tool_router: Self::tool_router() }
     }
 }
 
@@ -204,28 +199,15 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
         .map(|p| pos(p))
         .unwrap_or((0, 0));
 
-    let header = [
-        "ID",
-        "Version",
-        "Geometry",
-        "State",
-        "Integration",
-        "Process",
-        "Output",
-        "Cwd",
-    ]
-    .map(String::from);
+    let header = ["ID", "Version", "Geometry", "State", "Integration", "Process", "Output", "Cwd"]
+        .map(String::from);
     let rows: Vec<[String; 8]> = panes
         .iter()
         .map(|p| {
             let pane_id = p["pane_id"].as_str().unwrap_or("?");
             let (x, y) = pos(p);
             [
-                if pane_id == origin_pane {
-                    format!("{pane_id}*")
-                } else {
-                    pane_id.to_string()
-                },
+                if pane_id == origin_pane { format!("{pane_id}*") } else { pane_id.to_string() },
                 p["version"].as_u64().unwrap_or(0).to_string(),
                 format!(
                     "{}x{}{:+}{:+}",
@@ -241,10 +223,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
                     .to_lowercase(),
                 p["osc133_status"].as_str().unwrap_or("unknown").to_string(),
                 p["foreground"].as_str().unwrap_or("-").to_string(),
-                p["last_data_secs"]
-                    .as_f64()
-                    .map(format_age)
-                    .unwrap_or("-".into()),
+                p["last_data_secs"].as_f64().map(format_age).unwrap_or("-".into()),
                 pane_cwd(p).unwrap_or("-".into()),
             ]
         })
@@ -259,11 +238,8 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
     std::iter::once(&header)
         .chain(&rows)
         .map(|row| {
-            let cells: Vec<String> = row
-                .iter()
-                .zip(widths)
-                .map(|(c, w)| format!("{c:w$}"))
-                .collect();
+            let cells: Vec<String> =
+                row.iter().zip(widths).map(|(c, w)| format!("{c:w$}")).collect();
             cells.join("  ").trim_end().to_string()
         })
         .collect::<Vec<_>>()
@@ -272,9 +248,7 @@ fn format_list_panes(result: &serde_json::Value, origin_pane: &str) -> String {
 
 /// Prefer osc_cwd (works across SSH), fall back to process_cwd.
 fn pane_cwd(p: &serde_json::Value) -> Option<String> {
-    let path = p["osc_cwd"]
-        .as_str()
-        .or_else(|| p["process_cwd"].as_str())?;
+    let path = p["osc_cwd"].as_str().or_else(|| p["process_cwd"].as_str())?;
     Some(match (p["osc_user"].as_str(), p["osc_hostname"].as_str()) {
         (Some(user), Some(host)) => format!("{user}@{host}:{path}"),
         (None, Some(host)) => format!("{host}:{path}"),
@@ -310,18 +284,9 @@ fn format_command_history(result: &serde_json::Value) -> String {
     let rows: Vec<Row> = entries
         .iter()
         .map(|e| Row {
-            id: e["command_id"]
-                .as_u64()
-                .map(|v| v.to_string())
-                .unwrap_or("-".into()),
-            exit: e["exit_code"]
-                .as_i64()
-                .map(|v| v.to_string())
-                .unwrap_or("-".into()),
-            lines: e["output_lines"]
-                .as_u64()
-                .map(|v| v.to_string())
-                .unwrap_or("-".into()),
+            id: e["command_id"].as_u64().map(|v| v.to_string()).unwrap_or("-".into()),
+            exit: e["exit_code"].as_i64().map(|v| v.to_string()).unwrap_or("-".into()),
+            lines: e["output_lines"].as_u64().map(|v| v.to_string()).unwrap_or("-".into()),
             command: e["command"].as_str().unwrap_or("").to_string(),
         })
         .collect();
@@ -383,11 +348,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
     // Skipped lines hint — split into already-read vs not-shown portions
     if lines_skipped > 0 {
-        let already_read = if offset > 0 {
-            offset.min(lines_skipped)
-        } else {
-            0
-        };
+        let already_read = if offset > 0 { offset.min(lines_skipped) } else { 0 };
         let not_shown = lines_skipped - already_read;
         if already_read > 0 {
             text.push_str(&format!("<{} lines already read>\n", already_read));
@@ -412,10 +373,7 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
                 text.push_str(&format!("\nExit code: {}", code));
             }
             if let Some(matches) = search_matches {
-                text.push_str(&format!(
-                    "\n[{} matches in {} lines.]",
-                    matches, total_lines
-                ));
+                text.push_str(&format!("\n[{} matches in {} lines.]", matches, total_lines));
             }
             // Nudge toward command_read when command_run output was filtered
             if is_run && let Some(id) = command_id {
@@ -487,10 +445,8 @@ fn format_command_result(result: &serde_json::Value, is_run: bool) -> String {
 
 #[tool_router]
 impl TmuxMcp {
-    #[tool(
-        description = "List tmux panes with status, working directory, and running process. \
-                       `*` marks the pane you run in; Geometry is WxH+X+Y relative to it."
-    )]
+    #[tool(description = "List tmux panes with status, working directory, and running process. \
+                       `*` marks the pane you run in; Geometry is WxH+X+Y relative to it.")]
     async fn list_panes(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self
             .client
@@ -510,8 +466,7 @@ impl TmuxMcp {
                        to see more."
     )]
     async fn command_run(
-        &self,
-        Parameters(params): Parameters<CommandRunParams>,
+        &self, Parameters(params): Parameters<CommandRunParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut rpc_params = json!({
             "origin_pane": self.origin_pane,
@@ -556,8 +511,7 @@ impl TmuxMcp {
 
     #[tool(description = "Read or stream output from a running or completed command")]
     async fn command_read(
-        &self,
-        Parameters(params): Parameters<CommandReadParams>,
+        &self, Parameters(params): Parameters<CommandReadParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let mut rpc_params = json!({
             "origin_pane": self.origin_pane,
@@ -608,8 +562,7 @@ impl TmuxMcp {
 
     #[tool(description = "The pane's visible screen, for a pane in an unusual state")]
     async fn debug_pane(
-        &self,
-        Parameters(params): Parameters<DebugPaneParams>,
+        &self, Parameters(params): Parameters<DebugPaneParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self
             .client
@@ -637,18 +590,14 @@ impl TmuxMcp {
             ));
         }
 
-        text.push_str(&format!(
-            "Screen at version {}:\n",
-            result["version"].as_u64().unwrap_or(0)
-        ));
+        text.push_str(&format!("Screen at version {}:\n", result["version"].as_u64().unwrap_or(0)));
         text.push_str(result["text"].as_str().unwrap_or(""));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "Inject shell integration into a bash pane for command tracking")]
     async fn inject_osc133(
-        &self,
-        Parameters(params): Parameters<InjectOsc133Params>,
+        &self, Parameters(params): Parameters<InjectOsc133Params>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self
             .client
@@ -669,17 +618,12 @@ impl TmuxMcp {
                 "OSC 133 already active — no injection needed. command_run should work.".to_string()
             }
             _ => {
-                let msg = result["message"]
-                    .as_str()
-                    .unwrap_or("Injection may have failed");
+                let msg = result["message"].as_str().unwrap_or("Injection may have failed");
                 let screen = result["screen"].as_str().unwrap_or("");
                 if screen.is_empty() {
                     format!("OSC 133 injection status: {} — {}", status, msg)
                 } else {
-                    format!(
-                        "OSC 133 injection status: {} — {}\n\n{}",
-                        status, msg, screen
-                    )
+                    format!("OSC 133 injection status: {} — {}\n\n{}", status, msg, screen)
                 }
             }
         };
@@ -694,8 +638,7 @@ impl TmuxMcp {
 
     #[tool(description = "Send a control key to a pane (C-c, C-d, Enter, Escape, etc.)")]
     async fn press_key(
-        &self,
-        Parameters(params): Parameters<PressKeyParams>,
+        &self, Parameters(params): Parameters<PressKeyParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self
             .client
@@ -717,8 +660,7 @@ impl TmuxMcp {
 
     #[tool(description = "List recent commands and their exit codes for a pane")]
     async fn command_history(
-        &self,
-        Parameters(params): Parameters<CommandHistoryParams>,
+        &self, Parameters(params): Parameters<CommandHistoryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self
             .client
@@ -837,9 +779,6 @@ mod tests {
             !json.contains(r#"plan\\\\.metrics"#),
             "found over-escaped plan\\\\.metrics in schema JSON"
         );
-        assert!(
-            !json.contains(r#"result\\\\?"#),
-            "found over-escaped result\\\\? in schema JSON"
-        );
+        assert!(!json.contains(r#"result\\\\?"#), "found over-escaped result\\\\? in schema JSON");
     }
 }

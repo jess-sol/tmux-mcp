@@ -24,24 +24,15 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn method_not_found(method: &str) -> Self {
-        Self {
-            code: -32601,
-            message: format!("Unknown method: {}", method),
-        }
+        Self { code: -32601, message: format!("Unknown method: {}", method) }
     }
 
     pub fn invalid_params(msg: impl Into<String>) -> Self {
-        Self {
-            code: -32602,
-            message: msg.into(),
-        }
+        Self { code: -32602, message: msg.into() }
     }
 
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self {
-            code: -32603,
-            message: msg.into(),
-        }
+        Self { code: -32603, message: msg.into() }
     }
 
     pub fn to_json(&self) -> Value {
@@ -67,16 +58,11 @@ impl DaemonState {
     /// connection stays locked from the check through the write, so no other
     /// write comes between them.
     pub async fn send_command(
-        &self,
-        pane_id: &str,
-        version: u64,
-        line: &str,
+        &self, pane_id: &str, version: u64, line: &str,
     ) -> Result<(), RpcError> {
         let pane = self.pane_to_write(pane_id).await?;
         let mut conn = self.conn.lock().await;
-        pane.sending_command(version)
-            .await
-            .map_err(|Stale| stale(pane_id))?;
+        pane.sending_command(version).await.map_err(|Stale| stale(pane_id))?;
         conn.send_command(pane_id, line)
             .await
             .map_err(|e| RpcError::internal(format!("Failed to send to {pane_id}: {e}")))
@@ -114,9 +100,7 @@ fn stale(pane_id: &str) -> RpcError {
 
 /// Dispatch an RPC method call.
 pub async fn dispatch(
-    method: &str,
-    params: &Value,
-    state: &Arc<DaemonState>,
+    method: &str, params: &Value, state: &Arc<DaemonState>,
 ) -> Result<Value, RpcError> {
     match method {
         "list_panes" => handle_list_panes(params, state).await,
@@ -141,19 +125,14 @@ fn resolve_caller_window(registry: &PaneRegistry, params: &Value) -> Result<Stri
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("origin_pane is required"))?;
 
-    registry
-        .window_for_pane(origin_pane)
-        .map(|w| w.to_string())
-        .ok_or_else(|| {
-            RpcError::invalid_params(format!("Origin pane {} not tracked by daemon", origin_pane))
-        })
+    registry.window_for_pane(origin_pane).map(|w| w.to_string()).ok_or_else(|| {
+        RpcError::invalid_params(format!("Origin pane {} not tracked by daemon", origin_pane))
+    })
 }
 
 /// Validate that a target pane belongs to the caller's window.
 fn validate_pane_access(
-    registry: &PaneRegistry,
-    pane_id: &str,
-    caller_window: &str,
+    registry: &PaneRegistry, pane_id: &str, caller_window: &str,
 ) -> Result<(), RpcError> {
     let pane_window = registry
         .window_for_pane(pane_id)
@@ -227,15 +206,7 @@ impl ReadParams {
             .zip(params["offset"]["line"].as_u64())
             .map(|(id, line)| (id, line as usize));
 
-        Ok(Self {
-            next,
-            head,
-            tail,
-            search,
-            before,
-            after,
-            offset,
-        })
+        Ok(Self { next, head, tail, search, before, after, offset })
     }
 }
 
@@ -253,10 +224,7 @@ struct ReadResult {
 /// Expand match positions into merged (start, end) ranges with before/after context.
 /// Returns inclusive ranges sorted by position.
 fn merge_context_ranges(
-    match_indices: &[usize],
-    before: usize,
-    after: usize,
-    total_lines: usize,
+    match_indices: &[usize], before: usize, after: usize, total_lines: usize,
 ) -> Vec<(usize, usize)> {
     if match_indices.is_empty() || total_lines == 0 {
         return Vec::new();
@@ -299,10 +267,7 @@ fn collect_context_lines(all_lines: &[String], ranges: &[(usize, usize)]) -> Vec
 /// A line without its newline shows in reads, but no read consumes it until
 /// `output_done`, so a later `next` still finds it once it ends.
 fn apply_read_params(
-    output: &str,
-    output_done: bool,
-    cursor: &mut usize,
-    params: &ReadParams,
+    output: &str, output_done: bool, cursor: &mut usize, params: &ReadParams,
 ) -> ReadResult {
     // The terminal adds `\r` to each `\n`, and shells injected with an older
     // PS0 line send readline's `\x01`/`\x02` markers; neither is the command's.
@@ -323,9 +288,7 @@ fn apply_read_params(
         total_lines.saturating_sub(1)
     };
     let context_pending = |selected: &[usize]| {
-        selected
-            .last()
-            .is_some_and(|&m| params.after > 0 && m + params.after >= consumable)
+        selected.last().is_some_and(|&m| params.after > 0 && m + params.after >= consumable)
     };
 
     if let Some(re) = &params.search {
@@ -355,10 +318,7 @@ fn apply_read_params(
                 collect_context_lines(&all_lines, &ranges)
             } else {
                 *cursor = start + scanned;
-                match_indices
-                    .iter()
-                    .map(|&i| all_lines[i].clone())
-                    .collect()
+                match_indices.iter().map(|&i| all_lines[i].clone()).collect()
             };
 
             let context_pending = context_pending(&match_indices);
@@ -408,10 +368,7 @@ fn apply_read_params(
                 );
                 collect_context_lines(&all_lines, &ranges)
             } else {
-                selected_indices
-                    .iter()
-                    .map(|&i| all_lines[i].clone())
-                    .collect()
+                selected_indices.iter().map(|&i| all_lines[i].clone()).collect()
             };
 
             let context_pending = context_pending(selected_indices);
@@ -446,13 +403,7 @@ fn apply_read_params(
             *cursor = consumable;
             (all_lines, 0)
         };
-        ReadResult {
-            lines: selected,
-            total_lines,
-            skipped,
-            matched: None,
-            context_pending: false,
-        }
+        ReadResult { lines: selected, total_lines, skipped, matched: None, context_pending: false }
     }
 }
 
@@ -484,11 +435,8 @@ enum BareReadPolicy {
 /// `tail`, bare+search, and bare reads with `bare_policy = WaitForCompletion`
 /// wait for completion or the deadline; they don't early-return on partial output.
 async fn wait_and_read(
-    pane_handle: &PaneHandle,
-    command_id: Option<u64>,
-    read_params: &ReadParams,
-    deadline: tokio::time::Instant,
-    bare_policy: BareReadPolicy,
+    pane_handle: &PaneHandle, command_id: Option<u64>, read_params: &ReadParams,
+    deadline: tokio::time::Instant, bare_policy: BareReadPolicy,
 ) -> Result<Value, RpcError> {
     // Determine how many result lines constitute "enough" to return early.
     let required_lines = read_params.next.or(read_params.head);
@@ -583,11 +531,7 @@ async fn wait_and_read(
 /// `offset` the reader's next read of `cmd` starts from. The reader keeps the
 /// offset; the daemon keeps nothing.
 fn read_reply(
-    cmd: &CommandRecord,
-    version: u64,
-    status: &str,
-    result: &ReadResult,
-    offset: usize,
+    cmd: &CommandRecord, version: u64, status: &str, result: &ReadResult, offset: usize,
 ) -> Value {
     json!({
         "command_id": cmd.id,
@@ -611,11 +555,7 @@ const WINDOW_SETTLE: tokio::time::Duration = tokio::time::Duration::from_millis(
 /// `press_key` after them takes.
 async fn shown_screen(pane_handle: &PaneHandle) -> String {
     let screen = pane_handle.screen().await;
-    format!(
-        "Screen at version {}:\n{}",
-        screen.snapshot.version,
-        screen.last_rows(20)
-    )
+    format!("Screen at version {}:\n{}", screen.snapshot.version, screen.last_rows(20))
 }
 
 /// How long a command line of the daemon's waits for the shell's markers: a
@@ -626,10 +566,7 @@ const MARKER_TIMEOUT: Duration = Duration::from_secs(1);
 /// the snapshot that answers it: at `Input` when the shell sends markers,
 /// with integration false when it sends none.
 async fn probe_osc133(
-    pane_id: &str,
-    pane_handle: &PaneHandle,
-    state: &Arc<DaemonState>,
-    snapshot: &PaneSnapshot,
+    pane_id: &str, pane_handle: &PaneHandle, state: &Arc<DaemonState>, snapshot: &PaneSnapshot,
 ) -> Result<Arc<PaneSnapshot>, RpcError> {
     let rx = pane_handle.subscribe_state();
     state.send_command(pane_id, snapshot.version, " :").await?;
@@ -639,8 +576,7 @@ async fn probe_osc133(
 /// The first snapshot at `Input`. A shell that brings none in time sends no
 /// markers, so the snapshot after the wait says integration is false.
 async fn at_prompt(
-    pane_handle: &PaneHandle,
-    mut rx: tokio::sync::watch::Receiver<u64>,
+    pane_handle: &PaneHandle, mut rx: tokio::sync::watch::Receiver<u64>,
 ) -> Arc<PaneSnapshot> {
     let deadline = Instant::now() + MARKER_TIMEOUT;
     loop {
@@ -715,18 +651,14 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
         let caller_window = resolve_caller_window(&registry, params)?;
         let all_handles = registry.snapshot_handles();
         // Filter by window — window_id is on TrackedPane (outside mutex)
-        let filtered: Vec<PaneHandle> = all_handles
-            .into_iter()
-            .filter(|h| h.window_id == caller_window)
-            .collect();
+        let filtered: Vec<PaneHandle> =
+            all_handles.into_iter().filter(|h| h.window_id == caller_window).collect();
         filtered
     };
 
     // Get local hostname to filter it from osc_hostname
-    let local_hostname = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_default();
+    let local_hostname =
+        hostname::get().ok().and_then(|h| h.into_string().ok()).unwrap_or_default();
 
     let mut entries = Vec::new();
     for handle in &handles {
@@ -736,10 +668,8 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
         let (process_cwd, foreground) = if let Some(pid) = snapshot.pid {
             let info = proc::proc_info(pid);
             (
-                info.as_ref()
-                    .and_then(|i| i.cwd.as_ref().map(|p| p.display().to_string())),
-                info.as_ref()
-                    .and_then(|i| i.foreground.as_ref().map(|f| f.comm.clone())),
+                info.as_ref().and_then(|i| i.cwd.as_ref().map(|p| p.display().to_string())),
+                info.as_ref().and_then(|i| i.foreground.as_ref().map(|f| f.comm.clone())),
             )
         } else {
             (None, None)
@@ -776,8 +706,7 @@ async fn handle_list_panes(params: &Value, state: &Arc<DaemonState>) -> Result<V
 }
 
 async fn handle_command_history(
-    params: &Value,
-    state: &Arc<DaemonState>,
+    params: &Value, state: &Arc<DaemonState>,
 ) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
@@ -828,14 +757,7 @@ async fn handle_command_read(params: &Value, state: &Arc<DaemonState>) -> Result
     };
 
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
-    wait_and_read(
-        &pane_handle,
-        command_id,
-        &read_params,
-        deadline,
-        BareReadPolicy::ReturnNow,
-    )
-    .await
+    wait_and_read(&pane_handle, command_id, &read_params, deadline, BareReadPolicy::ReturnNow).await
 }
 
 async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<Value, RpcError> {
@@ -873,15 +795,9 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
 
     let newest = snapshot.commands.first().map_or(0, |c| c.id);
     let rx = pane_handle.subscribe_state();
-    state
-        .send_command(pane_id, snapshot.version, command)
-        .await?;
+    state.send_command(pane_id, snapshot.version, command).await?;
     if approved {
-        state
-            .approvals
-            .lock()
-            .await
-            .consume(origin_pane, pane_id, command);
+        state.approvals.lock().await.consume(origin_pane, pane_id, command);
     }
     let completion_deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let new_command_id = started_command(pane_id, &pane_handle, newest, rx).await?;
@@ -904,9 +820,7 @@ async fn handle_command_run(params: &Value, state: &Arc<DaemonState>) -> Result<
 /// prompt. An Unknown phase passes only while integration is Unknown too:
 /// the probe makes both known.
 async fn check_pane(
-    pane_id: &str,
-    pane_handle: &PaneHandle,
-    snapshot: &PaneSnapshot,
+    pane_id: &str, pane_handle: &PaneHandle, snapshot: &PaneSnapshot,
 ) -> Result<(), RpcError> {
     check_mode(pane_id, snapshot)?;
     let input = &snapshot.input;
@@ -968,27 +882,17 @@ fn check_mode(pane_id: &str, snapshot: &PaneSnapshot) -> Result<(), RpcError> {
 /// Judges `command` where the snapshot says it runs. True when it runs on
 /// the person's approval, which the caller consumes once the command is sent.
 async fn check_policy(
-    state: &Arc<DaemonState>,
-    origin_pane: &str,
-    pane_id: &str,
-    command: &str,
+    state: &Arc<DaemonState>, origin_pane: &str, pane_id: &str, command: &str,
     snapshot: &PaneSnapshot,
 ) -> Result<bool, RpcError> {
     let ctx = policy::PaneContext::from(snapshot);
     let result = policy::evaluate(command, &ctx, policy::Via::Tmux, &state.policy);
     match result.decision {
         policy::Decision::Allow => Ok(false),
-        policy::Decision::Deny => Err(RpcError {
-            code: -32001,
-            message: result.reason(),
-        }),
+        policy::Decision::Deny => Err(RpcError { code: -32001, message: result.reason() }),
         // *Passthrough* comes only from the Bash *Channel*.
         policy::Decision::Ask | policy::Decision::Passthrough => {
-            let verified = state
-                .approvals
-                .lock()
-                .await
-                .verify(origin_pane, pane_id, command, &ctx);
+            let verified = state.approvals.lock().await.verify(origin_pane, pane_id, command, &ctx);
             verified.map(|()| true).map_err(|error| RpcError {
                 code: -32001,
                 message: format!(
@@ -1043,10 +947,7 @@ fn unapproved(pane_id: &str, error: &ApprovalError) -> String {
 /// pushes a record. A shell that sends none in time sends no markers, so
 /// integration becomes false.
 async fn started_command(
-    pane_id: &str,
-    pane_handle: &PaneHandle,
-    newest: u64,
-    mut rx: tokio::sync::watch::Receiver<u64>,
+    pane_id: &str, pane_handle: &PaneHandle, newest: u64, mut rx: tokio::sync::watch::Receiver<u64>,
 ) -> Result<u64, RpcError> {
     let deadline = Instant::now() + MARKER_TIMEOUT;
     loop {
@@ -1091,11 +992,7 @@ async fn handle_capture_pane(params: &Value, state: &Arc<DaemonState>) -> Result
     let screen = pane_handle.screen().await;
 
     // Include active command metadata so MCP layer can steer LLMs toward command_read
-    let running = screen
-        .snapshot
-        .commands
-        .first()
-        .filter(|cmd| !cmd.completed && !cmd.output_done);
+    let running = screen.snapshot.commands.first().filter(|cmd| !cmd.completed && !cmd.output_done);
     let active_cmd = running.map(|cmd| {
         json!({
             "command_id": cmd.id,
@@ -1154,9 +1051,7 @@ async fn handle_inject_osc133(params: &Value, state: &Arc<DaemonState>) -> Resul
     // One line: each line of its own would bring markers, and so a new *Pane
     // version*, before the next.
     let rx = pane_handle.subscribe_state();
-    state
-        .send_command(pane_id, snapshot.version, &OSC133_INJECT_LINES.join(";"))
-        .await?;
+    state.send_command(pane_id, snapshot.version, &OSC133_INJECT_LINES.join(";")).await?;
 
     let answered = at_prompt(&pane_handle, rx).await;
     if answered.phase == Fact::Known(Osc133Phase::Input) {
@@ -1179,9 +1074,8 @@ async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Va
     let pane_id = params["pane_id"]
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("pane_id is required"))?;
-    let keys = params["keys"]
-        .as_str()
-        .ok_or_else(|| RpcError::invalid_params("keys is required"))?;
+    let keys =
+        params["keys"].as_str().ok_or_else(|| RpcError::invalid_params("keys is required"))?;
     let version = params["version"].as_u64().ok_or_else(|| {
         RpcError::invalid_params(
             "version is required: the pane version that list_panes, debug_pane or a command \
@@ -1228,10 +1122,7 @@ async fn handle_send_keys(params: &Value, state: &Arc<DaemonState>) -> Result<Va
         if (after.cursor, &after.rows) != (before.cursor, &before.rows) {
             break;
         }
-        if !matches!(
-            tokio::time::timeout_at(deadline, rx.changed()).await,
-            Ok(Ok(()))
-        ) {
+        if !matches!(tokio::time::timeout_at(deadline, rx.changed()).await, Ok(Ok(()))) {
             break;
         }
     }
@@ -1249,8 +1140,7 @@ async fn foreground_process(state: &Arc<DaemonState>, pane_id: &str) -> Option<S
 }
 
 async fn handle_request_approval(
-    params: &Value,
-    state: &Arc<DaemonState>,
+    params: &Value, state: &Arc<DaemonState>,
 ) -> Result<Value, RpcError> {
     let pane_id = params["pane_id"]
         .as_str()
@@ -1296,22 +1186,14 @@ async fn handle_request_approval(
         policy::Decision::Allow => Ok(json!({"result": "allow", "rule": result.reason()})),
         policy::Decision::Deny => {
             let mut resp = json!({"result": "deny", "rule": result.reason()});
-            resp.as_object_mut()
-                .unwrap()
-                .extend(ctx_json.as_object().unwrap().clone());
+            resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
             Ok(resp)
         }
         // *Passthrough* comes only from the Bash *Channel*.
         policy::Decision::Ask | policy::Decision::Passthrough => {
-            state
-                .approvals
-                .lock()
-                .await
-                .store(&origin_pane, pane_id, command, &ctx);
+            state.approvals.lock().await.store(&origin_pane, pane_id, command, &ctx);
             let mut resp = json!({"result": "ask", "rule": result.reason()});
-            resp.as_object_mut()
-                .unwrap()
-                .extend(ctx_json.as_object().unwrap().clone());
+            resp.as_object_mut().unwrap().extend(ctx_json.as_object().unwrap().clone());
             Ok(resp)
         }
     }

@@ -44,19 +44,13 @@ enum Placed {
 
 impl Read {
     pub(super) fn took(taken: usize) -> Read {
-        Read {
-            taken,
-            undeclared: false,
-        }
+        Read { taken, undeclared: false }
     }
 
     /// An undeclared option took nothing only when nothing follows it and
     /// no value is attached.
     pub(super) fn undeclared(attached: bool, rest: &[Word]) -> Read {
-        Read {
-            taken: 0,
-            undeclared: attached || !rest.is_empty(),
-        }
+        Read { taken: 0, undeclared: attached || !rest.is_empty() }
     }
 }
 
@@ -71,20 +65,14 @@ impl Level {
             }
         }
         for opt in self.options.iter().chain(&self.global) {
-            let empty = if opt.value || opt.command {
-                list(Vec::new(), true)
-            } else {
-                TriVal::Bool(false)
-            };
+            let empty =
+                if opt.value || opt.command { list(Vec::new(), true) } else { TriVal::Bool(false) };
             run.parts.insert(opt.name.clone(), empty);
         }
         let mut globals = globals.to_vec();
         globals.extend(&self.global);
 
-        let sub_at = self
-            .slots
-            .iter()
-            .position(|s| s.kind == SlotKind::Subcommand);
+        let sub_at = self.slots.iter().position(|s| s.kind == SlotKind::Subcommand);
         let (pre, post) = match sub_at {
             Some(at) => (&self.slots[..at], &self.slots[at + 1..]),
             None => (&[][..], &self.slots[..]),
@@ -102,11 +90,7 @@ impl Level {
             let word = &words[i];
             let at_start = i == 0;
             i += 1;
-            let own = if after_word {
-                &[][..]
-            } else {
-                &self.options[..]
-            };
+            let own = if after_word { &[][..] } else { &self.options[..] };
             let active: Vec<&Opt> = own.iter().chain(globals.iter().copied()).collect();
             match word {
                 Word::Unknown { splits } if !scan.options_end || *splits => {
@@ -115,8 +99,7 @@ impl Level {
                 }
                 Word::Known(text) if self.parser.is_option(text, at_start, &active, &scan) => {
                     let read =
-                        self.parser
-                            .option(text, &words[i..], at_start, &active, &mut scan, run);
+                        self.parser.option(text, &words[i..], at_start, &active, &mut scan, run);
                     i += read.taken;
                     if read.undeclared {
                         run.doubt = true;
@@ -206,11 +189,7 @@ impl Level {
                 _ => unsure_part(run, &slot.name),
             }
         }
-        let own = if own_active {
-            &self.options[..]
-        } else {
-            &[][..]
-        };
+        let own = if own_active { &self.options[..] } else { &[][..] };
         for opt in own.iter().chain(globals.iter().copied()) {
             unsure_part(run, &opt.name);
         }
@@ -219,10 +198,7 @@ impl Level {
 
 /// Takes an option's value: attached, or the next word.
 pub(super) fn take_value(
-    opt: &Opt,
-    attached: Option<String>,
-    rest: &[Word],
-    run: &mut Run,
+    opt: &Opt, attached: Option<String>, rest: &[Word], run: &mut Run,
 ) -> usize {
     match (attached, rest.first()) {
         (Some(v), _) => {
@@ -243,10 +219,7 @@ pub(super) fn take_value(
 
 /// Under doubt, the flag word may be another option's value: given reads Unknown.
 pub(super) fn set_flag(opt: &Opt, run: &mut Run) -> usize {
-    let part = run
-        .parts
-        .entry(opt.name.clone())
-        .or_insert(TriVal::Bool(false));
+    let part = run.parts.entry(opt.name.clone()).or_insert(TriVal::Bool(false));
     *part = match (run.doubt, &part) {
         (false, _) | (true, TriVal::Bool(true)) => TriVal::Bool(true),
         (true, _) => TriVal::Unknown,
@@ -256,11 +229,7 @@ pub(super) fn set_flag(opt: &Opt, run: &mut Run) -> usize {
 
 /// Under doubt, the value may not be one: the list may hold more than it shows.
 pub(super) fn push_value(run: &mut Run, name: &str, word: Word) {
-    if let Some(TriVal::List {
-        elements,
-        exhaustive,
-    }) = run.parts.get_mut(name)
-    {
+    if let Some(TriVal::List { elements, exhaustive }) = run.parts.get_mut(name) {
         if run.doubt {
             *exhaustive = false;
         } else {

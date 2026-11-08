@@ -8,21 +8,14 @@
 /// `system`, `getline`, `|` (pipes and `||` alike), `>` (redirects and
 /// comparisons alike) or `@` (gawk's `@include`, `@load` and indirect calls).
 pub fn awk_is_plain(program: &str) -> bool {
-    !["system", "getline", "|", ">", "@"]
-        .iter()
-        .any(|s| program.contains(s))
+    !["system", "getline", "|", ">", "@"].iter().any(|s| program.contains(s))
 }
 
 /// True when a GNU sed script holds only commands that touch no file and
 /// run nothing: no `e`, `r`, `R`, `w`, `W`, no `s///e` or `s///w`, and
 /// nothing this reader does not know.
 pub fn sed_is_plain(script: &str) -> bool {
-    Sed {
-        chars: script.chars().collect(),
-        at: 0,
-    }
-    .plain()
-    .is_some()
+    Sed { chars: script.chars().collect(), at: 0 }.plain().is_some()
 }
 
 // --- sed ---

@@ -1,0 +1,4 @@
+# The same settings as the system-wide ~/.config/rustfmt/rustfmt.toml, kept
+# here so every checkout formats alike: rustfmt reads this file instead.
+use_small_heuristics = "Max"
+fn_params_layout = "Compressed"
